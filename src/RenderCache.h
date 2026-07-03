@@ -19,6 +19,14 @@ constexpr int RENDER_DELAY_FAILED = std::numeric_limits<int>::max() - 2;
 // (chained), so they don't flood the render queue
 constexpr int kMaxPredictiveRequests = 4;
 
+// Performance counters for GPU vs GDI compositing latency.
+// Accumulated across all PaintTile calls. Reset on each application launch.
+// Exposed in sumlog.txt at exit so the benchmark script can parse them.
+extern LONG gGpuCompositeCount;
+extern i64  gGpuCompositeUs;   // total microseconds in GPU (D2D) compositing
+extern LONG gGdiCompositeCount;
+extern i64  gGdiCompositeUs;   // total microseconds in GDI (BitBlt/StretchBlt) compositing
+
 struct PageInfo;
 struct Pixmap;
 

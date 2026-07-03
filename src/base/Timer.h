@@ -17,3 +17,20 @@ inline double TimeSinceInMs(LARGE_INTEGER start) {
     double timeInSecs = (double)(t.QuadPart - start.QuadPart) / (double)freq.QuadPart;
     return timeInSecs * 1000.0;
 }
+
+// Microsecond-precision wrappers for measuring short operations (tile compositing).
+// Returns microseconds as a 64-bit integer (not double).
+inline i64 TimeGetUs() {
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    return t.QuadPart;
+}
+
+inline i64 TimeSinceInUs(i64 start) {
+    i64 now = TimeGetUs();
+    LARGE_INTEGER freq;
+    QueryPerformanceFrequency(&freq);
+    if (freq.QuadPart == 0) return 0;
+    // convert QPC ticks to microseconds
+    return (now - start) * 1000000 / freq.QuadPart;
+}

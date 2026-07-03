@@ -25,6 +25,12 @@
 
 #pragma warning(disable : 28159) // silence /analyze: Consider using 'GetTickCount64' instead of 'GetTickCount'
 
+// Performance counters for GPU vs GDI compositing latency, defined in RenderCache.h
+LONG gGpuCompositeCount = 0;
+i64 gGpuCompositeUs = 0;
+LONG gGdiCompositeCount = 0;
+i64 gGdiCompositeUs = 0;
+
 // CONSERVE_MEMORY sets the compile-time default for gConserveMemory. When defined,
 // cached page bitmaps for non-visible pages are freed aggressively. Undefining it
 // keeps more pages resident (higher GDI memory use, fewer re-renders).
@@ -979,12 +985,15 @@ int RenderCache::PaintTile(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, T
                 }
             }
             if (d2dBmp) {
+                auto t0 = TimeGetUs();
                 rt->BeginDraw();
-                D2D1_RECT_F dst = D2D1::RectF((float)bounds.x, (float)bounds.y,
-                                                (float)(bounds.x + bounds.dx),
-                                                (float)(bounds.y + bounds.dy));
+                D2D1_RECT_F dst = D2D1::RectF((float)bounds.x, (float)bounds.y, (float)(bounds.x + bounds.dx),
+                                              (float)(bounds.y + bounds.dy));
                 rt->DrawBitmap(d2dBmp, dst, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
                 rt->EndDraw();
+                auto elapsed = TimeSinceInUs(t0);
+                InterlockedIncrement(&gGpuCompositeCount);
+                InterlockedExchangeAdd64(&gGpuCompositeUs, elapsed);
 
                 if (gShowTileLayout) {
                     HPEN pen = CreatePen(PS_SOLID, 1, RGB(0xff, 0x00, 0x00));
@@ -1011,6 +1020,7 @@ int RenderCache::PaintTile(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, T
         int ySrc = -std::min(tileOnScreen.y, 0);
         float factor = std::min(1.0f * bmpSize.dx / tileOnScreen.dx, 1.0f * bmpSize.dy / tileOnScreen.dy);
 
+        auto t0 = TimeGetUs();
         HGDIOBJ prevBmp = SelectObject(bmpDC, hbmp);
         int xDst = bounds.x;
         int yDst = bounds.y;
@@ -1028,6 +1038,9 @@ int RenderCache::PaintTile(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, T
 
         SelectObject(bmpDC, prevBmp);
         DeleteDC(bmpDC);
+        auto elapsed = TimeSinceInUs(t0);
+        InterlockedIncrement(&gGdiCompositeCount);
+        InterlockedExchangeAdd64(&gGdiCompositeUs, elapsed);
 
         if (gShowTileLayout) {
             HPEN pen = CreatePen(PS_SOLID, 1, RGB(0xff, 0xff, 0x00));

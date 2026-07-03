@@ -1,31 +1,32 @@
 import { join } from "node:path";
-import { detectVisualStudio2026, runLogged } from "./util";
+import { detectVisualStudio, runLogged } from "./util";
 import { clearDirPreserveSettings } from "./clean";
 
 let clean = false;
 
-let t = `/t:SumatraPDF`;
-t = `/t:SumatraPDF-dll`;
+// Override with env var: CONFIG=Release bun cmd/build.ts, PLATFORM=Win32 etc.
+const config = process.env["CONFIG"] ?? "Debug";
+const platform = process.env["PLATFORM"] ?? "x64";
+// Target: SumatraPDF-dll is the primary; also SumatraPDF for static build.
+const target = process.env["TARGET"] ?? "SumatraPDF-dll";
 
 async function main() {
   const timeStart = performance.now();
 
-  console.log("debug build");
+  console.log(`${config} build (${platform}) for target: ${target}`);
   if (clean) {
-    const dirs = [join("out", "dbg64")];
+    const outDir = join("out", `dbg${platform === "Win32" ? "32" : "64"}`);
+    const dirs = [outDir];
     for (const dir of dirs) {
       clearDirPreserveSettings(dir);
     }
   }
 
-  const { msbuildPath } = detectVisualStudio2026();
+  const { msbuildPath } = detectVisualStudio();
   const sln = String.raw`vs2022\SumatraPDF.sln`;
-  // const t = `/t:SumatraPDF;test_util`;
-  const p = `/p:Configuration=Debug;Platform=x64`;
+  const t = `/t:${target}`;
+  const p = `/p:Configuration=${config};Platform=${platform}`;
   await runLogged(msbuildPath, [sln, t, p, `/m`]);
-
-  // const outDir = join("out", "dbg64");
-  // await runLogged(resolve(join(outDir, "test_util.exe")), [], outDir);
 
   const elapsed = ((performance.now() - timeStart) / 1000).toFixed(1);
   console.log(`build took ${elapsed}s`);

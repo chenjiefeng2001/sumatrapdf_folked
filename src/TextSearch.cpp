@@ -4,6 +4,8 @@
 #include "base/Base.h"
 #include "base/Win.h"
 
+#include "SearchSimd.h"
+
 #include "wingui/UIModels.h"
 
 #include "DocController.h"
@@ -260,10 +262,67 @@ static bool MatchSearchUnit(Str h, int hLen, int hIdx, int hByteIdx, Str n, int 
     return false;
 }
 
+static bool StartsWithAtByte(Str text, int byteIdx, Str prefix) {
+    return text && prefix && byteIdx >= 0 && byteIdx + prefix.len <= text.len &&
+           memcmp(text.s + byteIdx, prefix.s, prefix.len) == 0;
+}
+
+// Fast paths using SIMD (SSE4.2 PCMPESTRI). Falls through to the full Unicode
+// fold-case / ß-equivalence logic when SIMD doesn't apply (multi-byte characters).
+
+static int StrStr(Str haystack, int haystackLen, int startOff, Str needle, int needleLen) {
+    if (!haystack || str::IsEmpty(needle)) {
+        return -1;
+    }
+    // Try SIMD fast path for ASCII-compatible strings (both needle and anchor
+    // are ASCII in the common case, e.g. "hello", "12345", etc.)
+    bool allAscii = true;
+    for (int i = 0; i < needleLen && i < 16; i++) {
+        if ((u8)needle.s[i] > 127) {
+            allAscii = false;
+            break;
+        }
+    }
+    if (allAscii) {
+        int res = StrStrSIMD(haystack, haystackLen, startOff, needle, needleLen);
+        if (res >= 0) return res;
+    }
+    // scalar fallback
+    int byteIdx = Utf8CodepointToByteIndex(haystack, startOff);
+    for (int i = startOff; i <= haystackLen - needleLen; i++) {
+        if (StartsWithAtByte(haystack, byteIdx, needle)) {
+            return i;
+        }
+        Utf8CodepointNext(haystack, byteIdx);
+    }
+    return -1;
+}
+
 static int StrStrFoldCase(Str haystack, int haystackLen, int startOff, Str needle, int needleLen) {
     if (!haystack || !needle) {
         return startOff;
     }
+    // SIMD fast path: if both strings are ASCII, use the lightweight fold-case finder
+    bool allAscii = true;
+    for (int i = 0; i < haystackLen && i < 64; i++) {
+        if ((u8)haystack.s[i] > 127) {
+            allAscii = false;
+            break;
+        }
+    }
+    if (allAscii) {
+        for (int i = 0; i < needleLen && i < 16; i++) {
+            if ((u8)needle.s[i] > 127) {
+                allAscii = false;
+                break;
+            }
+        }
+    }
+    if (allAscii) {
+        int res = StrStrFoldCaseSIMD(haystack, haystackLen, startOff, needle, needleLen);
+        if (res >= 0) return res;
+    }
+    // full Unicode fold-case fallback
     int byteIdx = Utf8CodepointToByteIndex(haystack, startOff);
     for (int i = startOff; i < haystackLen; i++) {
         int hIdx = i;
@@ -295,11 +354,6 @@ static int StrStrFoldCase(Str haystack, int haystackLen, int startOff, Str needl
     return -1;
 }
 
-static bool StartsWithAtByte(Str text, int byteIdx, Str prefix) {
-    return text && prefix && byteIdx >= 0 && byteIdx + prefix.len <= text.len &&
-           memcmp(text.s + byteIdx, prefix.s, prefix.len) == 0;
-}
-
 static int StrRStr(Str text, int textLen, int endOff, Str needle, int needleLen) {
     if (!text || !needle || endOff <= 0 || endOff > textLen) {
         return -1;
@@ -307,6 +361,19 @@ static int StrRStr(Str text, int textLen, int endOff, Str needle, int needleLen)
     if (needleLen <= 0 || needleLen > endOff) {
         return -1;
     }
+    // SIMD fast path for ASCII
+    bool allAscii = true;
+    for (int i = 0; i < needleLen && i < 16; i++) {
+        if ((u8)needle.s[i] > 127) {
+            allAscii = false;
+            break;
+        }
+    }
+    if (allAscii) {
+        int res = StrRStrSIMD(text, textLen, endOff, needle, needleLen);
+        if (res >= 0) return res;
+    }
+    // scalar fallback
     int result = -1;
     int byteIdx = 0;
     for (int i = 0; i <= endOff - needleLen; i++) {
@@ -322,6 +389,27 @@ static int StrRStrFoldCase(Str text, int textLen, int endOff, Str needle, int ne
     if (!text || !needle || endOff <= 0 || endOff > textLen) {
         return -1;
     }
+    // SIMD fast path for ASCII
+    bool allAscii = true;
+    for (int i = 0; i < textLen && i < 64; i++) {
+        if ((u8)text.s[i] > 127) {
+            allAscii = false;
+            break;
+        }
+    }
+    if (allAscii) {
+        for (int i = 0; i < needleLen && i < 16; i++) {
+            if ((u8)needle.s[i] > 127) {
+                allAscii = false;
+                break;
+            }
+        }
+    }
+    if (allAscii) {
+        int res = StrRStrFoldCaseSIMD(text, textLen, endOff, needle, needleLen);
+        if (res >= 0) return res;
+    }
+    // full Unicode fold-case fallback
     // ß <-> ss makes the matched length variable, so scan forward within
     // [start, end) and remember the last start position that matches.
     int result = -1;
@@ -494,20 +582,6 @@ TextSearch::PageAndOffset TextSearch::MatchEnd(int startOff) const {
     }
 
     return {currentPage, endIdx};
-}
-
-static int StrStr(Str haystack, int haystackLen, int startOff, Str needle, int needleLen) {
-    if (!haystack || str::IsEmpty(needle)) {
-        return -1;
-    }
-    int byteIdx = Utf8CodepointToByteIndex(haystack, startOff);
-    for (int i = startOff; i <= haystackLen - needleLen; i++) {
-        if (StartsWithAtByte(haystack, byteIdx, needle)) {
-            return i;
-        }
-        Utf8CodepointNext(haystack, byteIdx);
-    }
-    return -1;
 }
 
 static int GetNextIndex(int textLen, int offset, bool forward) {

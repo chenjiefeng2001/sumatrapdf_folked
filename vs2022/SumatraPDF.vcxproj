@@ -1123,6 +1123,7 @@
     <ClInclude Include="..\src\FormFields.h" />
     <ClInclude Include="..\src\FzImgReader.h" />
     <ClInclude Include="..\src\GlobalPrefs.h" />
+    <ClInclude Include="..\src\GpuBackend.h" />
     <ClInclude Include="..\src\GrokBuild.h" />
     <ClInclude Include="..\src\GumboHelpers.h" />
     <ClInclude Include="..\src\GumboHtmlParser.h" />
@@ -1272,6 +1273,7 @@
     <ClCompile Include="..\src\FormFields.cpp" />
     <ClCompile Include="..\src\FzImgReader.cpp" />
     <ClCompile Include="..\src\GlobalPrefs.cpp" />
+    <ClCompile Include="..\src\GpuBackend.cpp" />
     <ClCompile Include="..\src\GrokBuild.cpp" />
     <ClCompile Include="..\src\GumboHelpers.cpp" />
     <ClCompile Include="..\src\GumboHtmlParser.cpp" />

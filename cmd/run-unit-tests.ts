@@ -1,6 +1,6 @@
 import { copyFileSync, existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { detectVisualStudio2026, runLogged } from "./util";
+import { detectVisualStudio, runLogged } from "./util";
 
 const asanDllName = "clang_rt.asan_dynamic-x86_64.dll";
 
@@ -96,7 +96,7 @@ async function runAndCapture(exe: string, cwd: string, logPath: string): Promise
 async function main() {
   const kind = parseArgs();
   const { config, platform, outDir, logName } = configFor(kind);
-  const { msbuildPath, vsRoot } = detectVisualStudio2026();
+  const { msbuildPath, vsRoot } = detectVisualStudio();
 
   await runLogged(join("bin", "premake5.exe"), ["vs2022"]);
   await runLogged(msbuildPath, [

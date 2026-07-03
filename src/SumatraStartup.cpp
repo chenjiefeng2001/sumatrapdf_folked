@@ -20,6 +20,10 @@
 #include "wingui/UIModels.h"
 #include "wingui/Layout.h"
 #include "wingui/WinGui.h"
+#include "wingui/FrameRateWnd.h"
+#ifdef _MSC_VER
+#include "GpuBackend.h"
+#endif
 
 #include "Settings.h"
 #include "DisplayMode.h"
@@ -2106,6 +2110,19 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE, _In_ LPST
 
     gRenderCache = new RenderCache();
 
+#ifdef _MSC_VER
+    // Initialize GPU compositing backend (Direct2D). If it fails (no GPU driver,
+    // remote desktop, etc.) all rendering falls back to GDI — this is expected
+    // and safe. Log the outcome so crash reports / logs show whether GPU was
+    // available.
+    gGpuBackend = GpuBackend::Create();
+    if (gGpuBackend) {
+        logf("GpuBackend: D2D1 GPU compositing enabled\n");
+    } else {
+        logf("GpuBackend: D2D1 not available, using GDI fallback\n");
+    }
+#endif
+
     // TODO: for reasons I don't understand, this must be called before LoadSettings()
     if (UseDarkModeLib()) {
         DarkMode::initDarkMode();
@@ -2420,6 +2437,15 @@ Exit:
     HandleRedirectedConsoleOnShutdown();
     DeleteManualBrowserWindow();
 
+    // Log GPU vs GDI compositing performance counters accumulated during this session.
+    // Only meaningful when at least one tile was painted (gGdiCompositeCount > 0).
+    if (gGdiCompositeCount > 0) {
+        i64 gpuAvgUs = gGpuCompositeCount > 0 ? gGpuCompositeUs / gGpuCompositeCount : 0;
+        i64 gdiAvgUs = gGdiCompositeUs / gGdiCompositeCount;
+        logf("CompositeStats: GPU tiles=%ld totalUs=%lld avgUs=%lld | GDI tiles=%ld totalUs=%lld avgUs=%lld\n",
+             (long)gGpuCompositeCount, (long long)gGpuCompositeUs, (long long)gpuAvgUs, (long)gGdiCompositeCount,
+             (long long)gGdiCompositeUs, (long long)gdiAvgUs);
+    }
     LogArenaStats("temp allocator", GetTempArena());
     LogArenaStats("perm arena", gPermArena);
 
@@ -2489,6 +2515,8 @@ Exit:
     FreeAcceleratorTables();
 
     FileWatcherWaitForShutdown();
+    delete gGpuBackend;
+    gGpuBackend = nullptr;
     delete gRenderCache;
     SaveCallstackLogs();
     dbghelp::FreeCallstackLogs();

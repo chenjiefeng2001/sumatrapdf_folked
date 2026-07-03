@@ -50,8 +50,16 @@ static bool WndListRemove(Wnd* w) {
 }
 
 static void WndListAdd(Wnd* w) {
-    bool report = WndListRemove(w);
-    ReportIfFast(report);
+    // Guard against double-registration: the same Wnd* may arrive via
+    // WM_NCCREATE (custom window class) and/or Subclass() (standard controls).
+    // Skip silently if already in the list instead of removing+re-adding.
+    if (gWndList.Contains(w)) {
+        return;
+    }
+    // Also guard against a stale entry with the same HWND (e.g. a recycled
+    // HWND after DestroyWindow). Remove it to keep the list consistent.
+    bool removed = WndListRemove(w);
+    ReportIfFast(removed);
     gWndList.Append(w);
 }
 

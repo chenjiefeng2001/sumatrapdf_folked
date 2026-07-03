@@ -617,11 +617,130 @@ static fz_stream* FzReadMaybeFixPDF(fz_context* ctx, Str path) {
     return stm;
 }
 
+// --- Memory-mapped file I/O for large documents ---
+//
+// For files above kMaxMemoryFileSize, instead of loading the entire content
+// into memory (FzReadFileIfSmall) or using MuPDF's FILE* buffered I/O
+// (fz_open_file_w), we use CreateFileMapping + MapViewOfFile. This allows
+// the OS to manage paging on demand: only the portions of the file that
+// MuPDF actually accesses (XREF table, page objects, streams) are faulted
+// into physical memory. For large PDFs (>100 MB) this eliminates the
+// initial read of the entire file and keeps memory usage proportional to
+// the number of pages actually rendered, not the file size.
+
+struct mmap_filter {
+    HANDLE hFile;
+    HANDLE hMapping;
+    u8* base;
+    i64 fileSize;
+};
+
+extern "C" int next_mmap(fz_context* ctx, fz_stream* stm, size_t max) {
+    auto* state = (mmap_filter*)stm->state;
+    u8* end = state->base + state->fileSize;
+    if (stm->rp >= end) {
+        return EOF;
+    }
+    stm->wp = end;
+    stm->pos = state->fileSize;
+    return *stm->rp++;
+}
+
+extern "C" void seek_mmap(fz_context* ctx, fz_stream* stm, i64 offset, int whence) {
+    auto* state = (mmap_filter*)stm->state;
+    i64 newPos = 0;
+    switch (whence) {
+        case 0:
+            newPos = offset;
+            break;
+        case 1:
+            newPos = (stm->rp - state->base) + offset;
+            break;
+        case 2:
+            newPos = state->fileSize + offset;
+            break;
+    }
+    if (newPos < 0) {
+        newPos = 0;
+    }
+    if (newPos > state->fileSize) {
+        newPos = state->fileSize;
+    }
+    stm->rp = state->base + newPos;
+    stm->wp = state->base + state->fileSize;
+    stm->pos = state->fileSize;
+}
+
+extern "C" void drop_mmap(fz_context* ctx, void* state_) {
+    auto* state = (mmap_filter*)state_;
+    if (state->base) {
+        UnmapViewOfFile(state->base);
+    }
+    if (state->hMapping) {
+        CloseHandle(state->hMapping);
+    }
+    if (state->hFile != INVALID_HANDLE_VALUE) {
+        CloseHandle(state->hFile);
+    }
+    fz_free(ctx, state);
+}
+
+static fz_stream* FzOpenMemoryMappedFile(fz_context* ctx, Str path) {
+    i64 fileSize = file::GetSize(path);
+    if (fileSize <= 0) {
+        return nullptr;
+    }
+    if (fileSize <= kMaxMemoryFileSize) {
+        return nullptr;
+    }
+
+    WCHAR* pathW = CWStrTemp(path);
+    HANDLE hFile = CreateFileW(pathW, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                               FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        return nullptr;
+    }
+
+    HANDLE hMapping = CreateFileMappingW(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
+    if (!hMapping) {
+        CloseHandle(hFile);
+        return nullptr;
+    }
+
+    u8* base = (u8*)MapViewOfFile(hMapping, FILE_MAP_READ, 0, 0, 0);
+    if (!base) {
+        CloseHandle(hMapping);
+        CloseHandle(hFile);
+        return nullptr;
+    }
+
+    auto* state = fz_malloc_struct(ctx, mmap_filter);
+    state->hFile = hFile;
+    state->hMapping = hMapping;
+    state->base = base;
+    state->fileSize = fileSize;
+
+    fz_stream* stm = fz_new_stream(ctx, state, next_mmap, drop_mmap);
+    stm->seek = seek_mmap;
+    stm->rp = base;
+    stm->wp = base + fileSize;
+    stm->pos = 0;
+
+    return stm;
+}
+
 static fz_stream* FzOpenOrReadFile(fz_context* ctx, Str path) {
     fz_stream* stm = FzReadFileIfSmall(ctx, path);
     if (stm) {
         return stm;
     }
+
+    // Try memory-mapped I/O for larger files
+    stm = FzOpenMemoryMappedFile(ctx, path);
+    if (stm) {
+        return stm;
+    }
+
     WCHAR* pathW = CWStrTemp(path);
     fz_try(ctx) {
         stm = fz_open_file_w(ctx, pathW);

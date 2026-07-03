@@ -19,6 +19,10 @@
 
 #include "base/Log.h"
 
+#ifdef _MSC_VER
+#include "GpuBackend.h"
+#endif
+
 #pragma warning(disable : 28159) // silence /analyze: Consider using 'GetTickCount64' instead of 'GetTickCount'
 
 // CONSERVE_MEMORY sets the compile-time default for gConserveMemory. When defined,
@@ -957,6 +961,48 @@ int RenderCache::PaintTile(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, T
         }
         return renderDelay;
     }
+
+#ifdef _MSC_VER
+    // GPU compositing path: use Direct2D DrawBitmap when available.
+    // Falls back to GDI if GPU init fails or texture upload fails.
+    if (gGpuBackend && gGpuBackend->isAvailable && hbmp && renderedBmp) {
+        ID2D1DCRenderTarget* rt = gGpuBackend->GetRenderTarget(hdc);
+        if (rt) {
+            // Create or reuse a cached D2D bitmap for this pixmap.
+            ID2D1Bitmap* d2dBmp = nullptr;
+            if (renderedBmp->d2dBitmap) {
+                d2dBmp = renderedBmp->d2dBitmap;
+            } else {
+                d2dBmp = gGpuBackend->CreateBitmapFromPixmap(renderedBmp);
+                if (d2dBmp) {
+                    renderedBmp->d2dBitmap = d2dBmp;
+                }
+            }
+            if (d2dBmp) {
+                rt->BeginDraw();
+                D2D1_RECT_F dst = D2D1::RectF((float)bounds.x, (float)bounds.y,
+                                                (float)(bounds.x + bounds.dx),
+                                                (float)(bounds.y + bounds.dy));
+                rt->DrawBitmap(d2dBmp, dst, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                rt->EndDraw();
+
+                if (gShowTileLayout) {
+                    HPEN pen = CreatePen(PS_SOLID, 1, RGB(0xff, 0x00, 0x00));
+                    HGDIOBJ oldPen = SelectObject(hdc, pen);
+                    DrawRect(hdc, bounds);
+                    SelectObject(hdc, oldPen);
+                    DeleteObject(pen);
+                }
+
+                if (entry->outOfDate) {
+                    if (renderOutOfDateCue) *renderOutOfDateCue = true;
+                }
+                DropCacheEntry(entry);
+                return 0;
+            }
+        }
+    }
+#endif
 
     HDC bmpDC = CreateCompatibleDC(hdc);
     if (bmpDC) {

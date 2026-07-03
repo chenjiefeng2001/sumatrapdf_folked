@@ -65,7 +65,6 @@ struct ToolbarButtonInfo {
 // is by a command. those are just background for area to be
 // covered by other HWNDs. They need the right size
 constexpr int PageInfoId = (int)CmdLast + 16;
-constexpr int WarningMsgId = (int)CmdLast + 17;
 
 static ToolbarButtonInfo gToolbarButtons[] = {
     {TbIcon::Open, CmdOpenFile, _TRN("Open")},
@@ -95,9 +94,8 @@ constexpr int kButtonsCount = dimof(gToolbarButtons);
 // 128 should be more than enough
 // we use static array so that we don't have to generate
 // code for Vec<ToolbarButtonInfo>
-constexpr int kMaxCustomButtons = 127;
-// +1 to ensure there's always space for WarningsMsgId button
-static ToolbarButtonInfo gCustomButtons[kMaxCustomButtons + 1];
+constexpr int kMaxCustomButtons = 128;
+static ToolbarButtonInfo gCustomButtons[kMaxCustomButtons];
 int gCustomButtonsCount = 0;
 
 static bool SkipBuiltInButton(const ToolbarButtonInfo& tbi) {
@@ -369,6 +367,10 @@ static void SetToolbarButtonImageByIdx(HWND hwnd, int idx, TbIcon icon) {
     TBBUTTONINFOW bi{};
     bi.cbSize = sizeof(bi);
     bi.dwMask = TBIF_BYINDEX | TBIF_IMAGE;
+    SendMessageW(hwnd, TB_GETBUTTONINFOW, idx, (LPARAM)&bi);
+    if (bi.iImage == (int)icon) {
+        return; // no change, skip repaint
+    }
     bi.iImage = (int)icon;
     SendMessageW(hwnd, TB_SETBUTTONINFOW, idx, (LPARAM)&bi);
 }
@@ -384,6 +386,10 @@ static void SetToolbarButtonToolTipByIdx(HWND hwnd, int idx, int cmdId, Str s) {
     TBBUTTONINFOW bi{};
     bi.cbSize = sizeof(bi);
     bi.dwMask = TBIF_BYINDEX | TBIF_TEXT;
+    SendMessageW(hwnd, TB_GETBUTTONINFOW, idx, (LPARAM)&bi);
+    if (wstr::Eq(bi.pszText, CWStrTemp(s))) {
+        return; // no change, skip repaint
+    }
     bi.pszText = CWStrTemp(s);
     SendMessageW(hwnd, TB_SETBUTTONINFOW, idx, (LPARAM)&bi);
 }
@@ -396,7 +402,7 @@ void ToolbarUpdateStateForWindow(MainWindow* win, bool setButtonsVisibility) {
     for (int i = 0; i < n; i++) {
         auto& tb = GetToolbarButtonInfoByIdx(i);
         int cmdId = tb.cmdId;
-        if (setButtonsVisibility && cmdId != WarningMsgId) {
+        if (setButtonsVisibility) {
             bool hide = !IsCmdAvailable(win, cmdId);
             UpdateToolbarButtonStateByIdx(hwnd, i, hide, TBSTATE_HIDDEN);
         }
@@ -435,18 +441,16 @@ void ToolbarUpdateStateForWindow(MainWindow* win, bool setButtonsVisibility) {
             if (tab && tab->AsFixed()) {
                 dirty = EngineHasUnsavedAnnotations(tab->AsFixed()->GetEngine());
             }
-            // update tooltip before SetTabDirty (which rebuilds tooltips via LayoutTabs)
             TabInfo* ti = win->tabsCtrl->GetTab(i);
             if (ti && tab && tab->filePath) {
                 Str path = tab->filePath;
-                if (dirty) {
-                    TempStr tooltip = str::JoinTemp(path, StrL(" "), _TRA("(unsaved annotations)"));
-                    str::ReplaceWithCopy(&ti->tooltip, tooltip);
-                } else {
-                    str::ReplaceWithCopy(&ti->tooltip, path);
+                TempStr newTooltip = dirty ? str::JoinTemp(path, StrL(" "), _TRA("(unsaved annotations)")) : path;
+                // only update tooltip when it actually changed to avoid spurious layout
+                if (!str::Eq(ti->tooltip, newTooltip)) {
+                    str::ReplaceWithCopy(&ti->tooltip, newTooltip);
+                    win->tabsCtrl->SetTabDirty(i, dirty);
                 }
             }
-            win->tabsCtrl->SetTabDirty(i, dirty);
         }
     }
 }

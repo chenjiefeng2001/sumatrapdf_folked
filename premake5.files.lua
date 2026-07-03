@@ -843,6 +843,7 @@ function sumatrapdf_files()
     "FindBar.*",
     "FindWindow.*",
     "FormFields.*",
+    "GpuBackend.*",
     "FzImgReader.*",
     "GlobalPrefs.*",
     "HomePage.*",

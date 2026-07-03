@@ -46,6 +46,13 @@ struct Pixmap {
     HBITMAP hbmp = nullptr;
     HANDLE hMap = nullptr; // optional file mapping backing hbmp
 #endif
+
+    // Optional GPU texture (Direct2D bitmap), owned by the Pixmap. Freed in
+    // FreePixmapNativeBitmap. Only populated when GpuBackend is active.
+    // Guarded by _MSC_VER since D2D types aren't available on mingw.
+#ifdef _MSC_VER
+    struct ID2D1Bitmap* d2dBitmap = nullptr;
+#endif
 };
 
 #if defined(_WIN32)

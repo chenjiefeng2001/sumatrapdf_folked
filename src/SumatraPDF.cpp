@@ -21,6 +21,8 @@
 #include "wingui/UIModels.h"
 #include "wingui/Layout.h"
 #include "wingui/WinGui.h"
+
+#include "PointerInput.h"
 #include "wingui/WebView.h"
 
 #include "wingui/LabelWithCloseWnd.h"
@@ -2039,6 +2041,8 @@ static MainWindow* CreateMainWindow() {
     // WM_NCCALCSIZE returning 0 disables DWM rounded corners; re-enable them.
     if (!IsRunningOnWine()) {
         dwm::SetWindowRoundedCorners(hwndFrame, true);
+        // Apply Mica backdrop on Windows 11 22H2+
+        dwm::SetWindowMica(hwndFrame, true);
     }
 
     ReportIf(nullptr != FindMainWindowByHwnd(hwndFrame));
@@ -5451,32 +5455,36 @@ static void ChangeZoomLevel(MainWindow* win, float newZoom, bool pagesContinuous
     if (!win->IsDocLoaded()) {
         return;
     }
+    WindowTab* tab = win->CurrentTab();
+    if (!tab) {
+        return;
+    }
 
     float zoom = win->ctrl->GetZoomVirtual();
     DisplayMode mode = win->ctrl->GetDisplayMode();
     DisplayMode newMode = pagesContinuously ? DisplayMode::Continuous : DisplayMode::SinglePage;
 
     if (mode != newMode || zoom != newZoom) {
-        float prevZoom = win->CurrentTab()->prevZoomVirtual;
-        DisplayMode prevMode = win->CurrentTab()->prevDisplayMode;
+        float prevZoom = tab->prevZoomVirtual;
+        DisplayMode prevMode = tab->prevDisplayMode;
 
         if (mode != newMode) {
             SwitchToDisplayMode(win, newMode);
         }
-        OnMenuZoom(win, CmdIdFromVirtualZoom(newZoom));
+        SmartZoom(win, newZoom, nullptr, true);
 
         // remember the previous values for when the toolbar button is unchecked
         if (kInvalidZoom == prevZoom) {
-            win->CurrentTab()->prevZoomVirtual = zoom;
-            win->CurrentTab()->prevDisplayMode = mode;
+            tab->prevZoomVirtual = zoom;
+            tab->prevDisplayMode = mode;
         } else {
-            // keep the rememberd values when toggling between the two toolbar buttons
-            win->CurrentTab()->prevZoomVirtual = prevZoom;
-            win->CurrentTab()->prevDisplayMode = prevMode;
+            // keep the remembered values when toggling between the two toolbar buttons
+            tab->prevZoomVirtual = prevZoom;
+            tab->prevDisplayMode = prevMode;
         }
-    } else if (win->CurrentTab()->prevZoomVirtual != kInvalidZoom) {
-        float prevZoom = win->CurrentTab()->prevZoomVirtual;
-        SwitchToDisplayMode(win, win->CurrentTab()->prevDisplayMode);
+    } else if (tab->prevZoomVirtual != kInvalidZoom) {
+        float prevZoom = tab->prevZoomVirtual;
+        SwitchToDisplayMode(win, tab->prevDisplayMode);
         SmartZoom(win, prevZoom, nullptr, true);
     }
 }

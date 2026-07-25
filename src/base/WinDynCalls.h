@@ -173,6 +173,52 @@ void SetWindowRoundedCorners(HWND hwnd, bool rounded);
 
 }; // namespace dwm
 
+// DWM system backdrop type for Mica (Windows 11 22H2+)
+// Provided by the SDK >= 10.0.20348.0 via DWM_SYSTEMBACKDROP_TYPE.
+// On VS2022 these constants are already in <dwmapi.h>.
+// (No typedef needed — use the values directly as int or DWORD.)
+
+// DWMWindowAttributes for Mica and rounded corners
+#ifndef DWMWA_SYSTEMBACKDROP_TYPE
+#define DWMWA_SYSTEMBACKDROP_TYPE 38
+#endif
+#ifndef DWMWA_BORDER_COLOR
+#define DWMWA_BORDER_COLOR 34
+#endif
+#ifndef DWMWA_CAPTION_COLOR
+#define DWMWA_CAPTION_COLOR 35
+#endif
+#ifndef DWMWA_TEXT_COLOR
+#define DWMWA_TEXT_COLOR 36
+#endif
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+#endif
+#ifndef DWMWA_WINDOW_CORNER_PREFERENCE
+#define DWMWA_WINDOW_CORNER_PREFERENCE 33
+#endif
+
+// DWM_WINDOW_CORNER_PREFERENCE values
+#ifndef DWMWCP_DEFAULT
+#define DWMWCP_DEFAULT 0
+#endif
+#ifndef DWMWCP_DONOTROUND
+#define DWMWCP_DONOTROUND 1
+#endif
+#ifndef DWMWCP_ROUND
+#define DWMWCP_ROUND 2
+#endif
+#ifndef DWMWCP_ROUNDSMALL
+#define DWMWCP_ROUNDSMALL 3
+#endif
+
+namespace dwm {
+
+// Apply Mica backdrop (Windows 11 22H2+). No-op on older systems.
+void SetWindowMica(HWND hwnd, bool useMica);
+
+}; // namespace dwm
+
 // Touch Gesture API, only available in Windows 7
 namespace touch {
 

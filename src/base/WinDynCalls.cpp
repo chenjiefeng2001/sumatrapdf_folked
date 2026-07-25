@@ -210,6 +210,14 @@ void SetWindowRoundedCorners(HWND hwnd, bool rounded) {
     SetWindowBorderColor(hwnd, borderColor);
 }
 
+void SetWindowMica(HWND hwnd, bool useMica) {
+    auto backdropType = useMica ? DWMSBT_MAINWINDOW : DWMSBT_NONE;
+    HRESULT hr = SetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdropType, sizeof(backdropType));
+    if (FAILED(hr)) {
+        // Mica not supported (pre-Win11 22H2); silently ignore
+    }
+}
+
 }; // namespace dwm
 
 static const char* dllsToPreload =

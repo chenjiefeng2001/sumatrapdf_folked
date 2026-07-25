@@ -18,3 +18,5 @@ void RevokeCanvasDropTarget(HWND hwndCanvas);
 constexpr UINT_PTR kSmoothScrollTimerID = 6;
 // Timer for smooth middle-click auto-scroll (issue #2693)
 constexpr UINT_PTR kAutoScrollTimerID = 7;
+// Timer for inertial scrolling (friction-based)
+constexpr UINT_PTR kInertiaScrollTimerID = 12;

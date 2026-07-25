@@ -1218,12 +1218,15 @@ cd ../out/rel64_prefast_asan &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libm
     <ClInclude Include="..\src\uia\Provider.h" />
     <ClInclude Include="..\src\uia\StartPageProvider.h" />
     <ClInclude Include="..\src\uia\TextRange.h" />
+    <ClInclude Include="..\src\wingui\Animation.h" />
     <ClInclude Include="..\src\wingui\ChmDocView.h" />
+    <ClInclude Include="..\src\wingui\DWriteText.h" />
     <ClInclude Include="..\src\wingui\DialogSizer.h" />
     <ClInclude Include="..\src\wingui\FrameRateWnd.h" />
     <ClInclude Include="..\src\wingui\HtmlWindow.h" />
     <ClInclude Include="..\src\wingui\LabelWithCloseWnd.h" />
     <ClInclude Include="..\src\wingui\Layout.h" />
+    <ClInclude Include="..\src\wingui\Renderer.h" />
     <ClInclude Include="..\src\wingui\UIModels.h" />
     <ClInclude Include="..\src\wingui\VirtWnd.h" />
     <ClInclude Include="..\src\wingui\WebView.h" />
@@ -1622,9 +1625,11 @@ cd ../out/rel64_prefast_asan &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libm
     <ClCompile Include="..\src\uia\Provider.cpp" />
     <ClCompile Include="..\src\uia\StartPageProvider.cpp" />
     <ClCompile Include="..\src\uia\TextRange.cpp" />
+    <ClCompile Include="..\src\wingui\Animation.cpp" />
     <ClCompile Include="..\src\wingui\Button.cpp" />
     <ClCompile Include="..\src\wingui\Checkbox.cpp" />
     <ClCompile Include="..\src\wingui\ChmDocView.cpp" />
+    <ClCompile Include="..\src\wingui\DWriteText.cpp" />
     <ClCompile Include="..\src\wingui\DialogSizer.cpp" />
     <ClCompile Include="..\src\wingui\DropDown.cpp" />
     <ClCompile Include="..\src\wingui\Edit.cpp" />

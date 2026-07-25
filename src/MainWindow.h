@@ -19,6 +19,18 @@ struct TocTree;
 struct FindBarWnd;
 struct FindWindowWnd;
 
+// UI modernization forward declarations
+struct InertiaScrollState;
+struct OverscrollState;
+struct PointerVelocityTracker;
+struct ThumbnailPanel;
+struct AnimationManager;
+struct DocController;
+struct DisplayModel;
+struct ChmModel;
+struct TabState;
+struct FileState;
+
 // one search match with a text snippet around it, for the floating results list
 struct FindMatch {
     int startPage = 0;
@@ -409,6 +421,28 @@ struct MainWindow {
     StressTest* stressTest = nullptr;
 
     TouchState touchState;
+
+    // --- UI Modernization additions ---
+
+    // Phase 3: Interaction (heap-allocated to avoid definition dependency)
+    struct InertiaScrollState* inertiaScroll = nullptr;
+    struct OverscrollState* overscroll = nullptr;
+    struct PointerVelocityTracker* pointerVelocity = nullptr;
+
+    // Phase 4: Visual - custom non-client area with rounded corners
+    bool borderless = false;             // true when using custom titlebar
+    int captionButtonsHeight = 0;        // height of caption buttons area
+    ButtonInfo captionBtns[CB_BTN_COUNT];
+
+    // Thumbnail sidebar panel (Phase 4)
+    struct ThumbnailPanel* thumbPanel = nullptr;
+
+    // Animation framework (Phase 1)
+    struct AnimationManager* animMgr = nullptr;
+
+    // Damage-tracking for incremental repaint (Phase 5)
+    RECT dirtyRect{};
+    bool hasDirtyRect = false;
 
     FrameRateWnd* frameRateWnd = nullptr;
 

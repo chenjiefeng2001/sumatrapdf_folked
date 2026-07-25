@@ -1,0 +1,35 @@
+/* Copyright 2024 the SumatraPDF project authors (see AUTHORS file).
+   License: Simplified BSD (see COPYING.BSD) */
+
+// DirectWrite text rendering wrapper. Provides ClearType text rendering with
+// modern typographic features (ligatures, variable fonts, emoji fallback) as an
+// alternative to GDI's ExtTextOut.
+
+struct IDWriteFactory;
+struct IDWriteTextFormat;
+struct IDWriteTextLayout;
+struct ID2D1RenderTarget;
+
+// A pre-built DirectWrite text format object cached by font/weight/style.
+// Create via DWriteTextCache::GetFormat() and reuse across paint cycles.
+struct DWriteTextFormat {
+    IDWriteTextFormat* format = nullptr;
+
+    // Format is owned by DWriteTextCache; do not Release().
+};
+
+// Layout-and-render helper: creates an IDWriteTextLayout from a format + string,
+// measures it, and draws it onto an ID2D1RenderTarget.
+struct DWriteTextRenderer {
+    // Create a text layout from the cached format.
+    static IDWriteTextLayout* CreateLayout(DWriteTextFormat* fmt, Str text, float maxWidth, float maxHeight);
+
+    // Draw the layout onto a D2D render target at (x, y).
+    static void DrawLayout(ID2D1RenderTarget* rt, IDWriteTextLayout* layout, float x, float y, COLORREF color);
+
+    // Measure the layout's actual size (may be less than max).
+    static void MeasureLayout(IDWriteTextLayout* layout, /*out*/ float* w, /*out*/ float* h);
+};
+
+// Global DirectWrite factory access (lazily initialized by D2DRenderer).
+extern IDWriteFactory* gDWriteFactory;

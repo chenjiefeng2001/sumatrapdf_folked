@@ -24,6 +24,7 @@
 #ifdef _MSC_VER
 #include "GpuBackend.h"
 #endif
+#include "PointerInput.h"
 
 #include "Settings.h"
 #include "DisplayMode.h"
@@ -2122,6 +2123,10 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE, _In_ LPST
         logf("GpuBackend: D2D1 not available, using GDI fallback\n");
     }
 #endif
+
+    // Enable WM_POINTER high-precision input on Windows 8+ (precision touchpads,
+    // touch, pen). Falls back silently to legacy WM_MOUSEWHEEL on older systems.
+    EnablePointerInput();
 
     // TODO: for reasons I don't understand, this must be called before LoadSettings()
     if (UseDarkModeLib()) {

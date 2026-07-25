@@ -15,6 +15,12 @@
 #include "wingui/LabelWithCloseWnd.h"
 #include "wingui/FrameRateWnd.h"
 
+#include "wingui/Animation.h"
+#include "PointerInput.h"
+#include "InertiaScrolling.h"
+#include "OverscrollEffect.h"
+#include "ThumbnailPanel.h"
+
 #include "Settings.h"
 #include "DocController.h"
 #include "EngineBase.h"
@@ -88,6 +94,11 @@ MainWindow::MainWindow(HWND hwnd) {
     hwndFrame = hwnd;
     linkHandler = new LinkHandler(this);
     cbHandler = CreateControllerCallbackHandler(this);
+    animMgr = new AnimationManager(hwndFrame);
+    inertiaScroll = new InertiaScrollState();
+    overscroll = new OverscrollState();
+    pointerVelocity = new PointerVelocityTracker();
+    pointerVelocity->Init();
 }
 
 static WORD dotPatternBmp[8] = {0x00aa, 0x0055, 0x00aa, 0x0055, 0x00aa, 0x0055, 0x00aa, 0x0055};
@@ -105,6 +116,11 @@ void CreateMovePatternLazy(MainWindow* win) {
 MainWindow::~MainWindow() {
     KillTimer(hwndCanvas, kSmoothScrollTimerID);
     RefHoverDestroy(refHover);
+    delete animMgr;
+    delete thumbPanel;
+    delete inertiaScroll;
+    delete overscroll;
+    delete pointerVelocity;
     FinishStressTest(this);
 
     ReportIf(TabCount() > 0);

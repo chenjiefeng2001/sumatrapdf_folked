@@ -19,6 +19,11 @@
 #include "wingui/Layout.h"
 #include "wingui/WinGui.h"
 
+#include "wingui/Animation.h"
+#include "InertiaScrolling.h"
+#include "PointerInput.h"
+#include "OverscrollEffect.h"
+
 #include "wingui/FrameRateWnd.h"
 
 #include "Settings.h"
@@ -2838,7 +2843,12 @@ static LRESULT OnGesture(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp) {
 #define WM_POINTERUPDATE 0x0245
 #endif
 
+#ifndef WM_POINTERWHEEL
+#define WM_POINTERWHEEL 0x024E
+#endif
+
 // POINTER_INPUT_TYPE values
+#define SUMATRA_PT_TOUCH 2
 #define SUMATRA_PT_PEN 3
 
 // pointer message flags (in HIWORD of wParam)
@@ -2875,10 +2885,6 @@ static bool OnPointerMessage(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LP
     if (!DynGetPointerType(pointerId, &pointerType)) {
         return false;
     }
-    // only handle pen input; let mouse and touch go through normal paths
-    if (pointerType != SUMATRA_PT_PEN) {
-        return false;
-    }
 
     // WM_POINTER* lp contains screen coordinates
     POINT pt;
@@ -2892,22 +2898,73 @@ static bool OnPointerMessage(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LP
     WORD flags = HIWORD(wp);
     WPARAM mouseWp = 0;
 
-    if (msg == WM_POINTERDOWN) {
-        mouseWp = MK_LBUTTON;
-        OnMouseLeftButtonDown(win, x, y, mouseWp);
-        return true;
-    }
-    if (msg == WM_POINTERUPDATE) {
-        bool inContact = (flags & SUMATRA_POINTER_MESSAGE_FLAG_INCONTACT) != 0;
-        if (inContact) {
-            mouseWp = MK_LBUTTON;
+    // Handle touch + pen: track velocity for inertial scrolling.
+    // Touch input uses WM_POINTER* for panning with inertia.
+    // Pen input also uses this path (when not in mouse-emulation mode).
+    if (pointerType == SUMATRA_PT_TOUCH || pointerType == SUMATRA_PT_PEN) {
+        DisplayModel* dm = win->AsFixed();
+        if (!dm) {
+            // Without a DisplayModel, fall through to mouse emulation for pen
+            goto penEmulation;
         }
-        OnMouseMove(win, x, y, mouseWp);
-        return true;
+
+        if (msg == WM_POINTERDOWN) {
+            win->inertiaScroll->Stop();
+            win->pointerVelocity->Init();
+            return true;
+        }
+
+        if (msg == WM_POINTERUPDATE) {
+            bool inContact = (flags & SUMATRA_POINTER_MESSAGE_FLAG_INCONTACT) != 0;
+            if (!inContact) {
+                double vx, vy;
+                win->pointerVelocity->GetVelocity(&vx, &vy);
+                win->inertiaScroll->Start(win, vx, vy);
+                return true;
+            }
+
+            LARGE_INTEGER now;
+            QueryPerformanceCounter(&now);
+            win->pointerVelocity->AddSample(x, y, now);
+
+            static double lastPanX = 0, lastPanY = 0;
+            if (win->pointerVelocity->lastTime.QuadPart != 0) {
+                double dx = x - lastPanX;
+                double dy = y - lastPanY;
+                if (fabs(dx) >= 0.5 || fabs(dy) >= 0.5) {
+                    win->MoveDocBy((int)round(dx), (int)round(dy));
+                }
+            }
+            lastPanX = (double)x;
+            lastPanY = (double)y;
+            return true;
+        }
+
+        if (msg == WM_POINTERUP) {
+            double vx, vy;
+            win->pointerVelocity->GetVelocity(&vx, &vy);
+            win->inertiaScroll->Start(win, vx, vy);
+            return true;
+        }
+        return false;
     }
-    if (msg == WM_POINTERUP) {
-        OnMouseLeftButtonUp(win, x, y, mouseWp);
-        return true;
+
+    // Mouse-emulation for pen (when no DisplayModel is available)
+penEmulation:
+    if (pointerType == SUMATRA_PT_PEN) {
+        if (msg == WM_POINTERDOWN) {
+            OnMouseLeftButtonDown(win, x, y, MK_LBUTTON);
+            return true;
+        }
+        if (msg == WM_POINTERUPDATE) {
+            bool inContact = (flags & SUMATRA_POINTER_MESSAGE_FLAG_INCONTACT) != 0;
+            OnMouseMove(win, x, y, inContact ? MK_LBUTTON : 0);
+            return true;
+        }
+        if (msg == WM_POINTERUP) {
+            OnMouseLeftButtonUp(win, x, y, 0);
+            return true;
+        }
     }
     return false;
 }
@@ -2989,6 +3046,16 @@ static LRESULT WndProcCanvasFixedPageUI(MainWindow* win, HWND hwnd, UINT msg, WP
 
         case WM_MOUSEWHEEL:
             return CanvasOnMouseWheel(win, msg, wp, lp);
+
+        // WM_POINTERWHEEL from precision touchpads (Win8+): sub-pixel deltas
+        case WM_POINTERWHEEL: {
+            // e.g., from a precision touchpad: POINT pt; pt.x = GET_X_LPARAM(lp); pt.y = GET_Y_LPARAM(lp);
+            // ScreenToClient(hwnd, &pt);
+            // Extract the wheel delta from HIWORD(wp) analogous to WM_MOUSEWHEEL
+            // Then use win->MoveDocBy or win->AsFixed()->ScrollYTo with sub-pixel accumulation
+            WPARAM mouseWp = MAKEWPARAM(MK_CONTROL, 0);
+            return CanvasOnMouseWheel(win, msg, mouseWp, lp);
+        }
 
         case WM_MOUSEHWHEEL:
             return CanvasOnMouseHWheel(win, msg, wp, lp);
@@ -3216,6 +3283,24 @@ static void OnTimer(MainWindow* win, HWND hwnd, WPARAM timerId) {
         case kRefHoverHideTimerID:
             RefHoverOnCanvasTimer(win->refHover, hwnd, win->AsFixed(), timerId);
             break;
+
+        case kInertiaScrollTimerID:
+            if (!win->inertiaScroll->Tick()) {
+                // Inertia stopped — kill timer
+                KillTimer(hwnd, kInertiaScrollTimerID);
+            }
+            break;
+
+        case AnimationManager::kAnimTimerID: {
+            if (win->animMgr) {
+                int stillActive = win->animMgr->Tick();
+                if (stillActive > 0) {
+                    // Schedule repaint to reflect animated values
+                    ScheduleRepaint(win, 0);
+                }
+            }
+            break;
+        }
 
         case HIDE_FWDSRCHMARK_TIMER_ID:
             win->fwdSearchMark.hideStep++;

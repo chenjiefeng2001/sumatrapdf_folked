@@ -417,7 +417,7 @@ static HBITMAP CaptureWindowBmp(HWND hwnd, int* outW, int* outH) {
     hbmFull = TrimBlackBorders(hbmFull, &fullW, &fullH);
 
     // fix black corners from DWM rounded windows
-    DWM_WINDOW_CORNER_PREFERENCE cornerPref = DWMWCP_DEFAULT;
+    int cornerPref = DWMWCP_DEFAULT;
     dwm::GetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &cornerPref, sizeof(cornerPref));
     if (cornerPref == DWMWCP_DEFAULT || cornerPref == DWMWCP_ROUND || cornerPref == DWMWCP_ROUNDSMALL) {
         COLORREF bgColor = GetSysColor(COLOR_WINDOW);

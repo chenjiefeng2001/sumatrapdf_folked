@@ -2,6 +2,10 @@
    License: Simplified BSD (see COPYING.BSD) */
 
 // port of https://gitlab.com/stone.code/goey
+// Arena-based memory pool: all ILayout allocations go through gPermArena,
+// eliminating per-node new/delete overhead and improving cache locality.
+
+#include "base/Arena.h"
 
 const int Inf = std::numeric_limits<int>::max();
 
@@ -65,6 +69,17 @@ struct ILayout {
     virtual int MinIntrinsicWidth(int height) = 0;
     virtual Size Layout(Constraints bc) = 0;
     virtual void SetBounds(Rect) = 0;
+
+    // Arena-backed allocation: all ILayout subclasses allocate from
+    // gPermArena, avoiding per-node heap fragmentation and improving
+    // L1/L2 cache locality. No per-node free is needed — the arena
+    // is destroyed at process exit (or reset at a coarser granularity).
+    void* operator new(size_t size) { return AllocZero(GetPermArena(), size); }
+    void operator delete(void* p) {
+        // No-op: arena-managed memory is freed as a whole.
+        // Individual delete calls on layout nodes are harmless
+        // but unnecessary.
+    }
 };
 
 bool IsCollapsed(ILayout*);

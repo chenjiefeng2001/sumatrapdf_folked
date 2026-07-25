@@ -1905,6 +1905,15 @@ void DoubleBuffer::Flush(HDC hdc) const {
     }
 }
 
+void DoubleBuffer::Flush(HDC hdc, Rect clip) const {
+    ReportIf(hdc == hdcBuffer);
+    if (!hdcBuffer) return;
+    // Intersect the requested clip with the buffer rect so we never read outside
+    clip = clip.Intersect(rect);
+    if (clip.IsEmpty()) return;
+    BitBlt(hdc, clip.x, clip.y, clip.dx, clip.dy, hdcBuffer, clip.x - rect.x, clip.y - rect.y, SRCCOPY);
+}
+
 DeferWinPosHelper::DeferWinPosHelper() : hdwp(::BeginDeferWindowPos(32)) {}
 
 DeferWinPosHelper::~DeferWinPosHelper() {

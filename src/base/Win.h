@@ -228,6 +228,9 @@ struct DoubleBuffer {
 
     HDC GetDC() const;
     void Flush(HDC hdc) const;
+    // Optimized flush: only copy the given clip rectangle from the buffer.
+    // Avoids full-screen BitBlt on low-end hardware.
+    void Flush(HDC hdc, Rect clip) const;
 };
 
 class DeferWinPosHelper {

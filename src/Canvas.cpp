@@ -2178,7 +2178,9 @@ static void OnPaintDocument(MainWindow* win) {
         default:
             bool shouldPaint = DrawDocument(win, win->buffer->GetDC(), &ps.rcPaint);
             if (!gNoFlickerRender || shouldPaint) {
-                win->buffer->Flush(hdc);
+                // Use dirty-rect clipped Blt to avoid full-screen copy on low-end HW
+                Rect dirty(ps.rcPaint);
+                win->buffer->Flush(hdc, dirty);
             }
     }
 

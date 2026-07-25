@@ -240,6 +240,20 @@ bool CommandPaletteWnd::PreTranslateMessage(MSG& msg) {
     if (msg.message == WM_KEYDOWN) {
         int dir = 0;
         if (msg.wParam == VK_ESCAPE) {
+            // Esc-twice-to-close: if query is non-empty, clear it first.
+            // If query is already empty (or was cleared by a previous Esc), close.
+            Str query = CommandPaletteSkipWS(Str(editQuery->GetTextTemp()));
+            if (len(query) > 0) {
+                // First Esc: clear the query. Reset to default prefix mode.
+                editQuery->SetText(_TRA(""));
+                // Reset to "everything" search after clearing
+                queryWasEmptyOnLastEsc = false;
+                // The SetText triggers QueryChanged which will repopulate the list.
+                // Give focus back to the edit control so user can type a new query.
+                HwndSetFocus(editQuery->hwnd);
+                return true;
+            }
+            // Second Esc (or first Esc when query was already empty): close
             ScheduleDeleteAndExecCommand();
             return true;
         }
@@ -287,6 +301,38 @@ bool CommandPaletteWnd::PreTranslateMessage(MSG& msg) {
             dir = -1;
         } else if (msg.wParam == VK_DOWN) {
             dir = 1;
+        } else if (msg.wParam == VK_HOME) {
+            // Jump to the first item in the list
+            int n = listBox->GetCount();
+            if (n > 0) {
+                CommandPaletteSetCurrentSelection(this, 0);
+            }
+            return true;
+        } else if (msg.wParam == VK_END) {
+            // Jump to the last item in the list
+            int n = listBox->GetCount();
+            if (n > 0) {
+                CommandPaletteSetCurrentSelection(this, n - 1);
+            }
+            return true;
+        } else if (msg.wParam == VK_PRIOR) {
+            // Page Up: move up by half the visible items
+            int n = listBox->GetCount();
+            int pageSize = listBox->idealSizeLines / 2;
+            int currSel = listBox->GetCurrentSelection();
+            int sel = currSel - pageSize;
+            if (sel < 0) sel = 0;
+            CommandPaletteSetCurrentSelection(this, sel);
+            return true;
+        } else if (msg.wParam == VK_NEXT) {
+            // Page Down: move down by half the visible items
+            int n = listBox->GetCount();
+            int pageSize = listBox->idealSizeLines / 2;
+            int currSel = listBox->GetCurrentSelection();
+            int sel = currSel + pageSize;
+            if (sel >= n) sel = n - 1;
+            CommandPaletteSetCurrentSelection(this, sel);
+            return true;
         }
 
         if (msg.wParam == VK_TAB) {

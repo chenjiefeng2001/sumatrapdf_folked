@@ -4,6 +4,7 @@
 #include "base/Base.h"
 #include "base/Win.h"
 #include "wingui/Animation.h"
+#include "HardwareProfile.h"
 
 static float ApplyEasing(Easing easing, float t) {
     switch (easing) {
@@ -30,6 +31,16 @@ void AnimProp::Animate(float* val, float toVal, int durMs, Easing ease) {
     elapsedMs = 0;
     active = true;
     target = val;
+    // Low-end hardware fast-path: skip animation, snap to target immediately.
+    if (!AnimationsEnabled()) {
+        elapsedMs = durationMs; // mark as complete
+        current = to;
+        active = false;
+        if (target) {
+            *target = current;
+        }
+        return;
+    }
 }
 
 AnimationManager::~AnimationManager() {

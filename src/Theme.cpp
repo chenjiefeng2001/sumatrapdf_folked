@@ -3,6 +3,7 @@ License: GPLv3 */
 
 #include "base/Base.h"
 
+#include "base/Hash.h"
 #include "Settings.h"
 #include "AppSettings.h"
 #include "Commands.h"
@@ -251,9 +252,10 @@ void SelectNextTheme() {
 
 // not case sensitive
 static int GetThemeByName(Str name) {
+    auto nameHash = HashStrI(name);
     for (int i = 0; i < gThemeCount; i++) {
         Theme* theme = gThemes->At(i);
-        if (str::EqI(theme->name, name)) {
+        if (HashStrI(theme->name) == nameHash && str::EqI(theme->name, name)) {
             return i;
         }
     }

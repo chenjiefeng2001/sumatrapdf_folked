@@ -67,6 +67,7 @@
 #include "RegistryPreview.h"
 #include "ExternalViewers.h"
 #include "Theme.h"
+#include "HardwareProfile.h"
 #include "DarkModeSubclass.h"
 #include "CommandPalette.h"
 #include "SumatraControl.h"
@@ -1815,6 +1816,7 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE, _In_ LPST
     supressThrowFromNew();
 
     InitDynCalls();
+    DetectHardware();
     NoDllHijacking();
 
     DisableDataExecution();

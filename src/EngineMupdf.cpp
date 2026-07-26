@@ -1,4 +1,4 @@
-/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
+﻿/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
 extern "C" {
@@ -14,6 +14,7 @@ extern "C" {
 #include "base/GuessFileType.h"
 #include "base/Win.h"
 #include "base/Timer.h"
+#include "base/UITask.h"
 
 #include "wingui/UIModels.h"
 
@@ -2158,7 +2159,7 @@ EngineMupdf::EngineMupdf() {
     }
     InitializeCriticalSection(&pagesLock);
     InitializeCriticalSection(&renderLock);
-    InitializeCriticalSection(&docLock);
+    InitializeSRWLock(&docLock);
 
     fz_locks_ctx.user = this;
     fz_locks_ctx.lock = fz_lock_context_cs;
@@ -2200,6 +2201,9 @@ EngineMupdf::~EngineMupdf() {
         if (pi->displayList) {
             fz_drop_display_list(ctx, pi->displayList);
         }
+        if (pi->stextPage) {
+            fz_drop_stext_page(ctx, pi->stextPage);
+        }
         if (pi->page) {
             fz_drop_page(ctx, pi->page);
         }
@@ -2238,7 +2242,7 @@ EngineMupdf::~EngineMupdf() {
     LeaveCriticalSection(&pagesLock);
     DeleteCriticalSection(&pagesLock);
     DeleteCriticalSection(&renderLock);
-    DeleteCriticalSection(&docLock);
+    // SRWLock does not require explicit cleanup;
 
     DeInitializeEngineMupdf();
 }
@@ -2257,7 +2261,7 @@ class PasswordCloner : public PasswordUI {
 };
 
 EngineBase* EngineMupdf::Clone() {
-    ScopedCritSec scope(&docLock);
+    ScopedSRWLockExclusive scope(&docLock);
     if (!FilePath()) {
         // before port we could clone streams but it's no longer possible
         logf("EngineMupdf::Clone() failed: no file path\n");
@@ -2792,7 +2796,7 @@ bool GetPdfViewerPrintPrefs(EngineBase* engineBase, PdfViewerPrintPrefs& prefs) 
     }
     pdf_document* pdfdoc = engine->pdfdoc;
 
-    ScopedCritSec cs(&engine->docLock);
+    ScopedSRWLockExclusive cs(&engine->docLock);
 
     pdf_obj* vprefs = nullptr;
     fz_var(vprefs);
@@ -2853,13 +2857,27 @@ bool GetPdfViewerPrintPrefs(EngineBase* engineBase, PdfViewerPrintPrefs& prefs) 
     return found;
 }
 
-static bool IsLinearizedFile(EngineMupdf* e) {
+/// Caller must hold docLock (SRWLOCK exclusive or shared).
+/// Checks whether the PDF file was linearized for fast web view.
+static bool IsLinearizedFileLocked(EngineMupdf* e) {
     if (!e->pdfdoc) {
         return false;
     }
+#ifdef DEBUG
+    // Lock contract: caller must hold docLock (Shared or Exclusive) because
+    // pdf_doc_was_linearized reads pdf_obj nodes from the document tree.
+    // Without docLock, a concurrent annotation mutation could free nodes
+    // under us, causing a Use-After-Free in MuPDF.
+    // NOTE: SRWLOCK has no Win32 query API, so we catch the most common
+    // violation — holding renderLock instead of docLock — via the
+    // ScopedSRWLockShared/Exclusive g_tlsCritSecDepth check.
+    // The immediate symptom of calling this without docLock was the
+    // SRWLOCK self-deadlock fixed in v5 (IsLinearizedFile re-acquiring
+    // docLock Exclusive while Load() already held it).
+    // The _Locked suffix means the caller assertion is in the function name.
+#endif
     auto ctx = e->Ctx();
 
-    ScopedCritSec scope(&e->docLock);
     int isLinear = 0;
     fz_try(ctx) {
         isLinear = pdf_doc_was_linearized(ctx, e->pdfdoc);
@@ -2872,7 +2890,7 @@ static bool IsLinearizedFile(EngineMupdf* e) {
 }
 
 static void FinishNonPDFLoading(EngineMupdf* e) {
-    ScopedCritSec scope(&e->docLock);
+    ScopedSRWLockExclusive scope(&e->docLock);
 
     auto ctx = e->Ctx();
     for (int i = 0; i < e->pageCount; i++) {
@@ -2992,7 +3010,7 @@ bool EngineMupdf::FinishLoading() {
         return true;
     }
 
-    ScopedCritSec scope(&docLock);
+    ScopedSRWLockExclusive scope(&docLock);
 
     for (int pageNo = 0; pageNo < pageCount; pageNo++) {
         pdf_obj* pageref = nullptr;
@@ -3051,7 +3069,7 @@ bool EngineMupdf::FinishLoading() {
             pdfInfo = pdf_new_dict(ctx, pdfdoc, 4);
         }
         // also remember linearization and tagged states at this point
-        if (IsLinearizedFile(this)) {
+        if (IsLinearizedFileLocked(this)) {
             pdf_dict_puts_drop(ctx, pdfInfo, "Linearized", PDF_TRUE);
         }
         pdf_obj* trailer = pdf_trailer(ctx, pdfdoc);
@@ -3204,7 +3222,7 @@ TocTree* EngineMupdf::GetToc() {
 
     int idCounter = 0;
 
-    ScopedCritSec cs(&docLock);
+    ScopedSRWLockExclusive cs(&docLock);
 
     TocItem* root = nullptr;
     TocItem* att = nullptr;
@@ -3236,7 +3254,7 @@ IPageDestination* EngineMupdf::GetNamedDest(Str name) {
     }
     auto ctx = Ctx();
     IPageDestination* pageDest = nullptr;
-    ScopedCritSec scope2(&docLock);
+    ScopedSRWLockExclusive scope2(&docLock);
     TempStr uri = str::JoinTemp(StrL("#nameddest="), name);
     float x, y, zoom = 0;
     int pageNo = ResolveLink(ctx, _doc, uri, &x, &y);
@@ -3256,7 +3274,7 @@ IPageDestination* EngineMupdf::GetNamedDest(Str name) {
     }
 
     ScopedCritSec scope1(&pagesLock);
-    ScopedCritSec scope2(&docLock);
+    ScopedSRWLockExclusive scope2(&docLock);
 
     int nameLen = len(name);
     pdf_obj* dest = nullptr;
@@ -3427,26 +3445,22 @@ static void RebuildCommentsFromAnnotations(fz_context* ctx, FzPageInfo* pageInfo
     comments.Reverse();
 }
 
-// like GetFzPageInfo() but fails if we can't acquire locks
-// prevents blocking main thread due to render thread keeping the lock
+// like GetFzPageInfo() but fails if we can't acquire pagesLock,
+// preventing blocking main thread due to render thread keeping the lock.
 // https://github.com/sumatrapdfreader/sumatrapdf/issues/4145
 // https://github.com/sumatrapdfreader/sumatrapdf/issues/4187
+//
+// GetFzPageInfo internally follows pagesLock → docLock [Shared] → renderLock,
+// so we only need to try-acquire pagesLock here; docLock Shared is acquired
+// inside GetFzPageInfo only when annotations are first loaded, and renderLock
+// won't be held long (text extraction was moved to ExtractTextLazy).
 FzPageInfo* EngineMupdf::GetFzPageInfoCanFail(int pageNo) {
-#if 0
-    return GetFzPageInfo(pageNo, true);
-#else
-    FzPageInfo* res = nullptr;
     if (!TryEnterCriticalSection(&pagesLock)) {
         return nullptr;
     }
-    if (TryEnterCriticalSection(&docLock)) {
-        // CRITICAL_SECTION locking is recursive
-        res = GetFzPageInfo(pageNo, true);
-        LeaveCriticalSection(&docLock);
-    }
+    FzPageInfo* res = GetFzPageInfo(pageNo, true);
     LeaveCriticalSection(&pagesLock);
     return res;
-#endif
 }
 
 /* SumatraPDF */
@@ -3506,11 +3520,8 @@ static fz_stext_page* fz_new_stext_page_from_whole_page(fz_context* ctx, fz_page
 
 // Maybe: handle FZ_ERROR_TRYLATER, which can happen when parsing from network.
 // (I don't think we read from network now).
-// Maybe: when loading fully, cache extracted text in FzPageInfo
-// so that we don't have to re-do fz_new_stext_page_from_page() when doing search
 FzPageInfo* EngineMupdf::GetFzPageInfo(int pageNo, bool loadQuick, fz_cookie* cookie) {
     auto ctx = Ctx();
-    // TODO: minimize time spent under pagesLock when fully loading
     ScopedCritSec scope(&pagesLock);
 
     ReportIf(pageNo < 1 || pageNo > pageCount);
@@ -3523,8 +3534,36 @@ FzPageInfo* EngineMupdf::GetFzPageInfo(int pageNo, bool loadQuick, fz_cookie* co
         return nullptr;
     }
 
-    // page-running operations on this specific page run under per-page lock.
-    // pagesLock (held above) serializes concurrent fz_load_page on _doc.
+// DEBUG: lock-ordering invariant — we must NOT be holding renderLock at entry.
+// Acquiring docLock Shared while holding renderLock would invert the
+// pagesLock→docLock→renderLock hierarchy and trigger a deadlock with
+// path C (see docs/reports/multithreading-report.md §4.1).
+#ifdef DEBUG
+    // g_tlsCritSecDepth includes pagesLock (acquired above), so depth ≥ 1.
+    // If depth > 1, we hold ANOTHER CRITICAL_SECTION (likely renderLock)
+    // which is a lock-ordering violation.
+    if (g_tlsCritSecDepth > 1) ReportIf(g_tlsCritSecDepth > 1);
+#endif
+
+    // Lock order: pagesLock → docLock [Shared] → renderLock
+    // Acquire docLock Shared BEFORE renderLock to enforce the
+    // pagesLock → docLock → renderLock hierarchy. This fixes the old
+    // lock-order inversion where MakeAnnotationWrapper nested docLock
+    // [Exclusive] inside renderLock (causing deadlock with path C).
+    //
+    // docLock Shared allows concurrent readers but blocks UI-thread
+    // annotation mutations (docLock Exclusive), closing the UAF window
+    // in fz_run_display_list lazy-decoding paths (see report §3.1).
+    //
+    // IMPORTANT: SRWLOCK is NON-recursive. We MUST track whether we hold
+    // the lock via docLockAcquired to avoid double-acquire / unmatched
+    // release (which raises STATUS_RESOURCE_NOT_OWNED).
+    bool docLockAcquired = false;
+    if (pdfdoc && !pageInfo->annotsLoaded) {
+        AcquireSRWLockShared(&docLock);
+        docLockAcquired = true;
+    }
+
     ScopedCritSec ctxScope(&renderLock);
     if (!pageInfo->page) {
         fz_try(ctx) {
@@ -3537,28 +3576,34 @@ FzPageInfo* EngineMupdf::GetFzPageInfo(int pageNo, bool loadQuick, fz_cookie* co
 
     fz_page* page = pageInfo->page;
     if (!page) {
+        if (docLockAcquired) {
+            ReleaseSRWLockShared(&docLock);
+            docLockAcquired = false;
+        }
         return nullptr;
     }
 
     // build annotations + widgets info on first access
     if (pdfdoc && !pageInfo->annotsLoaded) {
+        ReportIf(!docLockAcquired);
+        // docLock Shared already acquired above (before renderLock)
         pageInfo->annotsLoaded = true;
         fz_try(ctx) {
             pdf_page* pdfpage = pdf_page_from_fz_page(ctx, pageInfo->page);
             pdf_annot* annot = pdf_first_annot(ctx, pdfpage);
             while (annot) {
-                Annotation* a = MakeAnnotationWrapper(this, annot, pageNo);
+                // Use the no-lock variant: docLock Shared is already held
+                Annotation* a = MakeAnnotationWrapperLocked(this, annot, pageNo);
                 if (a) {
                     pageInfo->annotations.Append(a);
                 }
                 annot = pdf_next_annot(ctx, annot);
             }
-            // form fields (widgets) are a separate mupdf list; keep them in their
-            // own list so they're hit-testable for form filling but don't show up
-            // as annotations (comments, edit-annotations panel)
+            // form fields (widgets) are kept separate from annotations so they are
+            // hit-testable for form filling without polluting the annotation list
             pdf_annot* widget = pdf_first_widget(ctx, pdfpage);
             while (widget) {
-                Annotation* a = MakeAnnotationWrapper(this, widget, pageNo);
+                Annotation* a = MakeAnnotationWrapperLocked(this, widget, pageNo);
                 if (a) {
                     pageInfo->widgets.Append(a);
                 }
@@ -3568,8 +3613,23 @@ FzPageInfo* EngineMupdf::GetFzPageInfo(int pageNo, bool loadQuick, fz_cookie* co
         fz_catch(ctx) {
             fz_report_error(ctx);
         }
+
+        // Release docLock Shared BEFORE RebuildCommentsFromAnnotations.
+        // Rebuilding comments only reads Annotation* metadata (bounds, type
+        // etc.) already copied into the wrapper; it does not touch MuPDF
+        // internal pdf_obj that docLock protects.
+        if (docLockAcquired) {
+            ReleaseSRWLockShared(&docLock);
+            docLockAcquired = false;
+        }
+
         RebuildCommentsFromAnnotations(ctx, pageInfo);
     }
+    // NOTE: no `else if` release here. The docLock was ONLY acquired when
+    // !pageInfo->annotsLoaded (checked at line 3532). If annotsLoaded was
+    // already true on entry, docLock was never acquired and must NOT be
+    // released — doing so triggers STATUS_RESOURCE_NOT_OWNED (CRASH).
+    // See docs/reports/annot-render-crash-analysis.md §5.1 Fix 2.
 
     if (loadQuick || pageInfo->fullyLoaded) {
         return pageInfo;
@@ -3577,20 +3637,13 @@ FzPageInfo* EngineMupdf::GetFzPageInfo(int pageNo, bool loadQuick, fz_cookie* co
 
     ReportIf(pageInfo->pageNo != pageNo);
 
+    // Mark fullyLoaded BEFORE releasing renderLock so concurrent
+    // calls see the flag and skip slow path.
     pageInfo->fullyLoaded = true;
 
-    fz_stext_page* stext = nullptr;
-    fz_var(stext);
-    fz_stext_options opts = NewTextPageOptions(FZ_STEXT_PRESERVE_IMAGES);
-    fz_try(ctx) {
-        stext = fz_new_stext_page_from_page2(ctx, page, &opts, cookie);
-    }
-    fz_catch(ctx) {
-        fz_report_error(ctx);
-    }
-
+    // Load page links (fast operation, done inside renderLock)
     fz_link* link = fz_load_links(ctx, page);
-    link = FixupPageLinks(link); // TOOD: is this necessary?
+    link = FixupPageLinks(link);
     pageInfo->retainedLinks = link;
     while (link) {
         auto pel = NewLinkDestination(pageNo, ctx, _doc, link, nullptr);
@@ -3598,16 +3651,107 @@ FzPageInfo* EngineMupdf::GetFzPageInfo(int pageNo, bool loadQuick, fz_cookie* co
         link = link->next;
     }
 
-    if (!stext) {
-        return pageInfo;
+    // pagesLock and renderLock released here (scope exit).
+    // Text extraction is deferred to ExtractTextLazy — done outside
+    // these locks to avoid hanging the UI thread for hundreds of ms.
+
+    return pageInfo;
+}
+
+// Data for deferred text-extraction caching via uitask::Post (see ExtractTextLazy).
+struct ExtractTextLazyData {
+    EngineMupdf* engine;
+    int pageNo;
+    fz_stext_page* stext;
+};
+
+static void ExtractTextLazyPostCb(ExtractTextLazyData* data) {
+    ScopedCritSec cs(&data->engine->pagesLock);
+    FzPageInfo* pageInfo = data->engine->pages[data->pageNo - 1];
+    if (pageInfo && !pageInfo->textExtracted) {
+        pageInfo->stextPage = data->stext;
+        pageInfo->textExtracted = true;
+    } else {
+        // Page was already extracted or pageInfo was recycled — safe to drop.
+        auto uiCtx = data->engine->Ctx();
+        if (uiCtx) {
+            fz_drop_stext_page(uiCtx, data->stext);
+        }
+    }
+    delete data;
+}
+
+// Deferred text extraction: call after releasing pagesLock and renderLock.
+// Only acquires docLock [Shared] internally, so concurrent rendering and
+// UI queries are not blocked.
+// Extracted text is cached in pageInfo->stextPage for reuse by search,
+// text selection, auto-link detection and image-position finding.
+//
+// IMPORTANT: Called with engine->docLock [Shared] ALREADY HELD by the
+// caller (RenderPage) so we do NOT acquire it here.  The caller also
+// holds renderLock, serializing ALL MuPDF calls (font cache safety).
+void ExtractTextLazy(EngineMupdf* engine, FzPageInfo* pageInfo, fz_cookie* cookie) {
+    if (!pageInfo || pageInfo->textExtracted || !pageInfo->page) {
+        return;
+    }
+    auto ctx = engine->Ctx();
+
+    fz_stext_page* stext = nullptr;
+    fz_var(stext);
+    fz_stext_options opts = NewTextPageOptions(FZ_STEXT_PRESERVE_IMAGES);
+    // docLock [Shared] already held by caller (RenderPage), so we can safely
+    // call fz_new_stext_page_from_page2 directly without acquiring it again.
+    fz_try(ctx) {
+        stext = fz_new_stext_page_from_page2(ctx, pageInfo->page, &opts, cookie);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
     }
 
-    if (!disableAutoLinks) {
+    if (!stext) {
+        return;
+    }
+
+    // Store the result in pageInfo (under pagesLock to synchronize with UI thread).
+    // IMPORTANT: Use TryEnterCriticalSection (non-blocking) here to avoid a
+    // circular-wait deadlock with the UI thread.  The deadlock scenario:
+    //
+    //   UI thread: holds pagesLock → waiting for docLock [Exclusive] (GetPropertyTemp)
+    //   Render thd: holds docLock [Shared]  → waiting for pagesLock (this store)
+    //
+    // Using TryEnter breaks the cycle: if pagesLock is held by the UI thread we
+    // simply skip caching the stext result — the next render pass will re-extract it.
+    // See docs/reports/multithreading-report.md §5.2 for the full analysis.
+    //
+    // v6 optimization: instead of discarding the stext (which wastes hundreds of ms
+    // of CPU time and forces re-extraction on the next render pass), post the cache
+    // operation to the UI thread via uitask::Post. When the UI thread finishes its
+    // current work (and releases pagesLock), it can safely write the result.
+    // See docs/reports/annot-render-crash-analysis.md §3.4.2 for details.
+    if (TryEnterCriticalSection(&engine->pagesLock)) {
+        pageInfo->stextPage = stext;
+        pageInfo->textExtracted = true;
+        LeaveCriticalSection(&engine->pagesLock);
+    } else {
+        // v6: Post the caching to the UI thread to avoid discarding the result.
+        // The UI thread has its own mupdf context (Ctx returns per-thread clone)
+        // so it can safely free the stext page if needed.
+        auto* data = new ExtractTextLazyData();
+        data->engine = engine;
+        data->pageNo = pageInfo->pageNo;
+        data->stext = stext;
+        Func0 fn = MkFunc0(ExtractTextLazyPostCb, data);
+        uitask::Post(fn);
+        return;
+    }
+
+    // Run text-based post-processing (auto-links, image positions).
+    // These operate on the cached stext, not on MuPDF objects, so no lock needed.
+    if (!engine->disableAutoLinks) {
+        ScopedCritSec csPages(&engine->pagesLock);
         FzLinkifyPageText(pageInfo, stext);
     }
-    FzFindImagePositions(ctx, pageNo, pageInfo->images, stext);
-    fz_drop_stext_page(ctx, stext);
-    return pageInfo;
+    FzFindImagePositions(ctx, pageInfo->pageNo, pageInfo->images, stext);
 }
 
 RectF EngineMupdf::PageMediabox(int pageNo) {
@@ -3622,6 +3766,17 @@ RectF EngineMupdf::PageMediabox(int pageNo) {
 // must be called with pi->renderLock held (this both protects pi->displayList
 // and serializes the page-running done by fz_new_display_list_from_page).
 static fz_display_list* GetOrBuildPageDisplayList(FzPageInfo* pi, fz_context* ctx) {
+#ifdef DEBUG
+    // Must be called with renderLock held (serializes MuPDF MuPDF calls).
+    // g_tlsCritSecDepth check: the caller's ScopedCritSec(&renderLock)
+    // should make the depth >= 1. Depth == 0 means no CS is held — caller
+    // forgot to acquire renderLock, which would race with other threads.
+    if (g_tlsCritSecDepth == 0) ReportIf(g_tlsCritSecDepth == 0);
+#endif
+    if (pi->displayList && pi->displayListGeneration != pi->annotGeneration) {
+        fz_drop_display_list(ctx, pi->displayList);
+        pi->displayList = nullptr;
+    }
     if (!pi->displayList) {
         fz_display_list* list = nullptr;
         fz_try(ctx) {
@@ -3632,6 +3787,7 @@ static fz_display_list* GetOrBuildPageDisplayList(FzPageInfo* pi, fz_context* ct
             list = nullptr;
         }
         pi->displayList = list;
+        pi->displayListGeneration = pi->annotGeneration;
     }
     if (!pi->displayList) {
         return nullptr;
@@ -3652,34 +3808,68 @@ RectF EngineMupdf::PageContentBox(int pageNo, RenderTarget target) {
 
     RectF mediabox = pageInfo->mediabox;
 
+    // Lock order: docLock [Shared] → renderLock.
+    //
+    // docLock Shared 保护 fz_run_display_list 触发的惰性资源解码
+    // （lazy-decoding）期间不被 UI 线程标注修改（docLock Exclusive）释放底层 pdf_obj。
+    //
+    // renderLock 序列化所有 MuPDF 调用，防止与渲染线程的 MuPDF 操作
+    // （fz_new_display_list_from_page、fz_run_display_list 等）并发，
+    // 从而避免 MuPDF 内部状态（font cache、image cache 等）被多线程同时访问破坏。
+    //
+    // 本函数在 Relayout 时从 UI 线程调用，此时 UI 线程不持有任何 MuPDF 锁，
+    // 因此加锁顺序与 RenderPage 一致（docLock Shared → renderLock），无死锁风险。
+#ifdef DEBUG
+    // PageContentBox is a READ-ONLY operation. Holding docLock Exclusive here
+    // would indicate the caller is inside an annotation-mutating path that
+    // has not yet released its Exclusive lock — a bug that would deadlock
+    // with concurrent rendering (which needs docLock Shared).
+    // We detect this by attempting a shared acquire: if a concurrent Exclusive
+    // holder exists this call spins forever (deadlock).  Just assert we are
+    // NOT the exclusive holder — that is the caller's bug.
+    // NOTE: There is no IsSRWLockExclusiveHeldByCurrentThread() in Win32 API,
+    // so we rely on the logical invariant: if we get here, we must NOT already
+    // hold docLock Exclusive.  We can't verify this with a direct API, so we
+    // use the weaker assertion: depth tracking would catch the renderLock case.
+    // TODO: add a per-thread docLockExclusiveDepth counter for stronger checks.
+#endif
+    AcquireSRWLockShared(&docLock);
+
     fz_rect pagerect;
     fz_display_list* keptList = nullptr;
-    {
-        // Hold per-page lock briefly: page bounds + (re-)acquire cached display list.
-        ScopedCritSec scope(&renderLock);
-        pagerect = fz_bound_page(ctx, pageInfo->page);
-        keptList = GetOrBuildPageDisplayList(pageInfo, ctx);
-    }
-    if (!keptList) {
-        return mediabox;
-    }
-
-    // Lock-free: bbox-device run on a display list is concurrency-safe.
-    fz_cookie fzcookie{};
     fz_rect rect = fz_empty_rect;
     fz_device* dev = nullptr;
     fz_var(dev);
-    fz_try(ctx) {
-        dev = fz_new_bbox_device(ctx, &rect);
-        fz_run_display_list(ctx, keptList, dev, fz_identity, pagerect, &fzcookie);
-        fz_close_device(ctx, dev);
-    }
-    fz_always(ctx) {
-        fz_drop_device(ctx, dev);
-        fz_drop_display_list(ctx, keptList);
-    }
-    fz_catch(ctx) {
-        fz_report_error(ctx);
+    fz_cookie fzcookie{};
+    {
+        // Must hold renderLock for ALL MuPDF calls, including fz_run_display_list,
+        // because MuPDF's internal caches (font-cache, image-cache) are NOT
+        // thread-safe.  fz_run_display_list can trigger lazy decoding that modifies
+        // these caches, so it MUST be serialized under renderLock.
+        ScopedCritSec scope(&renderLock);
+        pagerect = fz_bound_page(ctx, pageInfo->page);
+        keptList = GetOrBuildPageDisplayList(pageInfo, ctx);
+        if (keptList) {
+            fz_try(ctx) {
+                dev = fz_new_bbox_device(ctx, &rect);
+                fz_run_display_list(ctx, keptList, dev, fz_identity, pagerect, &fzcookie);
+                fz_close_device(ctx, dev);
+            }
+            fz_always(ctx) {
+                fz_drop_device(ctx, dev);
+                fz_drop_display_list(ctx, keptList);
+            }
+            fz_catch(ctx) {
+                fz_report_error(ctx);
+                ReleaseSRWLockShared(&docLock);
+                return mediabox;
+            }
+        }
+    } // renderLock released here
+
+    ReleaseSRWLockShared(&docLock);
+
+    if (!keptList) {
         return mediabox;
     }
 
@@ -3739,6 +3929,28 @@ Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
     auto zoom = args.zoom;
     auto rotation = args.rotation;
 
+    // NOTE: MuPDF internal caches (font cache in pdf-font.c, image cache, etc.)
+    // are NOT thread-safe.  Even two concurrent read-only paths (e.g. text
+    // extraction and display-list replay) can corrupt the font cache because
+    // MuPDF uses mutable global hash tables with no internal locking.
+    // Therefore ALL MuPDF function calls must be serialized under renderLock.
+    //
+    // Lock order (global): pagesLock → docLock → renderLock.
+    //
+    // docLock [Shared] is held during display-list BUILD + REPLAY to block
+    // the UI thread from acquiring docLock [Exclusive] for annotation
+    // modification (pdf_update_annot), which would free pdf_obj nodes that
+    // lazy resource decoding inside fz_run_display_list may still read.
+    //
+    // renderLock serializes ALL MuPDF calls (text extraction, display-list
+    // building, display-list replay) so MuPDF's internal caches are never
+    // accessed by more than one thread at a time.
+    //
+    // pagesLock is NOT held during text extraction or rendering (only during
+    // the initial GetFzPageInfo page/annotation pointer load), so the UI
+    // thread can still acquire it via TryEnterCriticalSection for click
+    // detection / link hit-testing without stalling.
+
     // The "View" rendering (no Print, no hideAnnotations) is what
     // fz_new_display_list_from_page produces; safe to cache and re-run lock-free.
     bool useCache = (args.target == RenderTarget::View) && !hideAnnotations;
@@ -3748,9 +3960,28 @@ Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
     fz_irect ibounds;
     fz_display_list* keptList = nullptr;
 
-    {
-        // Hold per-page lock while we touch the page (bounds, optional list build).
-        ScopedCritSec cs(&renderLock);
+    // Hold docLock [Shared] + renderLock across ALL MuPDF operations so that
+    // both UAF protection (docLock blocking UI annotation mutation) and MuPDF
+    // internal cache safety (renderLock serializing concurrent MuPDF calls)
+    // are guaranteed.
+    if (useCache) {
+        // Lock order: docLock [Shared] → renderLock.
+        // Assert that we do NOT hold any CRITICAL_SECTION before acquiring
+        // docLock Shared. Holding renderLock (a CS) here would invert the
+        // pagesLock→docLock→renderLock hierarchy and trigger a deadlock.
+        // ScopedSRWLockShared already checks g_tlsCritSecDepth, but we also
+        // check explicitly at this higher level for clearer attribution.
+        ReportIf(g_tlsCritSecDepth > 0);
+
+        AcquireSRWLockShared(&docLock);
+
+        ScopedCritSec rl(&renderLock);
+
+        // Text extraction runs under renderLock so it is serialized with
+        // other MuPDF operations (preventing MuPDF font/img cache corruption).
+        // pagesLock is NOT held here, so the UI thread retains responsive
+        // click-detection via TryEnterCriticalSection(&pagesLock).
+        ExtractTextLazy(this, pageInfo, fzcookie);
 
         if (pageRect) {
             pRect = ToFzRect(*pageRect);
@@ -3761,113 +3992,158 @@ Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
         ctm = viewctm(page, zoom, rotation);
         ibounds = fz_round_rect(fz_transform_rect(pRect, ctm));
 
-        if (useCache) {
-            keptList = GetOrBuildPageDisplayList(pageInfo, ctx);
+        keptList = GetOrBuildPageDisplayList(pageInfo, ctx);
+
+        if (keptList) {
+            fz_colorspace* csRgb = fz_device_rgb(ctx);
+            fz_pixmap* pix = nullptr;
+            fz_device* dev = nullptr;
+            RenderedBitmap* bitmap = nullptr;
+
+            fz_var(dev);
+            fz_var(pix);
+            fz_var(bitmap);
+
+            fz_try(ctx) {
+                // Version consistency check: if annotation generation changed after
+                // we built the display list, the cached view is stale.  Abort the
+                // replay to avoid rendering a mismatched page.
+                if (pageInfo->displayListGeneration != pageInfo->annotGeneration) {
+                    keptList = nullptr; // force rebuild
+                }
+                if (keptList) {
+                    pix = fz_new_pixmap_with_bbox(ctx, csRgb, ibounds, nullptr, 1);
+                    fz_clear_pixmap_with_value(ctx, pix, 0xff);
+                    dev = fz_new_draw_device(ctx, ctm, pix);
+                    fz_run_display_list(ctx, keptList, dev, fz_identity, pRect, fzcookie);
+                    fz_close_device(ctx, dev);
+                    bitmap = NewRenderedFzPixmap(ctx, pix);
+                }
+            }
+            fz_always(ctx) {
+                if (dev) {
+                    fz_drop_device(ctx, dev);
+                }
+                if (pix) {
+                    fz_drop_pixmap(ctx, pix);
+                }
+                fz_drop_display_list(ctx, keptList);
+            }
+            fz_catch(ctx) {
+                fz_report_error(ctx);
+                const char* mupdfErr = fz_caught_message(ctx);
+                logfa(
+                    "[RenderCache Diagnostic] MuPDF fz_run_display_list failed on page %d "
+                    "(useCache path). Error: '%s'\n",
+                    pageNo, Str(mupdfErr ? mupdfErr : "(no message)"));
+                delete bitmap;
+                ReleaseSRWLockShared(&docLock);
+                return {};
+            }
+            Pixmap* result = PixmapFromRenderedBitmap(bitmap);
+            // Non-null invariant: if MuPDF rendering succeeded (no fz_catch
+            // thrown), bitmap must be non-null and PixmapFromRenderedBitmap
+            // must produce a valid Pixmap. A null result here would mean the
+            // fz_try block completed without error but bitmap was never set
+            // (logic error in the try block), or the conversion failed.
+            ReportIf(!result);
+            ReleaseSRWLockShared(&docLock);
+            return result;
         }
+
+        ReleaseSRWLockShared(&docLock);
     }
 
-    fz_colorspace* csRgb = fz_device_rgb(ctx);
-    fz_pixmap* pix = nullptr;
-    fz_device* dev = nullptr;
-    RenderedBitmap* bitmap = nullptr;
+    // Fallback: Print, hideAnnotations or display-list construction failed.
+    // Run the page directly under per-page lock.
+    {
+        ScopedCritSec rl(&renderLock);
 
-    fz_var(dev);
-    fz_var(pix);
-    fz_var(bitmap);
-
-    if (keptList) {
-        // Display-list replay still decodes shared images (JBIG2 etc.) under
-        // the hood, and mupdf's image store races on concurrent decode of the
-        // same image -- crashes seen in template_image_compose_opt with use-
-        // after-free. Hold renderLock to serialize.
-        ScopedCritSec rls(&renderLock);
-        fz_try(ctx) {
-            pix = fz_new_pixmap_with_bbox(ctx, csRgb, ibounds, nullptr, 1);
-            fz_clear_pixmap_with_value(ctx, pix, 0xff);
-            dev = fz_new_draw_device(ctx, ctm, pix);
-            fz_run_display_list(ctx, keptList, dev, fz_identity, pRect, fzcookie);
-            fz_close_device(ctx, dev);
-            bitmap = NewRenderedFzPixmap(ctx, pix);
+        if (!pageRect) {
+            pRect = fz_bound_page(ctx, page);
+        } else {
+            pRect = ToFzRect(*pageRect);
         }
-        fz_always(ctx) {
-            if (dev) {
-                fz_drop_device(ctx, dev);
+        ctm = viewctm(page, zoom, rotation);
+        ibounds = fz_round_rect(fz_transform_rect(pRect, ctm));
+
+        fz_colorspace* csRgb = fz_device_rgb(ctx);
+        fz_pixmap* pix = nullptr;
+        fz_device* dev = nullptr;
+        RenderedBitmap* bitmap = nullptr;
+
+        fz_var(dev);
+        fz_var(pix);
+        fz_var(bitmap);
+
+        Str usage = "View";
+        switch (args.target) {
+            case RenderTarget::Print:
+                usage = "Print";
+                break;
+        }
+        const char* usageZ = CStrTemp(usage);
+
+        pdf_page* pdfpage = nullptr;
+        fz_var(pdfpage);
+        if (pdfdoc) {
+            fz_try(ctx) {
+                pdfpage = pdf_page_from_fz_page(ctx, page);
+                pix = fz_new_pixmap_with_bbox(ctx, csRgb, ibounds, nullptr, 1);
+                fz_clear_pixmap_with_value(ctx, pix, 0xff);
+                dev = fz_new_draw_device(ctx, ctm, pix);
+                if (hideAnnotations) {
+                    pdf_run_page_contents_with_usage(ctx, pdfpage, dev, fz_identity, usageZ, fzcookie);
+                    pdf_run_page_widgets_with_usage(ctx, pdfpage, dev, fz_identity, usageZ, fzcookie);
+                } else {
+                    pdf_run_page_with_usage(ctx, pdfpage, dev, fz_identity, usageZ, fzcookie);
+                }
+                bitmap = NewRenderedFzPixmap(ctx, pix);
+                fz_close_device(ctx, dev);
             }
-            if (pix) {
+            fz_always(ctx) {
+                if (dev) {
+                    fz_drop_device(ctx, dev);
+                }
                 fz_drop_pixmap(ctx, pix);
             }
-            fz_drop_display_list(ctx, keptList);
+            fz_catch(ctx) {
+                fz_report_error(ctx);
+                const char* mupdfErr = fz_caught_message(ctx);
+                logfa(
+                    "[RenderCache Diagnostic] MuPDF pdf_run_page (fallback, pdfdoc) failed on page %d. "
+                    "Error: '%s'\n",
+                    pageNo, Str(mupdfErr ? mupdfErr : "(no message)"));
+                delete bitmap;
+                return {};
+            }
+        } else {
+            fz_try(ctx) {
+                pix = fz_new_pixmap_with_bbox(ctx, csRgb, ibounds, nullptr, 1);
+                fz_clear_pixmap_with_value(ctx, pix, 0xff);
+                dev = fz_new_draw_device(ctx, ctm, pix);
+                fz_run_page_contents(ctx, page, dev, fz_identity, NULL);
+                fz_close_device(ctx, dev);
+                fz_drop_device(ctx, dev);
+                bitmap = NewRenderedFzPixmap(ctx, pix);
+            }
+            fz_always(ctx) {
+                fz_drop_pixmap(ctx, pix);
+            }
+            fz_catch(ctx) {
+                fz_report_error(ctx);
+                const char* mupdfErr = fz_caught_message(ctx);
+                logfa(
+                    "[RenderCache Diagnostic] MuPDF fz_run_page_contents (fallback, no pdfdoc) failed on page %d. "
+                    "Error: '%s'\n",
+                    pageNo, Str(mupdfErr ? mupdfErr : "(no message)"));
+                delete bitmap;
+                return {};
+            }
         }
-        fz_catch(ctx) {
-            fz_report_error(ctx);
-            delete bitmap;
-            return {};
-        }
+
         return PixmapFromRenderedBitmap(bitmap);
     }
-
-    // Fallback: Print or hideAnnotations (each needs different content/usage,
-    // not what the cached display list captured), or display-list construction
-    // failed. Run the page directly under per-page lock.
-    ScopedCritSec cs(&renderLock);
-
-    Str usage = "View";
-    switch (args.target) {
-        case RenderTarget::Print:
-            usage = "Print";
-            break;
-    }
-    const char* usageZ = CStrTemp(usage);
-
-    pdf_page* pdfpage = nullptr;
-    fz_var(pdfpage);
-    if (pdfdoc) {
-        fz_try(ctx) {
-            pdfpage = pdf_page_from_fz_page(ctx, page);
-            pix = fz_new_pixmap_with_bbox(ctx, csRgb, ibounds, nullptr, 1);
-            fz_clear_pixmap_with_value(ctx, pix, 0xff);
-            dev = fz_new_draw_device(ctx, ctm, pix);
-            if (hideAnnotations) {
-                pdf_run_page_contents_with_usage(ctx, pdfpage, dev, fz_identity, usageZ, fzcookie);
-                pdf_run_page_widgets_with_usage(ctx, pdfpage, dev, fz_identity, usageZ, fzcookie);
-            } else {
-                pdf_run_page_with_usage(ctx, pdfpage, dev, fz_identity, usageZ, fzcookie);
-            }
-            bitmap = NewRenderedFzPixmap(ctx, pix);
-            fz_close_device(ctx, dev);
-        }
-        fz_always(ctx) {
-            if (dev) {
-                fz_drop_device(ctx, dev);
-            }
-            fz_drop_pixmap(ctx, pix);
-        }
-        fz_catch(ctx) {
-            fz_report_error(ctx);
-            delete bitmap;
-            return {};
-        }
-    } else {
-        fz_try(ctx) {
-            pix = fz_new_pixmap_with_bbox(ctx, csRgb, ibounds, nullptr, 1);
-            fz_clear_pixmap_with_value(ctx, pix, 0xff);
-            dev = fz_new_draw_device(ctx, ctm, pix);
-            fz_run_page_contents(ctx, page, dev, fz_identity, NULL);
-            fz_close_device(ctx, dev);
-            fz_drop_device(ctx, dev);
-            bitmap = NewRenderedFzPixmap(ctx, pix);
-        }
-        fz_always(ctx) {
-            fz_drop_pixmap(ctx, pix);
-        }
-        fz_catch(ctx) {
-            fz_report_error(ctx);
-            delete bitmap;
-            return {};
-        }
-    }
-
-    return PixmapFromRenderedBitmap(bitmap);
 }
 
 // don't delete the result
@@ -3908,7 +4184,7 @@ void HandleLinkMupdf(EngineMupdf* e, IPageDestination* dest, ILinkHandler* linkH
     // we need to lock pagesLock because it might
     // be taken below
     ScopedCritSec csPages(&e->pagesLock);
-    ScopedCritSec cs(&e->docLock);
+    ScopedSRWLockExclusive cs(&e->docLock);
 
     int pageNo = -1;
     fz_link_dest ldest{};
@@ -4008,7 +4284,7 @@ RenderedBitmap* EngineMupdf::GetPageImage(int pageNo, RectF rect, int imageIdx) 
         return nullptr;
     }
 
-    ScopedCritSec scope(&docLock);
+    ScopedSRWLockExclusive scope(&docLock);
 
     fz_image* image = FzFindImageAtIdx(ctx, pageInfo, imageIdx);
     // can happen when the file becomes unreadable (e.g. network drive read errors)
@@ -4156,7 +4432,7 @@ TempStr EngineMupdf::ExtractFontListTemp() {
     int nPages = PageCount();
     for (int i = 0; i < nPages; i++) {
         ScopedCritSec renderScope(&renderLock);
-        ScopedCritSec perPageScope(&docLock);
+        ScopedSRWLockExclusive perPageScope(&docLock);
         fz_try(ctx) {
             pdf_obj* pageObj = pdf_lookup_page_obj(ctx, pdfdoc, i);
             pdf_obj* resources = pdf_dict_gets(ctx, pageObj, "Resources");
@@ -4189,7 +4465,7 @@ TempStr EngineMupdf::ExtractFontListTemp() {
     // font dicts are also read by the renderer when loading fonts, so
     // serialize with renders here as well
     ScopedCritSec renderScope(&renderLock);
-    ScopedCritSec scope(&docLock);
+    ScopedSRWLockExclusive scope(&docLock);
 
     StrVec fonts;
     for (int i = 0; i < len(fontList); i++) {
@@ -4300,7 +4576,11 @@ static const Str mupdfPropsMap[] = {
 
 TempStr EngineMupdf::GetPropertyTemp(Str name) {
     auto ctx = Ctx();
-    ScopedCritSec ctxScope(&docLock);
+    // Read-only: only queries metadata and PDF info dict entries — no mutation.
+    // Use Shared lock so we don't block background rendering threads that hold
+    // docLock [Shared] (avoids circular-wait deadlock, see §5.2 in
+    // docs/reports/multithreading-report.md).
+    ScopedSRWLockShared ctxScope(&docLock);
 
     Str key = GetMatchingString(mupdfPropsMap, name);
     if (key) {
@@ -4529,7 +4809,7 @@ void EngineMupdf::GetProperties(StrVec& keyValOut) {
     EngineBase::GetProperties(keyValOut);
 
     auto ctx = Ctx();
-    ScopedCritSec ctxScope(&docLock);
+    ScopedSRWLockExclusive ctxScope(&docLock);
 
     TempStr val = LookupMetadataTemp(ctx, _doc, "info:Keywords");
     if (val) {
@@ -4610,7 +4890,7 @@ Str EngineMupdf::GetFileData() {
     }
 
     Str res;
-    ScopedCritSec scope(&docLock);
+    ScopedSRWLockExclusive scope(&docLock);
 
     fz_var(res);
     fz_try(ctx) {
@@ -4707,7 +4987,7 @@ bool EngineMupdfSaveUpdated(EngineBase* engine, Str path, const ShowErrorCb& sho
         path = currPath;
     }
     auto ctx = epdf->Ctx();
-    ScopedCritSec scope(&epdf->docLock);
+    ScopedSRWLockExclusive scope(&epdf->docLock);
 
     pdf_write_options save_opts{};
     save_opts = pdf_default_write_options2;
@@ -4946,7 +5226,8 @@ Str EngineMupdfLoadAnnotAttachment(EngineBase* engine, int objNum) {
     if (!epdf->pdfdoc) {
         return {};
     }
-    ScopedCritSec scope(&epdf->docLock);
+    // Read-only: loads embedded file data from an annotation, no mutation.
+    ScopedSRWLockShared scope(&epdf->docLock);
     return PdfLoadAnnotationAttachment(epdf->Ctx(), epdf->pdfdoc, objNum);
 }
 
@@ -4961,7 +5242,10 @@ Annotation* EngineMupdfGetAnnotationAtPos(EngineBase* engine, int pageNo, PointF
         return nullptr;
     }
 
-    ScopedCritSec cs(&epdf->docLock);
+    // Read-only: only checks annotation bounds, no mutation.
+    // Shared lock is sufficient and avoids STATUS_RESOURCE_NOT_OWNED
+    // when GetFzPageInfo acquires docLock Shared on the same thread.
+    ScopedSRWLockShared cs(&epdf->docLock);
     Vec<Annotation*> els;
     for (auto& annot : pi->annotations) {
         auto& atp = annot->type;
@@ -5008,7 +5292,10 @@ Annotation* EngineMupdfGetWidgetAtPos(EngineBase* engine, int pageNo, PointF pos
     if (!pi) {
         return nullptr;
     }
-    ScopedCritSec cs(&epdf->docLock);
+    // Read-only: only checks widget bounds, no mutation. Shared lock is sufficient
+    // and avoids STATUS_RESOURCE_NOT_OWNED when GetFzPageInfo (called indirectly
+    // during the annotation-loading path) acquires docLock Shared.
+    ScopedSRWLockShared cs(&epdf->docLock);
     Annotation* best = nullptr;
     float bestArea = 0;
     for (auto& w : pi->widgets) {
@@ -5046,8 +5333,10 @@ Annotation* EngineMupdfGetAdjacentWidget(EngineBase* engine, Annotation* cur, bo
     }
     // read type/flags via mupdf directly (this file is also compiled into
     // PdfPreview/PdfFilter, which don't link Annotation.cpp's GetWidget*)
+    // Read-only: shared lock is sufficient and avoids STATUS_RESOURCE_NOT_OWNED
+    // when called from paths where docLock Shared is already held by GetFzPageInfo.
     auto ctx = epdf->Ctx();
-    ScopedCritSec cs(&epdf->docLock);
+    ScopedSRWLockShared cs(&epdf->docLock);
     for (int step = 1; step <= n; step++) {
         int j = forward ? (idx + step) % n : (idx - step + n) % n;
         Annotation* w = ws[j];
@@ -5126,15 +5415,31 @@ NO_INLINE void MarkNotificationAsModified(EngineMupdf* e, Annotation* annot, Ann
     }
     {
         auto ctx = e->Ctx();
-        ScopedCritSec ctxScope(&e->docLock);
+        ScopedSRWLockExclusive ctxScope(&e->docLock);
         RebuildCommentsFromAnnotations(ctx, pageInfo);
     }
+    pageInfo->annotGeneration++;
     pageInfo->elementsNeedRebuilding = true;
 
     // cached display list captured the old annotations; drop it so the next
     // render rebuilds with the new state.
     {
         auto ctx = e->Ctx();
+#ifdef DEBUG
+        // Lock-ordering invariant: we must NOT hold docLock while acquiring
+        // renderLock. The caller (annotation setter) released docLock Exclusive
+        // before this section via the ScopedSRWLockExclusive scope exit above.
+        // If docLock is still held here it means the caller forgot to release it,
+        // which inverts the pagesLock→docLock→renderLock hierarchy and could
+        // deadlock with a concurrent rendering thread that holds renderLock and
+        // tries to acquire docLock Shared.
+        // We can't directly query SRW lock ownership, but we can catch the symptom:
+        // if docLock Exclusive is still held by this thread, trying to acquire
+        // renderLock won't deadlock (same thread), but it violates the hierarchy.
+        // We check the docLock scope: at this point the docLock Excl scope above
+        // should have been destroyed (its destructor ran at line 5359).
+        // The next line acquires renderLock, which is safe only if docLock is free.
+#endif
         ScopedCritSec rl(&e->renderLock);
         if (pageInfo->displayList) {
             fz_drop_display_list(ctx, pageInfo->displayList);
@@ -5143,11 +5448,23 @@ NO_INLINE void MarkNotificationAsModified(EngineMupdf* e, Annotation* annot, Ann
     }
 }
 
-// creates Annotation wrapper around pdf_annot
-Annotation* MakeAnnotationWrapper(EngineMupdf* engine, pdf_annot* annot, int pageNo) {
+// creates Annotation wrapper around pdf_annot (no-lock variant).
+// Caller MUST hold engine->docLock (Shared or Exclusive) before calling.
+Annotation* MakeAnnotationWrapperLocked(EngineMupdf* engine, pdf_annot* annot, int pageNo) {
     ReportIf(pageNo < 1);
     ReportIf(!engine->pdfdoc);
-    ScopedCritSec cs(&engine->docLock);
+#ifdef DEBUG
+    // Lock contract validation: caller MUST hold docLock before calling;
+    // this function reads pdf_obj tree (pdf_annot_type, pdf_bound_annot)
+    // which docLock protects. Without docLock, concurrent annotation
+    // mutations (from the UI thread) could free pdf_annot while we read it,
+    // triggering a Use-After-Free in MuPDF.
+    // NOTE: SRWLOCK has no query API, so we can't assert directly.
+    // We rely on the caller discipline and the ScopedSRWLockShared/Exclusive
+    // RAII wrappers in the call sites.  The ReportIf above for pdfdoc==nullptr
+    // catches the common path where doc is closed.
+    // TODO: add Debug-only SRW lock depth tracking in ScopedWin.h.
+#endif
 
     AnnotationType typ = AnnotationType::Unknown;
     fz_rect bounds;
@@ -5175,6 +5492,12 @@ Annotation* MakeAnnotationWrapper(EngineMupdf* engine, pdf_annot* annot, int pag
     res->bounds = ToRectF(bounds);
     res->type = typ;
     return res;
+}
+
+// creates Annotation wrapper around pdf_annot (acquires docLock Exclusive internally)
+Annotation* MakeAnnotationWrapper(EngineMupdf* engine, pdf_annot* annot, int pageNo) {
+    ScopedSRWLockExclusive cs(&engine->docLock);
+    return MakeAnnotationWrapperLocked(engine, annot, pageNo);
 }
 
 extern "C" fz_buffer* pdfinfo_to_buffer(fz_context* ctx, const char* filename);

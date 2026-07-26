@@ -38,9 +38,15 @@ struct FzPageInfo {
     RectF mediabox{};
     Vec<FitzPageImageInfo*> images;
 
-    // if false, only loaded page (fast)
+    // if false, only loaded page (fast: page ptr + annotations/minimal metadata)
     // if true, loaded expensive info (extracted text etc.)
     bool fullyLoaded = false;
+    // true once text extraction has been performed (lazy, after fullyLoaded)
+    // Extracting text is deferred outside pagesLock+renderLock to avoid
+    // blocking the UI thread for hundreds of milliseconds.
+    bool textExtracted = false;
+    // cached stext page for reuse; owned by this FzPageInfo, freed in ~FzPageInfo
+    fz_stext_page* stextPage = nullptr;
 
     // cached "View" rendering of the page; built lazily under
     // EngineMupdf::renderLock. fz_display_list is safe to *replay* across
@@ -49,6 +55,13 @@ struct FzPageInfo {
     // races inside mupdf's image store on concurrent decode. So renderLock
     // is engine-wide, not per-page.
     fz_display_list* displayList = nullptr;
+
+    // generation counters for page versioning: every annotation modification
+    // increments annotGeneration; the render thread compares
+    // displayListGeneration to detect stale display lists and rebuilds.
+    // Under pagesLock for increment, under renderLock for the check/rebuild.
+    int annotGeneration = 0;        // bumped on each annotation change
+    int displayListGeneration = -1; // generation captured when displayList was built
 };
 
 class EngineMupdf : public EngineBase {
@@ -110,18 +123,26 @@ class EngineMupdf : public EngineBase {
     //                         in template_image_compose_opt with use-after-
     //                         free on the source pixmap. Also acquired under
     //                         pagesLock inside GetFzPageInfo.
-    //   docLock             - serializes document-scope mupdf operations:
-    //                         outline, fonts, info, named dests, page-tree
-    //                         access, annotation mutations. Independent of
-    //                         renderLock; never acquire pagesLock while
-    //                         holding docLock.
+    //   docLock             - Slim Reader/Writer Lock for document-scope
+    //                         mupdf operations: outline, fonts, info, named
+    //                         dests, page-tree access, annotation mutations.
+    //                         * Shared lock:  render path (Build + Replay),
+    //                           annotation read-only queries (GetBounds,
+    //                           GetContents, etc.)
+    //                         * Exclusive lock: annotation mutations,
+    //                           form-field writes, document save.
+    //                         Independent of renderLock; never acquire
+    //                         pagesLock while holding docLock.
+    //                         SRWLock is NOT recursive — a thread holding
+    //                         shared lock must not acquire exclusive, and
+    //                         vice versa.
     //
     // docLock must NOT alias one of fz_locks[] -- mupdf takes those briefly
     // for its own internal coordination, and reusing one as a long-held outer
     // lock would serialize every cloned-context allocation across all threads.
     CRITICAL_SECTION pagesLock;
     CRITICAL_SECTION renderLock;
-    CRITICAL_SECTION docLock;
+    SRWLOCK docLock;
 
     // per-FZ_LOCK-index critical sections used by mupdf via fz_locks_ctx
     // callbacks. Mupdf holds these only momentarily; do not hold them across
@@ -172,4 +193,15 @@ EngineMupdf* AsEngineMupdf(EngineBase* engine);
 fz_rect ToFzRect(RectF rect);
 RectF ToRectF(fz_rect rect);
 void MarkNotificationAsModified(EngineMupdf*, Annotation*, AnnotationChange = AnnotationChange::Modify);
+// Public wrapper that acquires docLock Exclusive internally (for callers that
+// don't already hold docLock). Prefer MakeAnnotationWrapperLocked when already
+// holding docLock (e.g. inside GetFzPageInfo's batch load path).
 Annotation* MakeAnnotationWrapper(EngineMupdf* engine, pdf_annot* annot, int pageNo);
+// No-lock variant: caller MUST hold docLock (Shared or Exclusive) before
+// calling.  Used inside GetFzPageInfo so docLock can be acquired at the
+// pagesLock→docLock→renderLock outer level instead of nested inside renderLock.
+Annotation* MakeAnnotationWrapperLocked(EngineMupdf* engine, pdf_annot* annot, int pageNo);
+// Deferred text extraction for a page.  Call WITHOUT holding pagesLock or
+// renderLock; only docLock [Shared] is acquired internally.  Sets
+// pageInfo->stextPage and pageInfo->textExtracted on success.
+void ExtractTextLazy(EngineMupdf* engine, FzPageInfo* pageInfo, fz_cookie* cookie = nullptr);

@@ -23,9 +23,9 @@ constexpr int kMaxPredictiveRequests = 4;
 // Accumulated across all PaintTile calls. Reset on each application launch.
 // Exposed in sumlog.txt at exit so the benchmark script can parse them.
 extern LONG gGpuCompositeCount;
-extern i64  gGpuCompositeUs;   // total microseconds in GPU (D2D) compositing
+extern i64 gGpuCompositeUs; // total microseconds in GPU (D2D) compositing
 extern LONG gGdiCompositeCount;
-extern i64  gGdiCompositeUs;   // total microseconds in GDI (BitBlt/StretchBlt) compositing
+extern i64 gGdiCompositeUs; // total microseconds in GDI (BitBlt/StretchBlt) compositing
 
 struct PageInfo;
 struct Pixmap;
@@ -176,6 +176,9 @@ struct RenderCache {
     /* Interface for page rendering thread */
     HANDLE startRendering = nullptr; // semaphore, signaled once per queued request
     AtomicBool shouldExit = 0;
+    // manual-reset event, signalled when all render threads are idle
+    // (used by DrainActiveRequestsForDisplayModel for EngineBase lifecycle safety)
+    HANDLE drainCompleted = nullptr;
 
     RenderCache();
     RenderCache(RenderCache const&) = delete;
@@ -186,6 +189,10 @@ struct RenderCache {
     void Render(DisplayModel* dm, int pageNo, int rotation, float zoom, RectF pageRect,
                 const Func1<PageRenderRequest*>& callback);
     void CancelRendering(DisplayModel* dm);
+    // Abort all active + queued requests for `dm` and block until every
+    // render thread has exited the RenderPage call.  Call before releasing
+    // the EngineBase to prevent use-after-free in render threads.
+    void DrainActiveRequestsForDisplayModel(DisplayModel* dm);
     bool Exists(DisplayModel* dm, int pageNo, int rotation, float zoom = kInvalidZoom, TilePosition* tile = nullptr);
     void FreeForDisplayModel(DisplayModel* dm);
     void KeepForDisplayModel(DisplayModel* oldDm, DisplayModel* newDm);

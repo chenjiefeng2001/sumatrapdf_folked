@@ -21,6 +21,55 @@
 
 #ifdef _MSC_VER
 #include "GpuBackend.h"
+
+// Thread-safe deferred release queue for D2D resources (see FlushSafeD2dReleases).
+// Background render threads must NOT call ID2D1Bitmap::Release() directly since
+// the UI thread may be inside BeginDraw/DrawBitmap on the same resource, causing
+// a cross-thread use-after-free crash. Instead they queue pointers here and the
+// UI thread drains them at the start of each PaintTile call.
+struct DeferredReleaseNode {
+    IUnknown* obj;
+    DeferredReleaseNode* next;
+};
+static CRITICAL_SECTION gD2dReleaseCS;
+static DeferredReleaseNode* gD2dReleaseHead = nullptr;
+static bool gD2dReleaseInit = []() {
+    InitializeCriticalSection(&gD2dReleaseCS);
+    return true;
+}();
+
+static void QueueSafeD2dRelease(IUnknown* obj) {
+    if (!obj) return;
+    auto* node = (DeferredReleaseNode*)HeapAlloc(GetProcessHeap(), 0, sizeof(DeferredReleaseNode));
+    if (!node) return;
+    node->obj = obj;
+    EnterCriticalSection(&gD2dReleaseCS);
+    node->next = gD2dReleaseHead;
+    gD2dReleaseHead = node;
+    LeaveCriticalSection(&gD2dReleaseCS);
+}
+
+static void FlushSafeD2dReleases() {
+#ifdef DEBUG
+    // D2D resource Release MUST run on the UI thread (the same thread that
+    // owns the D2D factory and render targets). Calling Release from a
+    // background render thread is a cross-thread D2D violation that can
+    // crash with E_INVALIDARG or a GPU driver fault.
+    // See docs/reports/annot-render-crash-analysis.md §3.2.
+    ReportIf(g_mainThreadId != 0 && g_mainThreadId != GetCurrentThreadId());
+#endif
+    EnterCriticalSection(&gD2dReleaseCS);
+    DeferredReleaseNode* node = gD2dReleaseHead;
+    gD2dReleaseHead = nullptr;
+    LeaveCriticalSection(&gD2dReleaseCS);
+    while (node) {
+        node->obj->Release();
+        DeferredReleaseNode* next = node->next;
+        HeapFree(GetProcessHeap(), 0, node);
+        node = next;
+    }
+}
+
 #endif
 
 #pragma warning(disable : 28159) // silence /analyze: Consider using 'GetTickCount64' instead of 'GetTickCount'
@@ -87,6 +136,7 @@ RenderCache::RenderCache() : maxTileSize({GetSystemMetrics(SM_CXSCREEN), GetSyst
     // and no idle thread is available -- many sessions only ever need a
     // couple of render threads, so creating 8+ upfront is wasteful.
     startRendering = CreateSemaphoreW(nullptr, 0, INT_MAX, nullptr);
+    drainCompleted = CreateEventW(nullptr, TRUE, TRUE, nullptr); // initially set (no drain in progress)
 }
 
 RenderCache::~RenderCache() {
@@ -112,6 +162,9 @@ RenderCache::~RenderCache() {
         }
     }
     CloseHandle(startRendering);
+    if (drainCompleted) {
+        CloseHandle(drainCompleted);
+    }
 
     // Threads are gone; remaining state inspection is single-threaded.
     bool hasCurReq = false;
@@ -135,7 +188,20 @@ RenderCache::~RenderCache() {
    no longer need a found entry. */
 // out-of-line so RenderCache.h needn't include Pixmap.h (only forward-declare it)
 BitmapCacheEntry::~BitmapCacheEntry() {
-    FreePixmap(bitmap);
+    if (bitmap) {
+#ifdef _MSC_VER
+        // Deferred Release: background threads must NOT call ID2D1Bitmap::Release
+        // directly since the UI thread may be inside BeginDraw/DrawBitmap on the
+        // same resource, causing a cross-thread use-after-free crash (see
+        // QueueSafeD2dRelease / FlushSafeD2dReleases).
+        // Instead, queue the pointer for safe Release on the UI thread.
+        if (bitmap->d2dBitmap) {
+            QueueSafeD2dRelease(bitmap->d2dBitmap);
+            bitmap->d2dBitmap = nullptr;
+        }
+#endif
+        FreePixmap(bitmap);
+    }
 }
 
 BitmapCacheEntry* RenderCache::Find(DisplayModel* dm, int pageNo, int rotation, float zoom, TilePosition* tile) {
@@ -250,6 +316,12 @@ void RenderCache::Add(PageRenderRequest& req, Pixmap* bmp) {
 
     req.rotation = NormalizeRotation(req.rotation);
     ReportIf(cacheCount > MAX_BITMAPS_CACHED);
+
+    // Poisoned-entry prevention: a null Pixmap should never be cached.
+    // RenderCache::RenderCacheThread logs a diagnostic when RenderPage
+    // returns null; the bmp is null-checked before calling Add(), so
+    // this assertion would indicate a logic error in the caller.
+    ReportIf(!bmp);
 
     /* It's possible there still is a cached bitmap with different zoom/rotation */
     FreePage(req.dm, req.pageNo, &req.tile);
@@ -809,6 +881,48 @@ void RenderCache::CancelRendering(DisplayModel* dm) {
     }
 }
 
+// More aggressive than CancelRendering: aborts ALL work (queued + active) for
+// `dm` and blocks until every render thread has exited RenderPage.  Call
+// before releasing EngineBase to prevent use-after-free in render threads.
+void RenderCache::DrainActiveRequestsForDisplayModel(DisplayModel* dm) {
+    // Step 1: abort all queued requests for this dm
+    ClearQueueForDisplayModel(dm);
+
+    for (;;) {
+        EnterCriticalSection(&requestAccess);
+        bool found = false;
+        // Step 2: abort any actively-executing requests
+        for (int i = 0; i < nRenderThreads; i++) {
+            if (curReqs[i] && curReqs[i]->dm == dm) {
+                if (curReqs[i]->abortCookie) {
+                    curReqs[i]->abortCookie->Abort();
+                }
+                curReqs[i]->abort = true;
+                found = true;
+            }
+        }
+        // Step 3: also check if any thread is still running (even if curReqs is
+        // already cleaned up but engine pointer is still in use)
+        int busyThreadCount = 0;
+        if (!found) {
+            // No active request for this dm.  But a thread may have just
+            // finished curReqs[i] and be about to call RenderPage on engine.
+            // Double-check via idleThreads vs nRenderThreads.
+            busyThreadCount = nRenderThreads - idleThreads;
+            // If all threads are idle, we're done.
+            if (busyThreadCount <= 0) {
+                LeaveCriticalSection(&requestAccess);
+                return;
+            }
+        }
+        LeaveCriticalSection(&requestAccess);
+
+        // Brief sleep is acceptable: Drain is only called on document close
+        // (rare code path), and typical render takes < 50 ms.
+        Sleep(20);
+    }
+}
+
 void RenderCache::ClearQueueForDisplayModel(DisplayModel* dm, int pageNo, TilePosition* tile) {
     ScopedCritSec scope(&requestAccess);
     int reqCount = requestCount;
@@ -902,13 +1016,27 @@ static DWORD WINAPI RenderCacheThread(LPVOID data) {
         bmp = engine->RenderPage(args);
         if (req.abort) {
             // aborted - do nothing, discard result
-            FreePixmap(bmp);
+            if (bmp) {
+                FreePixmap(bmp);
+            }
             continue;
         }
         auto durMs = TimeSinceInMs(timeStart);
         if (durMs > 100) {
             auto path = engine->FilePath();
             logfa("Slow rendering: %.2f ms, page: %d in '%s'\n", (float)durMs, req.pageNo, path);
+        }
+
+        if (!bmp) {
+            // RenderPage returned null. This is a critical diagnostic signal:
+            // the MuPDF render engine failed (corrupted PDF, OOM, or an
+            // unhandled fz_catch).  The page will be missing from the cache
+            // and PaintTile will show a blank or stale tile.
+            // See docs/reports/annot-render-crash-analysis.md §Diagnostic.
+            logfa(
+                "[RenderCache Diagnostic] RenderPage returned nullptr for page %d "
+                "(zoom=%.2f, rotation=%d). Request not aborted — render error.\n",
+                req.pageNo, req.zoom, req.rotation);
         }
 
         req.bmp = bmp;
@@ -935,6 +1063,12 @@ static DWORD WINAPI RenderCacheThread(LPVOID data) {
 //       (this is the only place that knows about Tiles, though)
 int RenderCache::PaintTile(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, TilePosition tile, Rect tileOnScreen,
                            bool renderMissing, bool* renderOutOfDateCue, bool* renderedReplacement) {
+#ifdef _MSC_VER
+    // Drain the deferred-release queue on the UI thread (same thread that calls
+    // BeginDraw/DrawBitmap). This ensures ID2D1Bitmap::Release runs safely on
+    // the thread that owns the D2D render target — never on a background thread.
+    FlushSafeD2dReleases();
+#endif
     float zoom = dm->GetZoomReal(pageNo);
     BitmapCacheEntry* entry = Find(dm, pageNo, dm->GetRotation(), zoom, &tile);
     int renderDelay = 0;
@@ -955,6 +1089,25 @@ int RenderCache::PaintTile(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, T
     Pixmap* renderedBmp = entry ? entry->bitmap : nullptr;
     HBITMAP hbmp = renderedBmp ? renderedBmp->hbmp : nullptr;
 
+    // Diagnostic: detect stale entries that survived Invalidate
+    if (entry && entry->outOfDate) {
+        logfa(
+            "[RenderCache Diagnostic] PaintTile found stale (outOfDate) entry for page %d tile "
+            "(res=%d, col=%d, row=%d). The Invalidate signal was missed or the entry was not "
+            "evicted before paint.\n",
+            pageNo, tile.res, tile.col, tile.row);
+    }
+
+    // Diagnostic: detect render failures propagated to the UI thread
+    if (entry && !hbmp && entry->bitmap) {
+        // Entry exists and has a Pixmap, but no GDI bitmap handle — likely
+        // a rendering error that produced an empty Pixmap.
+        logfa(
+            "[RenderCache Diagnostic] PaintTile: entry for page %d tile "
+            "(res=%d, col=%d, row=%d) has Pixmap but no HBITMAP — render was incomplete.\n",
+            pageNo, tile.res, tile.col, tile.row);
+    }
+
     if (!hbmp) {
         if (entry && !(renderedBmp && ReduceTileSize())) {
             renderDelay = RENDER_DELAY_FAILED;
@@ -971,6 +1124,9 @@ int RenderCache::PaintTile(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, T
 #ifdef _MSC_VER
     // GPU compositing path: use Direct2D DrawBitmap when available.
     // Falls back to GDI if GPU init fails or texture upload fails.
+    // Background render threads queue ID2D1Bitmap::Release through
+    // QueueSafeD2dRelease, drained by FlushSafeD2dReleases above, so
+    // D2D resources are never released on the wrong thread.
     if (gGpuBackend && gGpuBackend->isAvailable && hbmp && renderedBmp) {
         ID2D1DCRenderTarget* rt = gGpuBackend->GetRenderTarget(hdc);
         if (rt) {
@@ -979,7 +1135,7 @@ int RenderCache::PaintTile(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, T
             if (renderedBmp->d2dBitmap) {
                 d2dBmp = renderedBmp->d2dBitmap;
             } else {
-                d2dBmp = gGpuBackend->CreateBitmapFromPixmap(renderedBmp);
+                d2dBmp = gGpuBackend->CreateBitmapFromPixmap(rt, renderedBmp);
                 if (d2dBmp) {
                     renderedBmp->d2dBitmap = d2dBmp;
                 }
@@ -990,24 +1146,40 @@ int RenderCache::PaintTile(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, T
                 D2D1_RECT_F dst = D2D1::RectF((float)bounds.x, (float)bounds.y, (float)(bounds.x + bounds.dx),
                                               (float)(bounds.y + bounds.dy));
                 rt->DrawBitmap(d2dBmp, dst, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-                rt->EndDraw();
-                auto elapsed = TimeSinceInUs(t0);
-                InterlockedIncrement(&gGpuCompositeCount);
-                InterlockedExchangeAdd64(&gGpuCompositeUs, elapsed);
+                HRESULT hrEnd = rt->EndDraw();
+                if (FAILED(hrEnd)) {
+                    logfa(
+                        "[RenderCache Diagnostic] D2D EndDraw failed on page %d tile "
+                        "(res=%d, col=%d, row=%d) HRESULT=0x%08X. Falling back to GDI.\n",
+                        pageNo, tile.res, tile.col, tile.row, (unsigned)hrEnd);
+                    if (hrEnd == D2DERR_RECREATE_TARGET) {
+                        logfa(
+                            "[RenderCache Diagnostic] GPU Device Lost detected during EndDraw! "
+                            "All cached D2D bitmaps are now invalid.\n");
+                    }
+                    // Invalidate the D2D bitmap so we don't retry with a dead resource.
+                    // Then fall through to the GDI path below.
+                    QueueSafeD2dRelease(renderedBmp->d2dBitmap);
+                    renderedBmp->d2dBitmap = nullptr;
+                } else {
+                    auto elapsed = TimeSinceInUs(t0);
+                    InterlockedIncrement(&gGpuCompositeCount);
+                    InterlockedExchangeAdd64(&gGpuCompositeUs, elapsed);
 
-                if (gShowTileLayout) {
-                    HPEN pen = CreatePen(PS_SOLID, 1, RGB(0xff, 0x00, 0x00));
-                    HGDIOBJ oldPen = SelectObject(hdc, pen);
-                    DrawRect(hdc, bounds);
-                    SelectObject(hdc, oldPen);
-                    DeleteObject(pen);
-                }
+                    if (gShowTileLayout) {
+                        HPEN pen = CreatePen(PS_SOLID, 1, RGB(0xff, 0x00, 0x00));
+                        HGDIOBJ oldPen = SelectObject(hdc, pen);
+                        DrawRect(hdc, bounds);
+                        SelectObject(hdc, oldPen);
+                        DeleteObject(pen);
+                    }
 
-                if (entry->outOfDate) {
-                    if (renderOutOfDateCue) *renderOutOfDateCue = true;
+                    if (entry->outOfDate) {
+                        if (renderOutOfDateCue) *renderOutOfDateCue = true;
+                    }
+                    DropCacheEntry(entry);
+                    return 0;
                 }
-                DropCacheEntry(entry);
-                return 0;
             }
         }
     }

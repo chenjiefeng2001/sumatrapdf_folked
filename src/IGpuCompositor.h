@@ -6,8 +6,6 @@
 // active. The backend is selected at compile time via the build system; only
 // one implementation is linked.
 
-#pragma once
-
 #include "wingui/Layout.h" // for Size
 
 struct Pixmap;

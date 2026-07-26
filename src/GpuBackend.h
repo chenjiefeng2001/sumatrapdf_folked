@@ -35,17 +35,53 @@ struct GpuBackend {
     // Whether the backend was successfully initialized and is usable.
     bool isAvailable = false;
 
-    // Create (or reuse a cached) ID2D1Bitmap from a Pixmap's HBITMAP by
-    // copying pixels into a D2D bitmap. The caller must Release() the
-    // returned bitmap when done. Returns nullptr on failure.
-    ID2D1Bitmap* CreateBitmapFromPixmap(const Pixmap* pixmap);
+    // Create an ID2D1Bitmap on the given render target from a Pixmap's pixel
+    // data by copying (and flipping) the pixels into a D2D system-memory bitmap.
+    // The returned bitmap is owned by the caller (stored in Pixmap::d2dBitmap).
+    // IMPORTANT: Pass the same RT that will later call DrawBitmap — never a
+    // temporary RT, because creating the bitmap on one RT and drawing on
+    // another can cause driver-level crashes on certain GPU configurations.
+    // Returns nullptr on failure.
+    ID2D1Bitmap* CreateBitmapFromPixmap(ID2D1DCRenderTarget* rt, const Pixmap* pixmap);
 
     // Get a per-HDC D2D render target. The render target wraps an HDC so
     // D2D and GDI can interop on the same device context. Returns nullptr
     // if creation fails. Released automatically on destruction.
     ID2D1DCRenderTarget* GetRenderTarget(HDC hdc);
 
+    // ── D2D overlay helpers (replaces GDI+ for annotation/selection rendering) ──
+    //
+    // All return true on success, false on any D2D failure (caller falls back to GDI).
+
+    // Fill a set of rects with a semi-transparent color (selection, find-match, read-aloud).
+    // hdc: the device context to draw on (backbuffer).
+    // screenRc: clipping rect in screen coords.
+    // rects: list of rectangles to fill (will be clipped to screenRc and inflated by pad).
+    // color, alpha: fill color + opacity (alpha 0xFF = opaque).
+    // pad: extra pixels to inflate each rect before drawing.
+    // drawBorder: if true, draw a thin border around the combined shape.
+    static bool DrawOverlayRects(HDC hdc, Rect screenRc, Vec<Rect>& rects, COLORREF color, u8 alpha, int pad,
+                                 bool drawBorder);
+
+    // Draw a dashed rectangle border (for annotation editing selection).
+    // width: pen width in pixels. Dash pattern is 4-on 2-off.
+    static bool DrawDashedBorder(HDC hdc, Rect rect, COLORREF color, float width);
+
+    // Draw a solid-filled + black-bordered resize handle square.
+    // (x, y) is the top-left corner of the handle; size is the edge length.
+    static bool DrawResizeHandle(HDC hdc, int x, int y, int size);
+
+    // Fill a single rectangle with a semi-transparent color.
+    static bool DrawFillRect(HDC hdc, Rect rect, COLORREF color, u8 alpha);
+
+    // Draw a solid stroked rectangle border.
+    static bool DrawSolidBorder(HDC hdc, Rect rect, COLORREF color, float width);
+
   private:
+    // Low-level helpers -----------------------------------------------------------
+    static ID2D1DCRenderTarget* GetRT(HDC hdc);
+    static ID2D1SolidColorBrush* GetBrush(ID2D1DCRenderTarget* rt, COLORREF color, u8 alpha);
+
     ID2D1Factory* factory = nullptr;
     // cache the last render target (one per thread / HDC is wasteful but
     // acceptable since rendering is serialized in the UI thread).

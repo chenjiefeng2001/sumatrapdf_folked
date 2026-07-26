@@ -874,7 +874,10 @@ void UpdateToolbarState(MainWindow* win) {
         bool isChecked = dm == DisplayMode::SinglePage && zoomVirtual == kZoomFitPage;
         SetToolbarButtonCheckedState(win, CmdZoomFitPageAndSinglePage, isChecked);
         if (!isChecked) {
-            win->CurrentTab()->prevZoomVirtual = kInvalidZoom;
+            WindowTab* tab = win->CurrentTab();
+            if (tab) {
+                tab->prevZoomVirtual = kInvalidZoom;
+            }
         }
     }
 }

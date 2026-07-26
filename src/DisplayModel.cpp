@@ -453,6 +453,13 @@ DisplayModel::~DisplayModel() {
         cb->CleanUp(this);
     }
 
+    // Drain all render requests for this DisplayModel before releasing
+    // the engine.  This ensures no render thread is inside RenderPage()
+    // with a dangling EngineBase pointer (see §4.3 in multithreading report).
+    if (gRenderCache) {
+        gRenderCache->DrainActiveRequestsForDisplayModel(this);
+    }
+
     delete pdfSync;
     delete textSearch;
     delete textSelection;
@@ -1516,6 +1523,20 @@ void DisplayModel::SetDisplayMode(DisplayMode newDisplayMode, bool keepContinuou
     }
     if (displayMode == newDisplayMode) {
         return;
+    }
+
+    // Invalidate ALL cached tiles before changing display mode.
+    // Without this, PaintTile can find stale entries via Find(kInvalidZoom)
+    // and stretch old bitmaps into the viewport, producing "previous page
+    // compressed at top" visual artifacts (see §5.4 in
+    // docs/reports/annot-render-crash-analysis.md).
+    // Invalidate also aborts any currently-rendering requests for this dm,
+    // preventing rendering-while-relayout data races on MuPDF internals.
+    if (gRenderCache) {
+        RectF fullPage = engine->PageMediabox(1);
+        for (int pn = 1; pn <= PageCount(); pn++) {
+            gRenderCache->Invalidate(this, pn, fullPage);
+        }
     }
 
     int currPageNo = CurrentPageNo();

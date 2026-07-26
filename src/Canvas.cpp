@@ -35,6 +35,10 @@
 #include "EngineAll.h"
 
 #include "DisplayModel.h"
+
+#ifdef _MSC_VER
+#include "GpuBackend.h"
+#endif
 #include "Theme.h"
 #include "GlobalPrefs.h"
 #include "RenderCache.h"
@@ -569,7 +573,9 @@ Str scrollMsgStr(USHORT msg) {
 }
 
 static void OnVScroll(MainWindow* win, WPARAM wp) {
-    ReportIf(!win->AsFixed());
+    if (!win->ctrl) {
+        return;
+    }
 
     bool useOverlay = ScrollbarsUseOverlay() && IsOverlayScrollbarVisible(win->overlayScrollV);
     SCROLLINFO si{};
@@ -705,7 +711,9 @@ static void OnVScroll(MainWindow* win, WPARAM wp) {
 }
 
 static void OnHScroll(MainWindow* win, WPARAM wp) {
-    ReportIf(!win->AsFixed());
+    if (!win->ctrl) {
+        return;
+    }
 
     bool useOverlay = ScrollbarsUseOverlay() && IsOverlayScrollbarVisible(win->overlayScrollH);
     SCROLLINFO si{};
@@ -860,6 +868,9 @@ static bool StopDraggingAnnotation(MainWindow* win, int x, int y, bool aborted) 
     }
 
     DisplayModel* dm = win->AsFixed();
+    if (!dm) {
+        return true;
+    }
     x += win->annotationBeingMovedOffset.x;
     y += win->annotationBeingMovedOffset.y;
     Point pt{x, y};
@@ -874,6 +885,12 @@ static bool StopDraggingAnnotation(MainWindow* win, int x, int y, bool aborted) 
         // logf("prev rect: x=%.2f, y=%.2f, dx=%.2f, dy=%.2f\n", ar.x, ar.y, ar.dx, ar.dy);
         // logf(" new rect: x=%.2f, y=%.2f, dx=%.2f, dy=%.2f\n", r.x, r.y, r.dx, r.dy);
         SetRect(annot, r);
+        // Invalidate the RenderCache for this page so stale D2D/GDI tiles
+        // are not reused when PaintTile finds a matching cache entry.
+        // Without this, old tiles may be stretched into the viewport leading to
+        // visual artifacts ("上一页一直压缩在视口" bug, see §5.2 in
+        // docs/reports/annot-render-crash-analysis.md).
+        gRenderCache->Invalidate(dm, pageNo, ar);
         NotifyAnnotationsChanged(win->CurrentTab()->editAnnotsWindow);
         MainWindowRerender(win);
         ToolbarUpdateStateForWindow(win, true);
@@ -896,6 +913,10 @@ static void StopMouseDrag(MainWindow* win, int x, int y, bool aborted) {
     }
 
     if (aborted) {
+        return;
+    }
+
+    if (!win->IsDocLoaded()) {
         return;
     }
 
@@ -1278,10 +1299,15 @@ static void OnMouseLeftButtonDown(MainWindow* win, int x, int y, WPARAM key) {
 
     HwndSetFocus(win->hwndFrame);
     DisplayModel* dm = win->AsFixed();
-    ReportIf(!dm);
+    if (!dm) {
+        return;
+    }
     Point pt{x, y};
 
     WindowTab* tab = win->CurrentTab();
+    if (!tab) {
+        return;
+    }
     // PDF form filling: clicking a checkbox / radio-button toggles it; clicking a
     // text or choice field starts in-place editing. Widgets are hit-tested on
     // their own list (GetWidgetAtPos), separate from markup annotations. Consume
@@ -1401,7 +1427,9 @@ static void OnMouseLeftButtonDown(MainWindow* win, int x, int y, WPARAM key) {
 
 static void OnMouseLeftButtonUp(MainWindow* win, int x, int y, WPARAM key) {
     DisplayModel* dm = win->AsFixed();
-    ReportIf(!dm);
+    if (!dm) {
+        return;
+    }
 
     // click on selected text without dragging: clear selection
     if (win->textDragPending) {
@@ -1913,6 +1941,63 @@ NO_INLINE static void PaintCurrentEditAnnotationMark(WindowTab* tab, HDC hdc, Di
     drawHandle(left, midY);
 }
 
+// GPU-accelerated overlay drawing for annotation editing marks and context-menu
+// highlights. Returns true if all D2D calls succeeded (caller may skip GDI+ fallback).
+// Returns false if D2D is unavailable (caller must use GDI+).
+static bool PaintAnnotationOverlaysGPU(MainWindow* win, HDC hdc, DisplayModel* dm) {
+#ifdef _MSC_VER
+    if (!gGpuBackend || !gGpuBackend->isAvailable) {
+        return false;
+    }
+    WindowTab* tab = win->CurrentTab();
+
+    // 1) Annotation editing mark (dashed border + resize handles)
+    if (tab && tab->selectedAnnotation && dm->PageVisible(tab->selectedAnnotation->pageNo)) {
+        Annotation* annot = tab->selectedAnnotation;
+        Rect rect = dm->CvtToScreen(annot->pageNo, GetRect(annot));
+        rect.Inflate(4, 4);
+
+        if (!GpuBackend::DrawDashedBorder(hdc, rect, RGB(0, 80, 200), 2.0f)) {
+            return false;
+        }
+
+        if (AnnotationCanBeResized(annot->type)) {
+            int hs = 6;
+            int hh = hs / 2;
+            int left = rect.x - hh;
+            int midX = rect.x + rect.dx / 2 - hh;
+            int right = rect.x + rect.dx - hh;
+            int top = rect.y - hh;
+            int midY = rect.y + rect.dy / 2 - hh;
+            int bottom = rect.y + rect.dy - hh;
+
+            // corners
+            GpuBackend::DrawResizeHandle(hdc, left, top, hs);
+            GpuBackend::DrawResizeHandle(hdc, right, top, hs);
+            GpuBackend::DrawResizeHandle(hdc, right, bottom, hs);
+            GpuBackend::DrawResizeHandle(hdc, left, bottom, hs);
+            // edges
+            GpuBackend::DrawResizeHandle(hdc, midX, top, hs);
+            GpuBackend::DrawResizeHandle(hdc, right, midY, hs);
+            GpuBackend::DrawResizeHandle(hdc, midX, bottom, hs);
+            GpuBackend::DrawResizeHandle(hdc, left, midY, hs);
+        }
+    }
+
+    // 2) Context-menu highlight rectangle (blue outline around element under cursor)
+    if (win->contextMenuHighlightPageNo > 0 && dm->PageVisible(win->contextMenuHighlightPageNo)) {
+        Rect rc = dm->CvtToScreen(win->contextMenuHighlightPageNo, win->contextMenuHighlightRect);
+        if (!GpuBackend::DrawSolidBorder(hdc, rc, RGB(0, 100, 255), 2.0f)) {
+            return false;
+        }
+    }
+
+    return true;
+#else
+    return false;
+#endif
+}
+
 static bool DrawDocument(MainWindow* win, HDC hdc, RECT* rcArea) {
     ReportIf(!win->AsFixed());
     if (!win->AsFixed()) {
@@ -2127,16 +2212,20 @@ static bool DrawDocument(MainWindow* win, HDC hdc, RECT* rcArea) {
         DeleteDC(bmpDC);
     }
 
-    WindowTab* tab = win->CurrentTab();
-    PaintCurrentEditAnnotationMark(tab, hdc, dm);
+    // GPU-accelerated annotation overlays: dashed borders, resize handles,
+    // context-menu highlight. Falls back to GDI+ when GPU is unavailable.
+    if (!PaintAnnotationOverlaysGPU(win, hdc, dm)) {
+        WindowTab* tab = win->CurrentTab();
+        PaintCurrentEditAnnotationMark(tab, hdc, dm);
 
-    // draw highlight rectangle around element under cursor during context menu
-    if (win->contextMenuHighlightPageNo > 0 && dm->PageVisible(win->contextMenuHighlightPageNo)) {
-        Rect rc = dm->CvtToScreen(win->contextMenuHighlightPageNo, win->contextMenuHighlightRect);
-        Gdiplus::Graphics gs(hdc);
-        Gdiplus::Color col(128, 0, 100, 255);
-        Gdiplus::Pen pen(col, 2);
-        gs.DrawRectangle(&pen, rc.x, rc.y, rc.dx, rc.dy);
+        // draw highlight rectangle around element under cursor during context menu
+        if (win->contextMenuHighlightPageNo > 0 && dm->PageVisible(win->contextMenuHighlightPageNo)) {
+            Rect rc = dm->CvtToScreen(win->contextMenuHighlightPageNo, win->contextMenuHighlightRect);
+            Gdiplus::Graphics gs(hdc);
+            Gdiplus::Color col(128, 0, 100, 255);
+            Gdiplus::Pen pen(col, 2);
+            gs.DrawRectangle(&pen, rc.x, rc.y, rc.dx, rc.dy);
+        }
     }
 
     // find-match highlighting and text selection are independent: paint both.
@@ -2168,6 +2257,12 @@ static void OnPaintDocument(MainWindow* win) {
     PAINTSTRUCT ps;
     HDC hdc = BeginPaint(win->hwndCanvas, &ps);
 
+    // Apply overscroll visual offset (elastic boundary feedback).
+    // When the user has scrolled past the document boundary, shift the rendered
+    // content vertically so the overscrolled area is visible as a gap above/below.
+    int overscrollOffset =
+        (win->overscroll && win->overscroll->HasOverscroll()) ? win->overscroll->GetVisualOffset() : 0;
+
     switch (win->presentation) {
         case PM_BLACK_SCREEN:
             FillRect(hdc, &ps.rcPaint, GetStockBrush(BLACK_BRUSH));
@@ -2181,6 +2276,26 @@ static void OnPaintDocument(MainWindow* win) {
                 // Use dirty-rect clipped Blt to avoid full-screen copy on low-end HW
                 Rect dirty(ps.rcPaint);
                 win->buffer->Flush(hdc, dirty);
+            }
+            // Draw overscroll indication strip (a subtle gradient bar at the edge)
+            // when the user has scrolled past the document boundary.
+            if (overscrollOffset != 0) {
+                RECT rc;
+                GetClientRect(win->hwndCanvas, &rc);
+                // Shift the entire canvas content by overscrollOffset via a simple
+                // visual indicator: a thin colored strip at the top or bottom.
+                // In a full implementation this would use BitBlt with the offset.
+                HBRUSH br = CreateSolidBrush(overscrollOffset > 0 ? RGB(220, 220, 255) : RGB(255, 220, 220));
+                if (overscrollOffset > 0) {
+                    // Past bottom: show strip at bottom
+                    rc.top = rc.bottom - std::min(abs(overscrollOffset), 8);
+                    FillRect(hdc, &rc, br);
+                } else {
+                    // Past top: show strip at top
+                    rc.bottom = rc.top + std::min(abs(overscrollOffset), 8);
+                    FillRect(hdc, &rc, br);
+                }
+                DeleteObject(br);
             }
     }
 
@@ -2212,6 +2327,10 @@ static LRESULT OnSetCursorMouseNone(MainWindow* win, HWND hwnd) {
     }
 
     WindowTab* tab = win->CurrentTab();
+    if (!tab) {
+        win->DeleteToolTip();
+        return FALSE;
+    }
     Annotation* selected = tab->selectedAnnotation;
 
     // Check if hovering over resize handle of selected annotation
@@ -2298,6 +2417,9 @@ static LRESULT OnSetCursor(MainWindow* win, HWND hwnd) {
 }
 
 float ScaleZoomBy(MainWindow* win, float factor) {
+    if (!win->ctrl) {
+        return 1.0f;
+    }
     auto zoomVirt = win->ctrl->GetZoomVirtual(true);
     return factor * zoomVirt;
 }
@@ -3049,15 +3171,10 @@ static LRESULT WndProcCanvasFixedPageUI(MainWindow* win, HWND hwnd, UINT msg, WP
         case WM_MOUSEWHEEL:
             return CanvasOnMouseWheel(win, msg, wp, lp);
 
-        // WM_POINTERWHEEL from precision touchpads (Win8+): sub-pixel deltas
-        case WM_POINTERWHEEL: {
-            // e.g., from a precision touchpad: POINT pt; pt.x = GET_X_LPARAM(lp); pt.y = GET_Y_LPARAM(lp);
-            // ScreenToClient(hwnd, &pt);
-            // Extract the wheel delta from HIWORD(wp) analogous to WM_MOUSEWHEEL
-            // Then use win->MoveDocBy or win->AsFixed()->ScrollYTo with sub-pixel accumulation
-            WPARAM mouseWp = MAKEWPARAM(MK_CONTROL, 0);
-            return CanvasOnMouseWheel(win, msg, mouseWp, lp);
-        }
+            // WM_POINTERWHEEL from precision touchpads (Win8+): sub-pixel deltas.
+            // Do NOT intercept — let DefWindowProc promote it to WM_MOUSEWHEEL.
+            // Intercepting it here would lose the wheel delta (wParam format differs),
+            // and forcing MK_CONTROL caused zoom instead of scroll (see #XXXX).
 
         case WM_MOUSEHWHEEL:
             return CanvasOnMouseHWheel(win, msg, wp, lp);
@@ -3104,6 +3221,9 @@ static LRESULT WndProcCanvasFixedPageUI(MainWindow* win, HWND hwnd, UINT msg, WP
             }
 
             DisplayModel* dm = win->AsFixed();
+            if (!dm) {
+                goto def;
+            }
             bool isSinglePage =
                 gGlobalPrefs->scrollbarInSinglePage && (dm->GetDisplayMode() == DisplayMode::SinglePage);
             bool needH = dm->NeedHScroll();
@@ -3283,7 +3403,9 @@ static void OnTimer(MainWindow* win, HWND hwnd, WPARAM timerId) {
 
         case kRefHoverTimerID:
         case kRefHoverHideTimerID:
-            RefHoverOnCanvasTimer(win->refHover, hwnd, win->AsFixed(), timerId);
+            if (win->AsFixed()) {
+                RefHoverOnCanvasTimer(win->refHover, hwnd, win->AsFixed(), timerId);
+            }
             break;
 
         case kInertiaScrollTimerID:

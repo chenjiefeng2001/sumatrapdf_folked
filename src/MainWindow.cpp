@@ -482,7 +482,17 @@ void LinkHandler::GotoLink(IPageDestination* dest) {
     if (kindDestinationLaunchEmbedded == kind) {
         PageDestination* pd = (PageDestination*)dest;
         if (pd->embedObjNum > 0) {
-            EngineBase* engine = win->CurrentTab()->AsFixed()->GetEngine();
+            EngineBase* engine = nullptr;
+            WindowTab* tab = win->CurrentTab();
+            if (tab) {
+                DisplayModel* dm = tab->AsFixed();
+                if (dm) {
+                    engine = dm->GetEngine();
+                }
+            }
+            if (!engine) {
+                return;
+            }
             Str data = EngineMupdfLoadAnnotAttachment(engine, pd->embedObjNum);
             if (!str::IsEmpty(data)) {
                 Str fileName = pd->GetValue2();

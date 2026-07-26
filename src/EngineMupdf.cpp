@@ -5212,7 +5212,13 @@ EngineBase* CreateEngineMupdfFromData(Str data, Str nameHint, PasswordUI* pwdUI)
     return engine;
 }
 
-// it's fast because we only collect pointers from FzPageInfo
+// Collects annotation pointers from all pages into annotsOut.
+// Relies on GetFzPageInfo's internal pagesLock for per-page safety.
+// NOTE: does NOT add an outer pagesLock here.  GetFzPageInfo internally
+// acquires pagesLock + docLock Shared + renderLock in the correct order
+// (pagesLock → docLock → renderLock).  Adding an outer pagesLock here
+// creates a nested critical section, which triggers the g_tlsCritSecDepth > 1
+// debug assertion at EngineMupdf.cpp:3545 (see report §5.1 Fix 7).
 void EngineMupdfGetAnnotations(EngineBase* engine, Vec<Annotation*>& annotsOut) {
     annotsOut.Clear();
 
@@ -5220,7 +5226,6 @@ void EngineMupdfGetAnnotations(EngineBase* engine, Vec<Annotation*>& annotsOut) 
     if (!e->pdfdoc) {
         return;
     }
-    ScopedCritSec scope(&e->pagesLock);
     for (int i = 1; i <= e->pageCount; i++) {
         FzPageInfo* pi = e->GetFzPageInfo(i, false);
         if (!pi) {

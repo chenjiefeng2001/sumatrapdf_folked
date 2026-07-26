@@ -4041,12 +4041,19 @@ Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
             fz_var(bitmap);
 
             fz_try(ctx) {
-                // Version consistency check: if annotation generation changed after
-                // we built the display list, the cached view is stale.  Abort the
-                // replay to avoid rendering a mismatched page.
-                if (pageInfo->displayListGeneration != pageInfo->annotGeneration) {
-                    keptList = nullptr; // force rebuild
-                }
+                // The display list was built (or validated) by
+                // GetOrBuildPageDisplayList (line 4031) which compares
+                // displayListGeneration vs annotGeneration and rebuilds
+                // when they differ.  After that call, keptList is either
+                // nullptr (build failed) or a generation-matched list.
+                // Re-checking the generation here is REDUNDANT and
+                // DANGEROUS: if the check DID trigger (which it can't
+                // under correct locking — we hold docLock Shared so the
+                // UI thread can't increment annotGeneration), keptList
+                // would be set to nullptr, skipping THE ENTIRE render
+                // replay and falling through to the unprotected fallback
+                // path (no docLock Shared).  Remove the dead check to
+                // eliminate this starvation trap.  See report §5.1 Fix 8.
                 if (keptList) {
                     pix = fz_new_pixmap_with_bbox(ctx, csRgb, ibounds, nullptr, 1);
                     fz_clear_pixmap_with_value(ctx, pix, 0xff);
@@ -5226,8 +5233,18 @@ void EngineMupdfGetAnnotations(EngineBase* engine, Vec<Annotation*>& annotsOut) 
     if (!e->pdfdoc) {
         return;
     }
+    // Use loadQuick=true: this is called from UpdateAnnotationsList() on the
+    // UI thread during annotation editing (add/delete/modify).  At this point
+    // the visible pages' annotations are already loaded by GetFzPageInfo's
+    // lazy-load mechanism.  For pages not yet visited, loadQuick avoids
+    // triggering full page loading (text extraction, annotation parsing)
+    // which would be wasteful — their annotation list is empty, which is
+    // the correct state for the editor UI.
+    // Using loadQuick=false would force ALL pages in the document (even
+    // hundreds of pages) to be fully loaded on every list refresh, causing
+    // multi-second UI hangs.  See report §5.1 Fix 9.
     for (int i = 1; i <= e->pageCount; i++) {
-        FzPageInfo* pi = e->GetFzPageInfo(i, false);
+        FzPageInfo* pi = e->GetFzPageInfo(i, true);
         if (!pi) {
             continue;
         }

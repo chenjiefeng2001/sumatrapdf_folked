@@ -38,6 +38,8 @@ import { testit as findMatchSelect } from "./issue-find-match-select.ts";
 import { testit as issue2252 } from "./issue-2252.ts";
 import { testit as issue1201 } from "./issue-1201.ts";
 import { testit as parseTipBrackets } from "./parse-tip-brackets.ts";
+import { testit as issueAnnotLocking } from "./issue-annot-locking.ts";
+import { testit as issueDisplayModeAnnot } from "./issue-display-mode-annot.ts";
 
 const tests: [string, () => void | Promise<void>][] = [
   ["combining-mark-first", combiningMarkFirst],
@@ -68,6 +70,8 @@ const tests: [string, () => void | Promise<void>][] = [
   ["issue-2252", issue2252],
   ["issue-1201", issue1201],
   ["parse-tip-brackets", parseTipBrackets],
+  ["issue-annot-locking", issueAnnotLocking],
+  ["issue-display-mode-annot", issueDisplayModeAnnot],
 ];
 
 export type AllTestOptions = {

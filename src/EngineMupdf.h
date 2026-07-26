@@ -48,6 +48,12 @@ struct FzPageInfo {
     // cached stext page for reuse; owned by this FzPageInfo, freed in ~FzPageInfo
     fz_stext_page* stextPage = nullptr;
 
+    // true after page dimensions (mediabox) have been loaded in FinishLoading()
+    // (or in GetFzPageInfo's lazy-load fallback).  Loaded separately from
+    // fullyLoaded because the layout engine (DisplayModel) needs page sizes
+    // even before full annotation/text loading.  See docs/reports §3.2.
+    bool dimensionsLoaded = false;
+
     // cached "View" rendering of the page; built lazily under
     // EngineMupdf::renderLock. fz_display_list is safe to *replay* across
     // cloned contexts in principle, but the image objects it references are

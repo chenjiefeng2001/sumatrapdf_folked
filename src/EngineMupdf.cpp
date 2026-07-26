@@ -2921,6 +2921,7 @@ static void FinishNonPDFLoading(EngineMupdf* e) {
         FzPageInfo* pageInfo = e->pages.at(i);
         pageInfo->mediabox = ToRectF(mbox);
         pageInfo->pageNo = i + 1;
+        pageInfo->dimensionsLoaded = true;
     }
 
     fz_try(ctx) {
@@ -3038,6 +3039,7 @@ bool EngineMupdf::FinishLoading() {
         FzPageInfo* pageInfo = pages[pageNo];
         pageInfo->mediabox = ToRectF(mbox);
         pageInfo->pageNo = pageNo + 1;
+        pageInfo->dimensionsLoaded = true;
     }
 
     fz_try(ctx) {
@@ -3558,8 +3560,14 @@ FzPageInfo* EngineMupdf::GetFzPageInfo(int pageNo, bool loadQuick, fz_cookie* co
     // IMPORTANT: SRWLOCK is NON-recursive. We MUST track whether we hold
     // the lock via docLockAcquired to avoid double-acquire / unmatched
     // release (which raises STATUS_RESOURCE_NOT_OWNED).
+    // Acquire docLock Shared when we need to access MuPDF pdf-level objects.
+    // Two scenarios require this:
+    //   1. Loading annotations (pdf_first_annot, pdf_first_widget — need pdf_page access).
+    //   2. Loading page dimensions for the first time (fz_bound_page needs the page tree).
+    // If both are already done, we can skip docLock entirely (fast path for loadQuick calls).
+    bool needDocLock = pdfdoc && (!pageInfo->annotsLoaded || !pageInfo->dimensionsLoaded);
     bool docLockAcquired = false;
-    if (pdfdoc && !pageInfo->annotsLoaded) {
+    if (needDocLock) {
         AcquireSRWLockShared(&docLock);
         docLockAcquired = true;
     }
@@ -3571,6 +3579,29 @@ FzPageInfo* EngineMupdf::GetFzPageInfo(int pageNo, bool loadQuick, fz_cookie* co
         }
         fz_catch(ctx) {
             fz_report_error(ctx);
+        }
+    }
+
+    // Phase 1: ensure page dimensions (mediabox) are loaded.
+    // The layout engine (DisplayModel) calls PageMediabox() for ALL visible
+    // pages to compute scroll extents.  If dimensions are missing (e.g. due
+    // to an edge case in FinishLoading), the UI assigns zero size → the page
+    // gets a zero-height layout tile → when rendered, the bitmap is squashed
+    // into a thin strip ("上一页被固定在上方并压缩").
+    // This fallback is nearly free (fz_bound_page is ~1µs for a cached page).
+    if (!pageInfo->dimensionsLoaded && pageInfo->page) {
+        fz_try(ctx) {
+            fz_rect mbox = fz_bound_page(ctx, pageInfo->page);
+            pageInfo->mediabox = ToRectF(mbox);
+            pageInfo->dimensionsLoaded = true;
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+            // Safe fallback: use a default size so layout doesn't break
+            if (!pageInfo->dimensionsLoaded) {
+                pageInfo->mediabox = RectF(0, 0, 612, 792);
+                pageInfo->dimensionsLoaded = true;
+            }
         }
     }
 
@@ -3624,12 +3655,17 @@ FzPageInfo* EngineMupdf::GetFzPageInfo(int pageNo, bool loadQuick, fz_cookie* co
         }
 
         RebuildCommentsFromAnnotations(ctx, pageInfo);
+    } else if (docLockAcquired) {
+        // docLock was acquired for dimensions loading but annotations were
+        // already loaded.  Release it now (before the loadQuick check) so
+        // we don't hold docLock unnecessarily through the rest of the function.
+        ReleaseSRWLockShared(&docLock);
+        docLockAcquired = false;
     }
-    // NOTE: no `else if` release here. The docLock was ONLY acquired when
-    // !pageInfo->annotsLoaded (checked at line 3532). If annotsLoaded was
-    // already true on entry, docLock was never acquired and must NOT be
-    // released — doing so triggers STATUS_RESOURCE_NOT_OWNED (CRASH).
-    // See docs/reports/annot-render-crash-analysis.md §5.1 Fix 2.
+    // NOTE: docLock is released above in either branch when the acquired-for
+    // work is done.  If neither branch triggered, docLockAcquired is false
+    // and docLock was never held — must NOT call ReleaseSRWLockShared here,
+    // as that would crash with STATUS_RESOURCE_NOT_OWNED.
 
     if (loadQuick || pageInfo->fullyLoaded) {
         return pageInfo;

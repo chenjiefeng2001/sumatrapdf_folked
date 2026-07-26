@@ -854,6 +854,31 @@ static LPWSTR GetCursorForResizeHandle(ResizeHandle handle) {
     }
 }
 
+// Centralized post-annotation-modification handler.
+// Must be called after every annotation create / modify / delete / move operation
+// so the RenderCache discards stale tiles and the viewport refreshes.
+// See docs/reports/annot-render-crash-analysis.md §5.4.
+static void OnAnnotationModified(MainWindow* win, Annotation* annot, RectF* knownBounds) {
+    DisplayModel* dm = win->AsFixed();
+    if (!dm || !annot || !gRenderCache) {
+        return;
+    }
+    int pageNo = annot->pageNo;
+    RectF r = knownBounds ? *knownBounds : GetRect(annot);
+    if (r.IsEmpty()) {
+        // Guard against zero-area rect: fall back to the full page so the
+        // tile-level granularity still works (a zero rect would match no tiles).
+        EngineBase* engine = dm->GetEngine();
+        if (engine) {
+            r = engine->PageMediabox(pageNo);
+        }
+    }
+    gRenderCache->Invalidate(dm, pageNo, r);
+    NotifyAnnotationsChanged(win->CurrentTab()->editAnnotsWindow);
+    MainWindowRerender(win);
+    ToolbarUpdateStateForWindow(win, true);
+}
+
 // return true if this was annotation dragging
 static bool StopDraggingAnnotation(MainWindow* win, int x, int y, bool aborted) {
     Annotation* annot = win->annotationBeingDragged;
@@ -885,15 +910,7 @@ static bool StopDraggingAnnotation(MainWindow* win, int x, int y, bool aborted) 
         // logf("prev rect: x=%.2f, y=%.2f, dx=%.2f, dy=%.2f\n", ar.x, ar.y, ar.dx, ar.dy);
         // logf(" new rect: x=%.2f, y=%.2f, dx=%.2f, dy=%.2f\n", r.x, r.y, r.dx, r.dy);
         SetRect(annot, r);
-        // Invalidate the RenderCache for this page so stale D2D/GDI tiles
-        // are not reused when PaintTile finds a matching cache entry.
-        // Without this, old tiles may be stretched into the viewport leading to
-        // visual artifacts ("上一页一直压缩在视口" bug, see §5.2 in
-        // docs/reports/annot-render-crash-analysis.md).
-        gRenderCache->Invalidate(dm, pageNo, ar);
-        NotifyAnnotationsChanged(win->CurrentTab()->editAnnotsWindow);
-        MainWindowRerender(win);
-        ToolbarUpdateStateForWindow(win, true);
+        OnAnnotationModified(win, annot, &ar);
     }
     return true;
 }
@@ -1314,7 +1331,7 @@ static void OnMouseLeftButtonDown(MainWindow* win, int x, int y, WPARAM key) {
     // the click in either case so it doesn't start a drag/selection.
     Annotation* widget = dm->GetWidgetAtPos(pt);
     if (ToggleFormButton(widget)) {
-        MainWindowRerender(win);
+        OnAnnotationModified(win, widget, nullptr);
         win->mouseAction = MouseAction::None;
         return;
     }

@@ -2646,11 +2646,26 @@ void FreePixmapNativeBitmap(Pixmap* p) {
         return;
     }
     if (p->hbmp) {
+#ifdef DEBUG
+        // GDI handle leak detection: DeleteObject MUST succeed.  If it fails
+        // the HBITMAP is still referenced (e.g. selected into a non-destroyed
+        // HDC, or already deleted).  Leaking GDI handles causes eventual
+        // global UI whiteout once the 10,000-handle process limit is hit.
+        // See docs/reports/annot-render-crash-analysis.md §CPU-side.
+        BOOL ok = DeleteObject((HBITMAP)p->hbmp);
+        ReportIf(!ok && GetLastError() != ERROR_INVALID_PARAMETER);
+#else
         DeleteObject((HBITMAP)p->hbmp);
+#endif
         p->hbmp = nullptr;
     }
     if (p->hMap) {
+#ifdef DEBUG
+        BOOL ok = CloseHandle((HANDLE)p->hMap);
+        ReportIf(!ok);
+#else
         CloseHandle((HANDLE)p->hMap);
+#endif
         p->hMap = nullptr;
     }
     p->data = nullptr; // was owned by the DIB section

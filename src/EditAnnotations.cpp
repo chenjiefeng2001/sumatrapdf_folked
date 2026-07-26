@@ -31,6 +31,7 @@ extern "C" {
 #include "DarkModeSubclass.h"
 
 #include "base/Log.h"
+#include "RenderCache.h"
 
 #include "theme.h"
 
@@ -214,6 +215,19 @@ void DeleteAnnotationAndUpdateUI(WindowTab* tab, Annotation* annot) {
             annot = PickNewSelectedAnnotation(ew, currSelIdx);
         }
 #endif
+    }
+    // Invalidate the RenderCache for the page whose annotation was just deleted,
+    // otherwise the stale tiles (still showing the deleted annotation) are reused
+    // on the next PaintTile until the page cache is naturally evicted.
+    if (gRenderCache) {
+        DisplayModel* dm = tab->AsFixed();
+        if (dm) {
+            EngineBase* engine = dm->GetEngine();
+            if (engine) {
+                RectF fullPage = engine->PageMediabox(annot->pageNo);
+                gRenderCache->Invalidate(dm, annot->pageNo, fullPage);
+            }
+        }
     }
     SetSelectedAnnotation(tab, selectNext);
 }
@@ -630,6 +644,24 @@ static void DoTextAlignment(EditAnnotationsWindow* ew, Annotation* annot) {
     ew->dropDownTextAlignment->SetIsVisible(true);
 }
 
+// Invalidate the RenderCache for the page that owns ew->tab->selectedAnnotation,
+// then trigger a full-render.  Must be called after every annotation property
+// change so stale cached bitmap tiles are not reused on the next PaintTile
+// (see docs/reports/annot-render-crash-analysis.md §5.4).
+static void InvalidateAnnotPageAndRerender(EditAnnotationsWindow* ew, Annotation* annot) {
+    if (gRenderCache) {
+        DisplayModel* dm = ew->tab->AsFixed();
+        if (dm) {
+            EngineBase* engine = dm->GetEngine();
+            if (engine) {
+                RectF fullPage = engine->PageMediabox(annot->pageNo);
+                gRenderCache->Invalidate(dm, annot->pageNo, fullPage);
+            }
+        }
+    }
+    MainWindowRerender(ew->tab->win);
+}
+
 static void TextAlignmentSelectionChanged(EditAnnotationsWindow* ew) {
     auto annot = ew->tab->selectedAnnotation;
     if (!annot || !annot->engine) {
@@ -639,7 +671,7 @@ static void TextAlignmentSelectionChanged(EditAnnotationsWindow* ew) {
     int newQuadding = idx;
     SetQuadding(annot, newQuadding);
     EnableSaveIfAnnotationsChanged(ew);
-    MainWindowRerender(ew->tab->win);
+    InvalidateAnnotPageAndRerender(ew, annot);
 }
 
 static void DoTextFont(EditAnnotationsWindow* ew, Annotation* annot) {
@@ -667,7 +699,7 @@ static void TextFontSelectionChanged(EditAnnotationsWindow* ew) {
     Str font = SeqStrByIndex(gFontNames, idx);
     SetDefaultAppearanceTextFont(annot, font);
     EnableSaveIfAnnotationsChanged(ew);
-    MainWindowRerender(ew->tab->win);
+    InvalidateAnnotPageAndRerender(ew, annot);
 }
 
 static void DoTextSize(EditAnnotationsWindow* ew, Annotation* annot) {
@@ -696,7 +728,7 @@ static void TextFontSizeChanging(EditAnnotationsWindow* ew, Trackbar::PositionCh
     TempStr s = fmt(_TRA("Text Size: %d").s, fontSize);
     ew->staticTextSize->SetText(s);
     EnableSaveIfAnnotationsChanged(ew);
-    MainWindowRerender(ew->tab->win);
+    InvalidateAnnotPageAndRerender(ew, annot);
 }
 
 static void DoTextColor(EditAnnotationsWindow* ew, Annotation* annot) {
@@ -719,7 +751,7 @@ static void TextColorSelectionChanged(EditAnnotationsWindow* ew) {
     auto col = GetDropDownColor(item);
     SetDefaultAppearanceTextColor(annot, col);
     EnableSaveIfAnnotationsChanged(ew);
-    MainWindowRerender(ew->tab->win);
+    InvalidateAnnotPageAndRerender(ew, annot);
 }
 
 static void DoBorder(EditAnnotationsWindow* ew, Annotation* annot) {
@@ -745,7 +777,7 @@ static void BorderWidthChanging(EditAnnotationsWindow* ew, Trackbar::PositionCha
     TempStr s = fmt(_TRA("Border: %d").s, borderWidth);
     ew->staticBorder->SetText(s);
     EnableSaveIfAnnotationsChanged(ew);
-    MainWindowRerender(ew->tab->win);
+    InvalidateAnnotPageAndRerender(ew, annot);
 }
 
 static void DoLineStartEnd(EditAnnotationsWindow* ew, Annotation* annot) {
@@ -776,7 +808,7 @@ static void LineStartSelectionChanged(EditAnnotationsWindow* ew) {
     }
     SetLineStartStyles(annot, start);
     EnableSaveIfAnnotationsChanged(ew);
-    MainWindowRerender(ew->tab->win);
+    InvalidateAnnotPageAndRerender(ew, annot);
 }
 
 static void LineEndSelectionChanged(EditAnnotationsWindow* ew) {
@@ -790,7 +822,7 @@ static void LineEndSelectionChanged(EditAnnotationsWindow* ew) {
     }
     SetLineEndStyles(annot, end);
     EnableSaveIfAnnotationsChanged(ew);
-    MainWindowRerender(ew->tab->win);
+    InvalidateAnnotPageAndRerender(ew, annot);
 }
 
 static void DoIcon(EditAnnotationsWindow* ew, Annotation* annot) {
@@ -832,7 +864,7 @@ static void IconSelectionChanged(EditAnnotationsWindow* ew) {
     auto item = ew->dropDownIcon->items.At(idx);
     SetIconName(annot, item);
     EnableSaveIfAnnotationsChanged(ew);
-    MainWindowRerender(ew->tab->win);
+    InvalidateAnnotPageAndRerender(ew, annot);
 }
 
 static void DoColor(EditAnnotationsWindow* ew, Annotation* annot) {
@@ -862,7 +894,7 @@ static void ColorSelectionChanged(EditAnnotationsWindow* ew) {
     auto col = GetDropDownColor(item);
     SetColor(annot, col);
     EnableSaveIfAnnotationsChanged(ew);
-    MainWindowRerender(ew->tab->win);
+    InvalidateAnnotPageAndRerender(ew, annot);
 }
 
 static void DoInteriorColor(EditAnnotationsWindow* ew, Annotation* annot) {
@@ -885,7 +917,7 @@ static void InteriorColorSelectionChanged(EditAnnotationsWindow* ew) {
     auto col = GetDropDownColor(item);
     SetInteriorColor(annot, col);
     EnableSaveIfAnnotationsChanged(ew);
-    MainWindowRerender(ew->tab->win);
+    InvalidateAnnotPageAndRerender(ew, annot);
 }
 
 static void DoOpacity(EditAnnotationsWindow* ew, Annotation* annot) {
@@ -918,7 +950,7 @@ static void OpacityChanging(EditAnnotationsWindow* ew, Trackbar::PositionChangin
     TempStr s = fmt(_TRA("Opacity: %d").s, opacity);
     ew->staticOpacity->SetText(s);
     EnableSaveIfAnnotationsChanged(ew);
-    MainWindowRerender(ew->tab->win);
+    InvalidateAnnotPageAndRerender(ew, annot);
 }
 
 // TODO: maybe use ew->tab->selectedAnnotation instead of annot
@@ -1130,6 +1162,19 @@ static void ContentsChanged(EditAnnotationsWindow* ew) {
     txt = str::ReplaceTemp(txt, StrL("\r\n"), StrL("\n"));
     SetContents(a, txt);
     EnableSaveIfAnnotationsChanged(ew);
+
+    // Invalidate stale tiles immediately (not deferred) so the next PaintTile
+    // does not reuse the old annotation-content bitmap.
+    if (gRenderCache) {
+        DisplayModel* dm = ew->tab->AsFixed();
+        if (dm) {
+            EngineBase* engine = dm->GetEngine();
+            if (engine) {
+                RectF fullPage = engine->PageMediabox(a->pageNo);
+                gRenderCache->Invalidate(dm, a->pageNo, fullPage);
+            }
+        }
+    }
 
     MainWindow* win = ew->tab->win;
     if (gMainWindowRerenderTimer != 0) {

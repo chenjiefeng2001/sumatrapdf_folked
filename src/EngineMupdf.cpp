@@ -4223,24 +4223,47 @@ void HandleLinkMupdf(EngineMupdf* e, IPageDestination* dest, ILinkHandler* linkH
         return;
     }
 
-    // those locks must be taken in this order
-    // we need to lock pagesLock because it might
-    // be taken below
-    ScopedCritSec csPages(&e->pagesLock);
-    ScopedSRWLockExclusive cs(&e->docLock);
-
+    // Lock order: docLock [Exclusive] → pagesLock (NOT pagesLock → docLock).
+    //
+    // WHY this order?  ScopedSRWLockExclusive (ScopedWin.h:69) fires the
+    // debug assertion `ReportIf(g_tlsCritSecDepth > 0)` because holding a
+    // CRITICAL_SECTION (pagesLock) while acquiring an SRW lock (docLock) is
+    // a lock-order-inversion risk when path C (a background task that skips
+    // pagesLock) contends with this path (see §4.1 of multithreading-report.md).
+    //
+    // The fix: resolve the MuPDF link dest INSIDE a docLock-only scope (no CS
+    // held), then call ScrollTo (which may need pagesLock) OUTSIDE the docLock
+    // scope.  This cleanly separates the two lock domains and satisfies both
+    // the SRWLock assertion and the pagesLock → docLock → renderLock hierarchy.
     int pageNo = -1;
-    fz_link_dest ldest{};
-    auto ctx = e->Ctx();
-    fz_var(pageNo);
-    fz_try(ctx) {
-        ldest = fz_resolve_link_dest(ctx, e->_doc, CStrTemp(uri));
-        pageNo = fz_page_number_from_location(ctx, e->_doc, ldest.loc);
-    }
-    fz_catch(ctx) {
-        fz_report_error(ctx);
-        logfa("HandleLinkMupdf: fz_resolve_link() for '%s' failed\n", uri);
-    }
+    float zoom = 0.f;
+    RectF r(0, 0, 0, 0);
+    {
+        // Phase 1: resolve MuPDF link destination under docLock [Exclusive].
+        // No CRITICAL_SECTION held → ScopedSRWLockExclusive assertion passes.
+        ScopedSRWLockExclusive cs(&e->docLock);
+
+        fz_link_dest ldest{};
+        auto ctx = e->Ctx();
+        fz_var(pageNo);
+        fz_try(ctx) {
+            ldest = fz_resolve_link_dest(ctx, e->_doc, CStrTemp(uri));
+            pageNo = fz_page_number_from_location(ctx, e->_doc, ldest.loc);
+
+            // TODO: handle ldest.type like FZ_LINK_DEST_FIT_H ?
+            float x = isnan(ldest.x) ? DEST_USE_DEFAULT : ldest.x;
+            float y = isnan(ldest.y) ? DEST_USE_DEFAULT : ldest.y;
+            zoom = ldest.zoom;
+            float w = isnan(ldest.w) ? DEST_USE_DEFAULT : ldest.w;
+            float h = isnan(ldest.h) ? DEST_USE_DEFAULT : ldest.h;
+            r = RectF(x, y, w, h);
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+            logfa("HandleLinkMupdf: fz_resolve_link() for '%s' failed\n", uri);
+        }
+    } // docLock released here — no SRW lock held during ScrollTo
+
     if (pageNo < 0) {
         TempStr localPath;
         Str localFragment;
@@ -4251,15 +4274,9 @@ void HandleLinkMupdf(EngineMupdf* e, IPageDestination* dest, ILinkHandler* linkH
         return;
     }
 
-    // TODO: handle ldest.type like FZ_LINK_DEST_FIT_H ?
-    float x = isnan(ldest.x) ? DEST_USE_DEFAULT : ldest.x;
-    float y = isnan(ldest.y) ? DEST_USE_DEFAULT : ldest.y;
-    float zoom = isnan(ldest.zoom) ? 0.f : ldest.zoom;
+    // Phase 2: navigate.  ScrollTo may need pagesLock (via GetPageInfo etc.),
+    // but docLock is already released — no risk of lock-order inversion.
     zoom = zoom / 100; // mupdf uses 100 as 100% zoom, we use 1
-    float w = isnan(ldest.w) ? DEST_USE_DEFAULT : ldest.w;
-    float h = isnan(ldest.h) ? DEST_USE_DEFAULT : ldest.h;
-
-    RectF r(x, y, w, h);
     auto ctrl = linkHandler->GetDocController();
     ctrl->ScrollTo(pageNo + 1, r, zoom);
 }
@@ -5450,54 +5467,67 @@ NO_INLINE void MarkNotificationAsModified(EngineMupdf* e, Annotation* annot, Ann
     // to annotations inside mupdf but we don't want loose the identity
     // so on add /remove we update the list manually
     // on change we assume Annotation* lives inside EngineMupdf
-    ScopedCritSec scope(&e->pagesLock);
-    FzPageInfo* pageInfo = e->pages[pageIdx];
 
-    if (change == AnnotationChange::Remove) {
-        int sizeBefore = len(pageInfo->annotations);
-        int removedPos = pageInfo->annotations.Remove(annot);
-        ReportIf(removedPos < 0); // must exist
-        int sizeNow = len(pageInfo->annotations);
-        ReportIf(sizeBefore != sizeNow + 1);
-        ValidateAnnotationsInSync(e, pageInfo);
-    } else if (change == AnnotationChange::Add) {
-        int sizeBefore = len(pageInfo->annotations);
-        int pos = pageInfo->annotations.Find(annot);
-        ReportIf(pos >= 0); // shouldn't exist
-        pageInfo->annotations.Append(annot);
-        int sizeNow = len(pageInfo->annotations);
-        ReportIf(sizeBefore != sizeNow - 1);
-        ValidateAnnotationsInSync(e, pageInfo);
-    } else {
-        ReportIf(change != AnnotationChange::Modify);
+    FzPageInfo* pageInfo = nullptr;
+
+    // ─────────────────────────────────────────────────────────────────
+    // Phase 1: Update the annotation list under pagesLock (CS only).
+    //   g_tlsCritSecDepth → 1.  NO SRW lock acquired while holding CS,
+    //   so ScopedSRWLockExclusive assertion (ScopedWin.h:69) is satisfied.
+    // ─────────────────────────────────────────────────────────────────
+    {
+        ScopedCritSec scope(&e->pagesLock);
+        pageInfo = e->pages[pageIdx];
+
+        if (change == AnnotationChange::Remove) {
+            int sizeBefore = len(pageInfo->annotations);
+            int removedPos = pageInfo->annotations.Remove(annot);
+            ReportIf(removedPos < 0); // must exist
+            int sizeNow = len(pageInfo->annotations);
+            ReportIf(sizeBefore != sizeNow + 1);
+            ValidateAnnotationsInSync(e, pageInfo);
+        } else if (change == AnnotationChange::Add) {
+            int sizeBefore = len(pageInfo->annotations);
+            int pos = pageInfo->annotations.Find(annot);
+            ReportIf(pos >= 0); // shouldn't exist
+            pageInfo->annotations.Append(annot);
+            int sizeNow = len(pageInfo->annotations);
+            ReportIf(sizeBefore != sizeNow - 1);
+            ValidateAnnotationsInSync(e, pageInfo);
+        } else {
+            ReportIf(change != AnnotationChange::Modify);
+        }
+    } // pagesLock released → g_tlsCritSecDepth → 0
+
+    if (!pageInfo) {
+        return;
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Phase 2: Rebuild MuPDF comments under docLock Exclusive.
+    //   No CRITICAL_SECTION held → ScopedSRWLockExclusive assertion passes.
+    //   This is safe: the Annotation* list was already updated in Phase 1
+    //   under pagesLock; RebuildCommentsFromAnnotations traverses the live
+    //   Vec<Annotation*> entries (not pagesLock-protected metadata) to
+    //   regenerate the fz_stext_page comment overlay.
+    // ─────────────────────────────────────────────────────────────────
     {
         auto ctx = e->Ctx();
         ScopedSRWLockExclusive ctxScope(&e->docLock);
         RebuildCommentsFromAnnotations(ctx, pageInfo);
-    }
+    } // docLock released
+
     pageInfo->annotGeneration++;
     pageInfo->elementsNeedRebuilding = true;
 
-    // cached display list captured the old annotations; drop it so the next
-    // render rebuilds with the new state.
+    // ─────────────────────────────────────────────────────────────────
+    // Phase 3: Drop the stale displayList under renderLock (CS only).
+    //   No SRW held → no violation of the pagesLock→docLock→renderLock
+    //   hierarchy.  docLock was released in Phase 2, so the following
+    //   ScopedCritSec(&renderLock) is safe.
+    // ─────────────────────────────────────────────────────────────────
     {
         auto ctx = e->Ctx();
-#ifdef DEBUG
-        // Lock-ordering invariant: we must NOT hold docLock while acquiring
-        // renderLock. The caller (annotation setter) released docLock Exclusive
-        // before this section via the ScopedSRWLockExclusive scope exit above.
-        // If docLock is still held here it means the caller forgot to release it,
-        // which inverts the pagesLock→docLock→renderLock hierarchy and could
-        // deadlock with a concurrent rendering thread that holds renderLock and
-        // tries to acquire docLock Shared.
-        // We can't directly query SRW lock ownership, but we can catch the symptom:
-        // if docLock Exclusive is still held by this thread, trying to acquire
-        // renderLock won't deadlock (same thread), but it violates the hierarchy.
-        // We check the docLock scope: at this point the docLock Excl scope above
-        // should have been destroyed (its destructor ran at line 5359).
-        // The next line acquires renderLock, which is safe only if docLock is free.
-#endif
         ScopedCritSec rl(&e->renderLock);
         if (pageInfo->displayList) {
             fz_drop_display_list(ctx, pageInfo->displayList);

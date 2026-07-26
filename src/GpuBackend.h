@@ -35,6 +35,13 @@ struct GpuBackend {
     // Whether the backend was successfully initialized and is usable.
     bool isAvailable = false;
 
+    // Monotonically-increasing counter bumped each time the D2D factory or
+    // render-target state is re-created (at present, this never re-creates in
+    // practice — the counter is a forward-looking guard).  Callers compare
+    // this against Pixmap::d2dDeviceGeneration to detect stale device-domain
+    // bitmaps that would trigger D2DERR_WRONG_RESOURCE_DOMAIN.
+    int GetDeviceGeneration() const { return deviceGeneration; }
+
     // Create an ID2D1Bitmap on the given render target from a Pixmap's pixel
     // data by copying (and flipping) the pixels into a D2D system-memory bitmap.
     // The returned bitmap is owned by the caller (stored in Pixmap::d2dBitmap).
@@ -48,6 +55,12 @@ struct GpuBackend {
     // D2D and GDI can interop on the same device context. Returns nullptr
     // if creation fails. Released automatically on destruction.
     ID2D1DCRenderTarget* GetRenderTarget(HDC hdc);
+
+    // Force-recreate the D2D render target and bump the device generation so
+    // that all cached ID2D1Bitmap instances are lazily re-created on the next
+    // PaintTile. Call on the UI thread after detecting D2DERR_RECREATE_TARGET
+    // (GPU device lost / driver reset). See docs/reports/d2d-device-generation-analysis.md §5.2.
+    void RecreateRenderTarget();
 
     // ── D2D overlay helpers (replaces GDI+ for annotation/selection rendering) ──
     //
@@ -87,6 +100,10 @@ struct GpuBackend {
     // acceptable since rendering is serialized in the UI thread).
     ID2D1DCRenderTarget* cachedRT = nullptr;
     HDC cachedHDC = nullptr;
+
+    // Generation counter for D2D device-affinity checks. Incremented when
+    // the D2D factory is re-created (not yet wired; present for future use).
+    int deviceGeneration = 1;
 };
 
 // Global GPU backend singleton. Created on first canvas paint if GPU is

@@ -9,6 +9,10 @@
 #include "base/Log.h"
 #include "GpuBackend.h"
 
+// Forward-declare the device-generation diagnostics counter (defined in RenderCache.cpp)
+// so that D2D overlay helpers can bump it on EndDraw failure.
+extern LONG gDeviceGenRecreations;
+
 #ifdef DEBUG
 // Main thread ID for D2D thread-affinity assertions.
 // Set in GpuBackend::GpuBackend(), which runs on the UI thread.
@@ -73,6 +77,19 @@ ID2D1DCRenderTarget* GpuBackend::GetRenderTarget(HDC hdc) {
         return nullptr;
     }
 
+    // Bump the device generation counter so that previously-uploaded
+    // ID2D1Bitmap instances (created on the old render target) are
+    // detected as belonging to a different resource domain on the next
+    // PaintTile call and are safely re-created on the new device.
+    // Without this, DrawBitmap + EndDraw would fail with
+    // D2DERR_WRONG_RESOURCE_DOMAIN (0x88990015) and fall back to GDI
+    // for every tile, causing visible stutter during scrolling/resizing.
+    // See docs/reports/d2d-device-generation-analysis.md §5.1.
+    deviceGeneration++;
+#ifdef DEBUG
+    ReportIf(deviceGeneration <= 0); // must remain positive after each bump
+#endif
+
     // Bind the DC render target to the entire HDC.
     // For memory DCs (double buffer), WindowFromDC returns NULL and
     // ClientRECT(NULL) would yield garbage, so get the extent from
@@ -113,6 +130,32 @@ ID2D1DCRenderTarget* GpuBackend::GetRenderTarget(HDC hdc) {
 
     cachedHDC = hdc;
     return cachedRT;
+}
+
+void GpuBackend::RecreateRenderTarget() {
+#ifdef DEBUG
+    // D2D resource operations must happen on the UI thread.
+    // RecreateRenderTarget is called from PaintTile (UI thread), so this
+    // assertion verifies the caller hasn't changed.
+    // TODO: add CrashIf if crash reporting infrastructure is available.
+#endif
+    if (cachedRT) {
+        cachedRT->Release();
+        cachedRT = nullptr;
+        cachedHDC = nullptr;
+    }
+    // Bump the generation so that all previously-uploaded ID2D1Bitmap
+    // instances are detected as stale on the next PaintTile and are
+    // lazily re-created on the new (future) render target.
+    deviceGeneration++;
+#ifdef DEBUG
+    ReportIf(deviceGeneration <= 0); // must remain positive
+#endif
+    InterlockedIncrement(&gDeviceGenRecreations);
+    logfa(
+        "[RenderCache Diagnostic] GpuBackend::RecreateRenderTarget: "
+        "D2D device recreated. New device generation = %d.\n",
+        deviceGeneration);
 }
 
 ID2D1Bitmap* GpuBackend::CreateBitmapFromPixmap(ID2D1DCRenderTarget* rt, const Pixmap* pixmap) {
@@ -311,7 +354,15 @@ bool GpuBackend::DrawOverlayRects(HDC hdc, Rect screenRc, Vec<Rect>& rects, COLO
     }
 
     brush->Release();
-    rt->EndDraw();
+    HRESULT hrEnd = rt->EndDraw();
+    if (FAILED(hrEnd)) {
+        logfa("[RenderCache Diagnostic] D2D EndDraw failed in DrawOverlayRects HRESULT=0x%08X\n", (unsigned)hrEnd);
+        if (hrEnd == D2DERR_RECREATE_TARGET && gGpuBackend) {
+            InterlockedIncrement(&gDeviceGenRecreations);
+            gGpuBackend->RecreateRenderTarget();
+        }
+        return false;
+    }
     return true;
 }
 
@@ -343,7 +394,15 @@ bool GpuBackend::DrawDashedBorder(HDC hdc, Rect rect, COLORREF color, float widt
 
     brush->Release();
     dashStyle->Release();
-    rt->EndDraw();
+    HRESULT hrEnd = rt->EndDraw();
+    if (FAILED(hrEnd)) {
+        logfa("[RenderCache Diagnostic] D2D EndDraw failed in DrawDashedBorder HRESULT=0x%08X\n", (unsigned)hrEnd);
+        if (hrEnd == D2DERR_RECREATE_TARGET && gGpuBackend) {
+            InterlockedIncrement(&gDeviceGenRecreations);
+            gGpuBackend->RecreateRenderTarget();
+        }
+        return false;
+    }
     return true;
 }
 
@@ -371,7 +430,15 @@ bool GpuBackend::DrawResizeHandle(HDC hdc, int x, int y, int size) {
         borderBrush->Release();
     }
 
-    rt->EndDraw();
+    HRESULT hrEnd = rt->EndDraw();
+    if (FAILED(hrEnd)) {
+        logfa("[RenderCache Diagnostic] D2D EndDraw failed in DrawResizeHandle HRESULT=0x%08X\n", (unsigned)hrEnd);
+        if (hrEnd == D2DERR_RECREATE_TARGET && gGpuBackend) {
+            InterlockedIncrement(&gDeviceGenRecreations);
+            gGpuBackend->RecreateRenderTarget();
+        }
+        return false;
+    }
     return true;
 }
 
@@ -391,7 +458,15 @@ bool GpuBackend::DrawFillRect(HDC hdc, Rect rect, COLORREF color, u8 alpha) {
     rt->FillRectangle(&rc, brush);
     brush->Release();
 
-    rt->EndDraw();
+    HRESULT hrEnd = rt->EndDraw();
+    if (FAILED(hrEnd)) {
+        logfa("[RenderCache Diagnostic] D2D EndDraw failed in DrawFillRect HRESULT=0x%08X\n", (unsigned)hrEnd);
+        if (hrEnd == D2DERR_RECREATE_TARGET && gGpuBackend) {
+            InterlockedIncrement(&gDeviceGenRecreations);
+            gGpuBackend->RecreateRenderTarget();
+        }
+        return false;
+    }
     return true;
 }
 
@@ -411,7 +486,15 @@ bool GpuBackend::DrawSolidBorder(HDC hdc, Rect rect, COLORREF color, float width
     rt->DrawRectangle(&rc, brush, width);
     brush->Release();
 
-    rt->EndDraw();
+    HRESULT hrEnd = rt->EndDraw();
+    if (FAILED(hrEnd)) {
+        logfa("[RenderCache Diagnostic] D2D EndDraw failed in DrawSolidBorder HRESULT=0x%08X\n", (unsigned)hrEnd);
+        if (hrEnd == D2DERR_RECREATE_TARGET && gGpuBackend) {
+            InterlockedIncrement(&gDeviceGenRecreations);
+            gGpuBackend->RecreateRenderTarget();
+        }
+        return false;
+    }
     return true;
 }
 

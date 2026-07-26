@@ -6028,6 +6028,15 @@ static Annotation* MakeAnnotationsFromSelection(WindowTab* tab, AnnotCreateArgs*
     }
     UpdateAnnotationsList(tab->editAnnotsWindow);
 
+    // Invalidate the RenderCache for the page so stale tiles (drawn before the
+    // annotation was created) are not reused.  The old tiles lack the new
+    // annotation and would produce a 1+ frame visual flicker/stretch.
+    // See docs/reports/annot-render-crash-analysis.md §5.4.
+    if (annot && gRenderCache) {
+        RectF fullPage = engine->PageMediabox(annot->pageNo);
+        gRenderCache->Invalidate(dm, annot->pageNo, fullPage);
+    }
+
     // copy selection to clipboard so that user can use Ctrl-V to set contents
     if (args->copyToClipboard) {
         CopySelectionToClipboard(win);

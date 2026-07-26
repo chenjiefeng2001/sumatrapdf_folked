@@ -957,6 +957,7 @@
     <ClCompile Include="..\src\base\tests\CssParser_ut.cpp" />
     <ClCompile Include="..\src\base\tests\Dict_ut.cpp" />
     <ClCompile Include="..\src\base\tests\File_ut.cpp" />
+    <ClCompile Include="..\src\base\tests\GpuBackend_ut.cpp" />
     <ClCompile Include="..\src\base\tests\JsonParser_ut.cpp" />
     <ClCompile Include="..\src\base\tests\RefHover_ut.cpp" />
     <ClCompile Include="..\src\base\tests\SettingsUtil_ut.cpp" />

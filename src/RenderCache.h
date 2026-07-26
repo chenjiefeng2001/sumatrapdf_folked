@@ -27,6 +27,14 @@ extern i64 gGpuCompositeUs; // total microseconds in GPU (D2D) compositing
 extern LONG gGdiCompositeCount;
 extern i64 gGdiCompositeUs; // total microseconds in GDI (BitBlt/StretchBlt) compositing
 
+// Performance counters for D2D device-generation diagnostics.
+// gDeviceGenEvictions:   number of times a stale d2dBitmap was evicted due to device generation mismatch
+// gDeviceGenRecreations: number of times RecreateRenderTarget() was called (GPU device lost)
+// gD2dErrorFallbacks:    number of times D2D EndDraw failed and fell back to GDI
+extern LONG gDeviceGenEvictions;
+extern LONG gDeviceGenRecreations;
+extern LONG gD2dErrorFallbacks;
+
 struct PageInfo;
 struct Pixmap;
 

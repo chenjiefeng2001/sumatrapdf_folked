@@ -220,6 +220,9 @@
     <ClCompile Include="..\src\base\tests\File_ut.cpp">
       <Filter>base\tests</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\base\tests\GpuBackend_ut.cpp">
+      <Filter>base\tests</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\base\tests\JsonParser_ut.cpp">
       <Filter>base\tests</Filter>
     </ClCompile>

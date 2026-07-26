@@ -40,6 +40,8 @@ import { testit as issue1201 } from "./issue-1201.ts";
 import { testit as parseTipBrackets } from "./parse-tip-brackets.ts";
 import { testit as issueAnnotLocking } from "./issue-annot-locking.ts";
 import { testit as issueDisplayModeAnnot } from "./issue-display-mode-annot.ts";
+import { testit as issueRenderStability } from "./issue-render-stability.ts";
+import { testit as issueAnnotCache } from "./issue-annot-cache.ts";
 
 const tests: [string, () => void | Promise<void>][] = [
   ["combining-mark-first", combiningMarkFirst],
@@ -72,6 +74,8 @@ const tests: [string, () => void | Promise<void>][] = [
   ["parse-tip-brackets", parseTipBrackets],
   ["issue-annot-locking", issueAnnotLocking],
   ["issue-display-mode-annot", issueDisplayModeAnnot],
+  ["issue-render-stability", issueRenderStability],
+  ["issue-annot-cache", issueAnnotCache],
 ];
 
 export type AllTestOptions = {

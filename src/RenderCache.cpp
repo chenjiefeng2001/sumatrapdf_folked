@@ -80,6 +80,11 @@ i64 gGpuCompositeUs = 0;
 LONG gGdiCompositeCount = 0;
 i64 gGdiCompositeUs = 0;
 
+// Performance counters for D2D device-generation diagnostics (defined in RenderCache.h)
+LONG gDeviceGenEvictions = 0;
+LONG gDeviceGenRecreations = 0;
+LONG gD2dErrorFallbacks = 0;
+
 // CONSERVE_MEMORY sets the compile-time default for gConserveMemory. When defined,
 // cached page bitmaps for non-visible pages are freed aggressively. Undefining it
 // keeps more pages resident (higher GDI memory use, fewer re-renders).
@@ -211,6 +216,16 @@ BitmapCacheEntry* RenderCache::Find(DisplayModel* dm, int pageNo, int rotation, 
         BitmapCacheEntry* e = cache[i];
         if ((dm == e->dm) && (pageNo == e->pageNo) && (rotation == e->rotation) &&
             (kInvalidZoom == zoom || zoom == e->zoom) && (!tile || e->tile == *tile)) {
+            // Reject out-of-date entries (invalidated after annotation modification,
+            // display mode switch, etc.).  An entry with outOfDate == true has
+            // zoom == kInvalidZoom (set by Invalidate()), so the zoom comparison
+            // above *already* rejects it when a caller passes a real zoom.
+            // But check outOfDate explicitly as defense-in-depth for code paths
+            // that might pass kInvalidZoom as zoom (see §5.4 of
+            // docs/reports/annot-render-crash-analysis.md).
+            if (e->outOfDate) {
+                continue;
+            }
             e->refs++;
             ReportIf(i != e->cacheIdx);
             return e;
@@ -1089,13 +1104,27 @@ int RenderCache::PaintTile(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, T
     Pixmap* renderedBmp = entry ? entry->bitmap : nullptr;
     HBITMAP hbmp = renderedBmp ? renderedBmp->hbmp : nullptr;
 
-    // Diagnostic: detect stale entries that survived Invalidate
+    // Critical fix for both GPU and GDI paths: stale (outOfDate) entries that
+    // survived Invalidate must NOT be drawn.  Invalidate() sets outOfDate=true
+    // when annotations change; if we still draw the old HBITMAP the user sees
+    // the previous annotation state (or a stretched/stale tile in the viewport).
+    // Instead, treat the entry as missing — request a fresh render and skip the
+    // stale blit.  See docs/reports/annot-render-crash-analysis.md §5.2.
     if (entry && entry->outOfDate) {
         logfa(
-            "[RenderCache Diagnostic] PaintTile found stale (outOfDate) entry for page %d tile "
-            "(res=%d, col=%d, row=%d). The Invalidate signal was missed or the entry was not "
-            "evicted before paint.\n",
+            "[RenderCache Diagnostic] PaintTile evicting stale (outOfDate) entry for page %d tile "
+            "(res=%d, col=%d, row=%d). Requesting fresh render.\n",
             pageNo, tile.res, tile.col, tile.row);
+        renderDelay = GetRenderDelay(dm, pageNo, tile);
+        if (renderMissing && RENDER_DELAY_UNDEFINED == renderDelay && !IsRenderQueueFull()) {
+            RequestRendering(dm, pageNo, tile);
+            renderDelay = 1;
+        }
+        DropCacheEntry(entry);
+        entry = nullptr;
+        renderedBmp = nullptr;
+        hbmp = nullptr;
+        // fall through to the !hbmp return below
     }
 
     // Diagnostic: detect render failures propagated to the UI thread
@@ -1128,6 +1157,26 @@ int RenderCache::PaintTile(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, T
     // QueueSafeD2dRelease, drained by FlushSafeD2dReleases above, so
     // D2D resources are never released on the wrong thread.
     if (gGpuBackend && gGpuBackend->isAvailable && hbmp && renderedBmp) {
+        // ── Device-generation consistency check ──────────────────────
+        // If GpuBackend has recreated its render target (e.g. on HDC
+        // change), all previously-uploaded ID2D1Bitmap instances belong to
+        // a different resource domain. Drawing them on the new RT would
+        // trigger D2DERR_WRONG_RESOURCE_DOMAIN (0x88990015) and fall back
+        // to GDI for every tile, causing visible stutter and flicker
+        // during continuous scrolling.
+        int currentDevGen = gGpuBackend->GetDeviceGeneration();
+        if (renderedBmp->d2dBitmap && renderedBmp->d2dDeviceGeneration != currentDevGen) {
+            logfa(
+                "[RenderCache Diagnostic] Stale D2D resource domain on page %d tile "
+                "(res=%d, col=%d, row=%d): bitmap gen %d != device gen %d. "
+                "Evicting stale d2dBitmap to prevent 0x88990015.\n",
+                pageNo, tile.res, tile.col, tile.row, renderedBmp->d2dDeviceGeneration, currentDevGen);
+            QueueSafeD2dRelease(renderedBmp->d2dBitmap);
+            renderedBmp->d2dBitmap = nullptr;
+            renderedBmp->d2dDeviceGeneration = 0;
+            InterlockedIncrement(&gDeviceGenEvictions);
+        }
+
         ID2D1DCRenderTarget* rt = gGpuBackend->GetRenderTarget(hdc);
         if (rt) {
             // Create or reuse a cached D2D bitmap for this pixmap.
@@ -1138,6 +1187,7 @@ int RenderCache::PaintTile(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, T
                 d2dBmp = gGpuBackend->CreateBitmapFromPixmap(rt, renderedBmp);
                 if (d2dBmp) {
                     renderedBmp->d2dBitmap = d2dBmp;
+                    renderedBmp->d2dDeviceGeneration = gGpuBackend->GetDeviceGeneration();
                 }
             }
             if (d2dBmp) {
@@ -1152,10 +1202,21 @@ int RenderCache::PaintTile(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, T
                         "[RenderCache Diagnostic] D2D EndDraw failed on page %d tile "
                         "(res=%d, col=%d, row=%d) HRESULT=0x%08X. Falling back to GDI.\n",
                         pageNo, tile.res, tile.col, tile.row, (unsigned)hrEnd);
+                    InterlockedIncrement(&gD2dErrorFallbacks);
                     if (hrEnd == D2DERR_RECREATE_TARGET) {
                         logfa(
                             "[RenderCache Diagnostic] GPU Device Lost detected during EndDraw! "
-                            "All cached D2D bitmaps are now invalid.\n");
+                            "All cached D2D bitmaps are now invalid. Triggering "
+                            "GpuBackend::RecreateRenderTarget to recover.\n");
+                        // Trigger device recreation — bumps deviceGeneration so
+                        // all remaining cached ID2D1Bitmap instances will be
+                        // detected as stale on subsequent PaintTile calls and
+                        // lazily re-created on the new render target.
+                        // See docs/reports/d2d-device-generation-analysis.md §5.3.
+                        if (gGpuBackend) {
+                            InterlockedIncrement(&gDeviceGenRecreations);
+                            gGpuBackend->RecreateRenderTarget();
+                        }
                     }
                     // Invalidate the D2D bitmap so we don't retry with a dead resource.
                     // Then fall through to the GDI path below.
@@ -1193,7 +1254,19 @@ int RenderCache::PaintTile(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, T
         float factor = std::min(1.0f * bmpSize.dx / tileOnScreen.dx, 1.0f * bmpSize.dy / tileOnScreen.dy);
 
         auto t0 = TimeGetUs();
+        // SelectObject safety assertion: if another thread still has this HBITMAP
+        // selected into a different HDC, SelectObject returns nullptr/HGDI_ERROR.
+        // This is a GDI protocol violation that causes blank tiles and must be
+        // caught in Debug builds.  See docs/reports/annot-render-crash-analysis.md §2.
         HGDIOBJ prevBmp = SelectObject(bmpDC, hbmp);
+        ReportIf(!prevBmp || prevBmp == HGDI_ERROR);
+
+        // Dimension sanity check: if the cached DIB bitmap dimensions are negative
+        // or wildly mismatched with the render target, the cached entry is corrupt
+        // (e.g. stale Pixmap after engine reinit). Blitting such garbage triggers
+        // GDI_ERROR and a silent blank tile — catch it here instead.
+        ReportIf(!bmpSize.IsEmpty() && (bmpSize.dx < 0 || bmpSize.dy < 0 || bmpSize.dx > 32767 || bmpSize.dy > 32767));
+
         int xDst = bounds.x;
         int yDst = bounds.y;
         int dxDst = bounds.dx;
@@ -1203,9 +1276,11 @@ int RenderCache::PaintTile(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, T
             ySrc = (int)(ySrc * factor);
             int dxSrc = (int)(bounds.dx * factor);
             int dySrc = (int)(bounds.dy * factor);
-            StretchBlt(hdc, xDst, yDst, dxDst, dyDst, bmpDC, xSrc, ySrc, dxSrc, dySrc, SRCCOPY);
+            BOOL ok = StretchBlt(hdc, xDst, yDst, dxDst, dyDst, bmpDC, xSrc, ySrc, dxSrc, dySrc, SRCCOPY);
+            ReportIf(!ok); // GDI_ERROR: stale HBITMAP or invalid HDC
         } else {
-            BitBlt(hdc, xDst, yDst, dxDst, dyDst, bmpDC, xSrc, ySrc, SRCCOPY);
+            BOOL ok = BitBlt(hdc, xDst, yDst, dxDst, dyDst, bmpDC, xSrc, ySrc, SRCCOPY);
+            ReportIf(!ok); // GDI_ERROR: stale HBITMAP or invalid HDC
         }
 
         SelectObject(bmpDC, prevBmp);
@@ -1222,7 +1297,11 @@ int RenderCache::PaintTile(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, T
         }
     }
 
-    if (entry->outOfDate) {
+    // Safety net: in the rare race where another thread invalidated this entry
+    // between our outOfDate check (above) and the blit, signal the caller to
+    // re-request a fresh render.  This code path is normally unreachable after
+    // the eviction fix above, but kept as a defense-in-depth guard.
+    if (entry && entry->outOfDate) {
         if (renderOutOfDateCue) {
             *renderOutOfDateCue = true;
         }

@@ -19,6 +19,7 @@
 #include "SumatraPDF.h"
 #include "Toolbar.h"
 #include "FormFields.h"
+#include "RenderCache.h"
 
 // One field is edited at a time: either a text edit box or a choice list box
 // floats over the page.
@@ -81,6 +82,21 @@ void CommitFormFieldEdit(bool save) {
     if (win) {
         HwndSetFocus(win->hwndCanvas);
         if (changed) {
+            // Invalidate stale RenderCache tiles: the form-field bitmap in the
+            // cache was computed before the field-edit was committed, so it still
+            // shows the old value.  Without the invalidation the stale tile is
+            // reused on the next PaintTile (see §5.4 of
+            // docs/reports/annot-render-crash-analysis.md).
+            if (widget && gRenderCache) {
+                DisplayModel* dm = win->AsFixed();
+                if (dm) {
+                    EngineBase* engine = dm->GetEngine();
+                    if (engine) {
+                        RectF fullPage = engine->PageMediabox(widget->pageNo);
+                        gRenderCache->Invalidate(dm, widget->pageNo, fullPage);
+                    }
+                }
+            }
             MainWindowRerender(win);
             // refresh the tab's unsaved-changes (red dot) indicator and toolbar
             // state now, otherwise it only updates on the next repaint trigger

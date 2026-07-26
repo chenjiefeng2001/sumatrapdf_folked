@@ -52,6 +52,11 @@ struct Pixmap {
     // Guarded by _MSC_VER since D2D types aren't available on mingw.
 #ifdef _MSC_VER
     struct ID2D1Bitmap* d2dBitmap = nullptr;
+    // Device generation of the GpuBackend when d2dBitmap was last uploaded.
+    // Stale bitmaps (d2dDeviceGeneration != current GpuBackend generation)
+    // must be evicted before drawing to avoid D2DERR_WRONG_RESOURCE_DOMAIN.
+    // See docs/reports/annot-render-crash-analysis.md §4.
+    int d2dDeviceGeneration = 0;
 #endif
 };
 

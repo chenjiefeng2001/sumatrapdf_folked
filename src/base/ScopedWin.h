@@ -1,11 +1,76 @@
 /* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
+// ReportIf (defined in Base.h) must be available for the debug assertions below.
+#include "Base.h"
+
+// Debug-only thread-local tracking for lock ordering assertions.
+// Incremented when entering a ScopedCritSec (CS), decremented on exit.
+// ScopedSRWLockShared/Exclusive check this counter on acquire: if > 0,
+// the current thread is trying to acquire an SRW lock while holding a CS.
+// In the EngineMupdf lock hierarchy (pagesLock→docLock→renderLock),
+// this is the violation pattern "holding renderLock[CS] → acquiring docLock[SRW]",
+// which is the lock-order inversion that causes deadlock with path C.
+#ifdef DEBUG
+// Thread-local depth counter for CRITICAL_SECTION acquisitions.
+// Declared extern here; defined in Base.cpp so a single TLS instance
+// is shared across all translation units.
+__declspec(thread) extern int g_tlsCritSecDepth;
+// Main thread ID, set by GpuBackend::GpuBackend() which runs on the UI thread.
+// Used by D2D thread-affinity assertions.
+extern DWORD g_mainThreadId;
+#endif
+
 struct ScopedCritSec {
     CRITICAL_SECTION* cs = nullptr;
 
-    explicit ScopedCritSec(CRITICAL_SECTION* cs) : cs(cs) { EnterCriticalSection(cs); }
-    ~ScopedCritSec() { LeaveCriticalSection(cs); }
+    explicit ScopedCritSec(CRITICAL_SECTION* cs) : cs(cs) {
+#ifdef DEBUG
+        ++g_tlsCritSecDepth;
+#endif
+        EnterCriticalSection(cs);
+    }
+    ~ScopedCritSec() {
+        LeaveCriticalSection(cs);
+#ifdef DEBUG
+        --g_tlsCritSecDepth;
+#endif
+    }
+};
+
+// RAII wrappers for Windows Slim Reader/Writer Lock (SRWLock).
+// SRWLock is NOT recursive — a thread holding shared lock must not acquire
+// exclusive (deadlock), and a thread holding exclusive must not acquire
+// shared or exclusive again (undefined behaviour / deadlock).
+// IMPORTANT: Acquiring an SRW lock while holding a CRITICAL_SECTION that
+// serializes document operations (e.g. renderLock → docLock) is a LOCK
+// ORDER VIOLATION and WILL cause deadlock.  The debug assertion below
+// catches this pattern at runtime.
+struct ScopedSRWLockShared {
+    SRWLOCK* lock = nullptr;
+    explicit ScopedSRWLockShared(SRWLOCK* lock) : lock(lock) {
+#ifdef DEBUG
+        // Caught a lock-order violation: trying to acquire an SRW lock
+        // (e.g. docLock) while holding a CRITICAL_SECTION (e.g. renderLock).
+        // This inverts the pagesLock→docLock→renderLock hierarchy and
+        // WILL deadlock with path C (see docs/reports/multithreading-report.md §4.1).
+        ReportIf(g_tlsCritSecDepth > 0);
+#endif
+        AcquireSRWLockShared(lock);
+    }
+    ~ScopedSRWLockShared() { ReleaseSRWLockShared(lock); }
+};
+
+struct ScopedSRWLockExclusive {
+    SRWLOCK* lock = nullptr;
+    explicit ScopedSRWLockExclusive(SRWLOCK* lock) : lock(lock) {
+#ifdef DEBUG
+        // Same lock-order violation detection as ScopedSRWLockShared.
+        ReportIf(g_tlsCritSecDepth > 0);
+#endif
+        AcquireSRWLockExclusive(lock);
+    }
+    ~ScopedSRWLockExclusive() { ReleaseSRWLockExclusive(lock); }
 };
 
 class AutoCloseHandle {

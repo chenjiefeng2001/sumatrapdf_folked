@@ -6,6 +6,11 @@
 
 #include "base/Log.h"
 
+#ifdef DEBUG
+// TLS counter defined here (shared across all TUs via extern in ScopedWin.h).
+__declspec(thread) int g_tlsCritSecDepth = 0;
+#endif
+
 Kind kindNone = "none";
 
 // if > 1 we won't crash when memory allocation fails

@@ -579,7 +579,10 @@ void AIChatSyncPanelsToCurrentTab(MainWindow* win) {
     if (!win) {
         return;
     }
-    AIChatBackend open = AIChatGetTabPanelOpen(win->CurrentTab());
+    // CurrentTab() can be null during session restore (tabs not fully loaded yet),
+    // so guard against it to avoid null-pointer crashes.
+    WindowTab* tab = win->CurrentTab();
+    AIChatBackend open = tab ? AIChatGetTabPanelOpen(tab) : AIChatBackend::None;
     win->claudeVisible = open == AIChatBackend::Claude;
     win->grokVisible = open == AIChatBackend::Grok;
     win->codexVisible = open == AIChatBackend::Codex;

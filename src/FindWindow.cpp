@@ -342,6 +342,9 @@ void FindWindowWnd::DrawResultItem(ListBox::DrawItemEvent* ev) {
     if (ev->itemIndex < 0 || ev->itemIndex >= len(win->findMatches)) {
         return;
     }
+    if (!win->ctrl) {
+        return;
+    }
     HDC hdc = ev->hdc;
     RECT rc = ev->itemRect;
 

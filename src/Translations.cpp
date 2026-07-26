@@ -160,7 +160,6 @@ Str GetTranslation(Str s) {
             return tr;
         }
     }
-    ReportDebugIf(true);
     return s;
 }
 

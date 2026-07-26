@@ -7,6 +7,10 @@
 #include "base/Dpi.h"
 #include "base/Win.h"
 
+#ifdef _MSC_VER
+#include "GpuBackend.h"
+#endif
+
 #include "wingui/UIModels.h"
 
 #include "Settings.h"
@@ -107,6 +111,16 @@ void DeleteOldSelectionInfo(MainWindow* win, bool alsoTextSel) {
 
 void PaintTransparentRectangles(HDC hdc, Rect screenRc, Vec<Rect>& rects, COLORREF selectionColor, u8 alpha, int pad,
                                 bool drawBorder) {
+    // GPU-accelerated path via Direct2D (when available). Falls back to GDI+.
+#ifdef _MSC_VER
+    if (gGpuBackend && gGpuBackend->isAvailable) {
+        if (GpuBackend::DrawOverlayRects(hdc, screenRc, rects, selectionColor, alpha, pad, drawBorder)) {
+            return; // D2D succeeded
+        }
+        // D2D failed — fall through to GDI+ below
+    }
+#endif
+
     // create path from rectangles
     Gdiplus::GraphicsPath path(Gdiplus::FillModeWinding);
     screenRc.Inflate(pad, pad);
@@ -137,7 +151,9 @@ void PaintTransparentRectangles(HDC hdc, Rect screenRc, Vec<Rect>& rects, COLORR
 }
 
 void PaintSelection(MainWindow* win, HDC hdc) {
-    ReportIf(!win->AsFixed());
+    if (!win->AsFixed()) {
+        return;
+    }
 
     Vec<Rect> rects;
 
@@ -163,21 +179,29 @@ void PaintSelection(MainWindow* win, HDC hdc) {
             int endY = win->selectionRect.y + win->selectionRect.dy;
             bool dragged = IsDragDistance(win->selectionRect.x, endX, win->selectionRect.y, endY);
             UpdateTextSelection(win, dragged);
-            if (!win->CurrentTab()->selectionOnPage) {
+            WindowTab* tab = win->CurrentTab();
+            if (!tab) {
+                return;
+            }
+            if (!tab->selectionOnPage) {
                 // prevent the selection from disappearing while the
                 // user is still at it (OnSelectionStop removes it
                 // if it is still empty at the end)
-                win->CurrentTab()->selectionOnPage = new Vec<SelectionOnPage>();
+                tab->selectionOnPage = new Vec<SelectionOnPage>();
                 win->showSelection = true;
             }
         }
 
-        ReportDebugIf(!win->CurrentTab()->selectionOnPage);
-        if (!win->CurrentTab()->selectionOnPage) {
+        WindowTab* tab = win->CurrentTab();
+        if (!tab) {
+            return;
+        }
+        ReportDebugIf(!tab->selectionOnPage);
+        if (!tab->selectionOnPage) {
             return;
         }
 
-        for (SelectionOnPage& sel : *win->CurrentTab()->selectionOnPage) {
+        for (SelectionOnPage& sel : *tab->selectionOnPage) {
             rects.Append(sel.GetRect(win->AsFixed()));
         }
     }
@@ -202,7 +226,7 @@ void UpdateTextSelection(MainWindow* win, bool select) {
     DisplayModel* dm = win->AsFixed();
     if (select) {
         int pageNo = dm->GetPageNoByPoint(win->selectionRect.BR());
-        if (win->ctrl->ValidPageNo(pageNo)) {
+        if (win->ctrl && win->ctrl->ValidPageNo(pageNo)) {
             PointF pt = dm->CvtFromScreen(win->selectionRect.BR(), pageNo);
             if (win->selectingByWord) {
                 // double-click-drag: extend a whole word at a time (issue #4761)
@@ -214,8 +238,12 @@ void UpdateTextSelection(MainWindow* win, bool select) {
     }
 
     DeleteOldSelectionInfo(win);
-    win->CurrentTab()->selectionOnPage = SelectionOnPage::FromTextSelect(&dm->textSelection->result);
-    win->showSelection = win->CurrentTab()->selectionOnPage != nullptr;
+    WindowTab* tab = win->CurrentTab();
+    if (!tab) {
+        return;
+    }
+    tab->selectionOnPage = SelectionOnPage::FromTextSelect(&dm->textSelection->result);
+    win->showSelection = tab->selectionOnPage != nullptr;
 
     if (win->uiaProvider) {
         win->uiaProvider->OnSelectionChanged();
@@ -267,6 +295,9 @@ TempStr GetSelectedTextTemp(WindowTab* tab, Str lineSep, bool& isTextOnlySelecti
 
 void CopySelectionToClipboard(MainWindow* win) {
     WindowTab* tab = win->CurrentTab();
+    if (!tab) {
+        return;
+    }
     ReportIf(len(*tab->selectionOnPage) == 0 && win->mouseAction != MouseAction::SelectingText);
 
     if (!OpenClipboard(nullptr)) {

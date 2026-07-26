@@ -6242,18 +6242,24 @@ void SetSidebarVisibility(MainWindow* win, bool tocVisible, bool showFavorites, 
     // TODO: make this a per-window setting as well?
     gGlobalPrefs->showFavorites = showFavorites;
 
-    if ((!tocVisible && HwndIsFocused(win->tocTreeView->hwnd)) ||
-        (!showFavorites && HwndIsFocused(win->favTreeView->hwnd))) {
+    if (win->tocTreeView && win->tocTreeView->hwnd && !tocVisible && HwndIsFocused(win->tocTreeView->hwnd)) {
+        HwndSetFocus(win->hwndFrame);
+    }
+    if (win->favTreeView && win->favTreeView->hwnd && !showFavorites && HwndIsFocused(win->favTreeView->hwnd)) {
         HwndSetFocus(win->hwndFrame);
     }
 
-    HwndSetVisibility(win->sidebarSplitter->hwnd, tocVisible || showFavorites);
+    if (win->sidebarSplitter && win->sidebarSplitter->hwnd) {
+        HwndSetVisibility(win->sidebarSplitter->hwnd, tocVisible || showFavorites);
+        win->sidebarSplitter->isLive = true;
+    }
     HwndSetVisibility(win->hwndTocBox, tocVisible);
-    win->sidebarSplitter->isLive = true;
 
-    HwndSetVisibility(win->favSplitter->hwnd, tocVisible && showFavorites);
+    if (win->favSplitter && win->favSplitter->hwnd) {
+        HwndSetVisibility(win->favSplitter->hwnd, tocVisible && showFavorites);
+        win->favSplitter->isLive = true;
+    }
     HwndSetVisibility(win->hwndFavBox, showFavorites);
-    win->favSplitter->isLive = true;
 
     if (relayout) {
         RelayoutFrame(win, false);

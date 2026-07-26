@@ -1364,6 +1364,14 @@ static void LayoutAndFocusOnStartup(MainWindow* win) {
     if (!win || !IsWindow(win->hwndFrame)) {
         return;
     }
+    // Defensive: during session restore, tabs may not be fully loaded yet.
+    // Skip layout if the current tab or its controller isn't ready,
+    // preventing null-pointer crashes in RelayoutFrame/SetSidebarVisibility.
+    if (!win->CurrentTab() || !win->CurrentTab()->ctrl) {
+        // Layout will be triggered when the tab finishes loading
+        win->Focus();
+        return;
+    }
     RelayoutWindow(win);
     win->Focus();
 }
@@ -2306,6 +2314,9 @@ ContinueOpenWindow:
         for (SessionData* data : *gInitialSessionData) {
             // create window hidden to avoid flashing the about page
             win = CreateAndShowMainWindow(data, false);
+            if (!win) {
+                continue;
+            }
             for (TabState* state : *data->tabStates) {
                 if (str::IsEmpty(state->filePath)) {
                     logf("WinMain: skipping RestoreTabOnStartup() because state->filePath is empty\n");
@@ -2313,7 +2324,13 @@ ContinueOpenWindow:
                 }
                 RestoreTabOnStartup(win, state, gGlobalPrefs->lazyLoading);
             }
-            TabsSelect(win, data->tabIndex - 1);
+            if (win->TabCount() > 0) {
+                int tabIndex = data->tabIndex - 1;
+                if (tabIndex < 0 || tabIndex >= win->TabCount()) {
+                    tabIndex = 0;
+                }
+                TabsSelect(win, tabIndex);
+            }
             if (gGlobalPrefs->lazyLoading) {
                 // trigger loading of the document
                 ReloadDocument(win, false);

@@ -247,6 +247,7 @@ static void WriteCrashInfoToStdErr(Str d) {
     }
     DWORD written = 0;
     WriteFile(h, (u8*)d.s, (DWORD)d.len, &written, nullptr);
+    fflush(stderr);
 }
 
 void UploadCrashReport(Str d) {
@@ -500,7 +501,7 @@ void _uploadDebugReport(Str condStr, Str fileLine, bool isCrash, bool captureCal
             }
             Str d = s;
             SaveCrashInfo(d);
-            log(s);
+            WriteCrashInfoToStdErr(d);
         }
         log("_uploadDebugReport skipping because !shouldUpload\n");
         return;
@@ -543,6 +544,7 @@ void _uploadDebugReport(Str condStr, Str fileLine, bool isCrash, bool captureCal
     }
     Str d = s;
     SaveCrashInfo(d);
+    WriteCrashInfoToStdErr(d);
 
     UploadCrashReport(d);
     // gCrashHandlerArena->Free((const void*)d.data());

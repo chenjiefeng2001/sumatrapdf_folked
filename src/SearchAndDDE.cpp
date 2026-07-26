@@ -266,7 +266,10 @@ void FindSelection(MainWindow* win, TextSearch::Direction direction) {
         return;
     }
     DisplayModel* dm = win->AsFixed();
-    if (!win->CurrentTab()->selectionOnPage || 0 == dm->textSelection->result.len) {
+    if (!dm) {
+        return;
+    }
+    if (!win->CurrentTab() || !win->CurrentTab()->selectionOnPage || 0 == dm->textSelection->result.len) {
         return;
     }
 
@@ -293,6 +296,12 @@ static void ShowSearchResult(MainWindow* win, TextSel* result, bool addNavPt) {
     }
 
     DisplayModel* dm = win->AsFixed();
+    if (!dm) {
+        return;
+    }
+    if (!win->ctrl) {
+        return;
+    }
     if (addNavPt || !dm->PageShown(result->pages[0]) ||
         (dm->GetZoomVirtual() == kZoomFitPage || dm->GetZoomVirtual() == kZoomFitContent)) {
         win->ctrl->GoToPage(result->pages[0], addNavPt);
@@ -812,6 +821,9 @@ static void UpdateSearchProgress(FindThreadData* ftd, ProgressUpdateData* data) 
 
 static void FindThread(FindThreadData* ftd) {
     ReportIf(!(ftd && ftd->win && ftd->win->ctrl && ftd->win->ctrl->AsFixed()));
+    if (!ftd || !ftd->win || !ftd->win->ctrl || !ftd->win->ctrl->AsFixed()) {
+        return;
+    }
 
     MainWindow* win = ftd->win;
     DisplayModel* dm = win->AsFixed();

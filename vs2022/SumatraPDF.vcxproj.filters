@@ -213,6 +213,9 @@
     <ClInclude Include="..\src\GumboHtmlParser.h">
       <Filter>src</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\HardwareProfile.h">
+      <Filter>src</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\HomePage.h">
       <Filter>src</Filter>
     </ClInclude>
@@ -220,6 +223,9 @@
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\ImageSaveCropResize.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\InertiaScrolling.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\Installer.h">
@@ -240,6 +246,9 @@
     <ClInclude Include="..\src\OverlayScrollbar.h">
       <Filter>src</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\OverscrollEffect.h">
+      <Filter>src</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\PalmDbReader.h">
       <Filter>src</Filter>
     </ClInclude>
@@ -250,6 +259,9 @@
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\PdfTools.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\PointerInput.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\Print.h">
@@ -629,6 +641,9 @@
     <ClCompile Include="..\src\GumboHtmlParser.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\HardwareProfile.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\HomePage.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -636,6 +651,9 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\ImageSaveCropResize.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\InertiaScrolling.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\Installer.cpp">
@@ -659,6 +677,9 @@
     <ClCompile Include="..\src\OverlayScrollbar.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\OverscrollEffect.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\PalmDbReader.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -669,6 +690,9 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\PdfTools.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PointerInput.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\Print.cpp">

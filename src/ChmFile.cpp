@@ -84,19 +84,23 @@ TempStr SmartToUtf8Temp(Str s, uint codepage) {
     return strconv::ToMultiByteTemp(s, codepage, CP_UTF8);
 }
 
-static Str GetCharZ(Str d, size_t off) {
-    u8* data = (u8*)d.s;
-    size_t len = (size_t)d.len;
-    if (off >= len) {
+static Str GetCharZ(Str d, int off) {
+    // off comes from file-controlled unsigned DWORDs narrowed to int, so it can
+    // be negative; reject that along with the upper bound to avoid an OOB read.
+    if (off < 0 || off >= d.len) {
         return {};
     }
-    ReportIf(!memchr(data + off, '\0', len - off + 1)); // data is zero-terminated
-    u8* str = data + off;
-    Str s = Str((char*)str);
-    if (str::IsEmpty(s)) {
+    char* start = d.s + off;
+    size_t remaining = (size_t)(d.len - off);
+    char* end = (char*)memchr(start, '\0', remaining);
+    if (!end) {
         return {};
     }
-    return str::Dup(s);
+    int slen = (int)(end - start);
+    if (slen == 0) {
+        return {};
+    }
+    return str::Dup(Str(start, slen));
 }
 
 // http://www.nongnu.org/chmspec/latest/Internal.html#WINDOWS

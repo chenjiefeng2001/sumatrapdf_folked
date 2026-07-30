@@ -765,18 +765,20 @@ void HtmlFormatter::EmitTextRun(Str s) {
             continue;
         }
 
+        if (lenThatFits < len(buf) && lenThatFits > 0 && buf.s[lenThatFits - 1] >= 0xD800 &&
+            buf.s[lenThatFits - 1] <= 0xDBFF && buf.s[lenThatFits] >= 0xDC00 && buf.s[lenThatFits] <= 0xDFFF) {
+            lenThatFits = lenThatFits == 1 ? 2 : lenThatFits - 1;
+        }
         textMeasure->SetFont(CurrFont());
         bbox = ToGdipRectF(textMeasure->Measure(WStr(buf.s, (int)lenThatFits)));
         ReportIf(bbox.dx > pageDx);
-        // s is UTF-8 and buf is UTF-16, so one
-        // WCHAR doesn't always equal one char
-        // TODO: this usually fails for non-BMP characters (i.e. hardly ever)
-        for (size_t i = lenThatFits; i > 0; i--) {
-            lenThatFits += buf.s[i - 1] < 0x80 ? 0 : buf.s[i - 1] < 0x800 ? 1 : 2;
-        }
-        AppendInstr(DrawInstr::Text(Str(run.s, (int)lenThatFits), bbox, dirRtl));
+        // buf is UTF-16; converting the fitted prefix to UTF-8 gives the
+        // exact number of bytes to consume from the UTF-8 run (the old
+        // per-char heuristic mis-counted non-BMP characters)
+        int utf8LenThatFits = len(ToUtf8Temp(WStr(buf.s, (int)lenThatFits)));
+        AppendInstr(DrawInstr::Text(Str(run.s, utf8LenThatFits), bbox, dirRtl));
         currX += bbox.dx;
-        run = Str(run.s + lenThatFits, run.len - (int)lenThatFits);
+        run = Str(run.s + utf8LenThatFits, run.len - utf8LenThatFits);
     }
 }
 

@@ -1624,6 +1624,8 @@ static void CreateRenderInfoWindow() {
     DWORD editStyle =
         WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_AUTOHSCROLL;
     HWND hwndEdit = CreateWindowExW(0, WC_EDITW, L"", editStyle, 0, 0, cRc.dx, cRc.dy, hwnd, nullptr, h, nullptr);
+    // multi-line edit default can still cap text; render queue dumps can be large
+    SendMessageW(hwndEdit, EM_SETLIMITTEXT, 0, 0);
     gRenderInfoEdit = hwndEdit;
 
     HDC hdc = GetDC(hwnd);

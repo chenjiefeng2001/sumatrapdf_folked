@@ -876,6 +876,8 @@ void ShowProperties(HWND parent, DocController* ctrl) {
         WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_AUTOHSCROLL;
     HWND hwndEdit =
         CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDITW, L"", editStyle, 0, 0, cRc.dx, editDy, hwnd, nullptr, h, nullptr);
+    // multi-line edit default can still cap text; font lists may be large
+    SendMessageW(hwndEdit, EM_SETLIMITTEXT, 0, 0);
     layoutData->hwndEdit = hwndEdit;
 
     if (!DefWndProcPropertiesEdit) {

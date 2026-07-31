@@ -1,4 +1,4 @@
-﻿/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
 extern "C" {
@@ -4683,9 +4683,12 @@ TempStr EngineMupdf::ExtractFontListTemp() {
             fz_report_error(ctx);
             continue;
         }
-        // check pointers, not Str's bool operator: empty type/encoding are
-        // legitimate (e.g. a font with no Encoding) and handled below
-        ReportIf(!name.s || !type.s || !encoding.s);
+        // skip if name/type/encoding pointers are null (pdf_to_name can return
+        // nullptr). Empty strings are fine. Do not ReportIf-then-continue with
+        // null deref on name.s[0] (would kill GetFontsThread mid-list).
+        if (!name.s || !type.s || !encoding.s) {
+            continue;
+        }
 
         str::Builder info;
         if (name.s[0] < 0 && MultiByteToWideChar(936, MB_ERR_INVALID_CHARS, name.s, -1, nullptr, 0)) {

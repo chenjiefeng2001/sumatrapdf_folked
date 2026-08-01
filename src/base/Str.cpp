@@ -1290,14 +1290,18 @@ TempStr SeqStrNumStrByNumber(SeqStrNum strs, i64 num) {
 static constexpr size_t kPadding = 1;
 
 static char* EnsureCap(str::Builder* s, size_t needed) {
-    if (needed + kPadding <= str::Builder::kBufChars) {
-        s->els = s->buf; // TODO: not needed?
+    bool isInlineBuf = !s->els || (s->els == s->buf);
+    // only use the inline buffer if we haven't moved to the heap yet.
+    // RemoveAt() can shrink len enough for needed to fit in buf again and
+    // switching back would lose the data and leak the heap allocation
+    if (isInlineBuf && (needed + kPadding <= str::Builder::kBufChars)) {
+        s->els = s->buf;
         return s->buf;
     }
 
     size_t capacityHint = s->cap;
     // tricky: to save sapce we reuse cap for capacityHint
-    if (!s->els || (s->els == s->buf)) {
+    if (isInlineBuf) {
         // on first expand cap might be capacityHint
         s->cap = 0;
     }
@@ -1357,29 +1361,30 @@ static char* MakeSpaceAt(str::Builder* s, size_t idx, size_t count) {
     return res;
 }
 
-static void StrBuilderFree(str::Builder* s) {
+static void StrBuilderReset(str::Builder* s) {
+    s->len = 0;
+    // if we never moved to the heap, keep pointing els at the inline buf (the
+    // pre-Reset() behavior made begin() stable right after construction); if
+    // on the heap, keep the allocation for re-use (see Reset() fix in 5853)
     if (!s->els || (s->els == s->buf)) {
-        return;
+        s->els = s->buf;
     }
-    Free(s->allocator, s->els);
-    s->els = nullptr;
+    s->els[0] = 0;
+}
+
+static void StrBuilderFree(str::Builder* s) {
+    bool isInlineBuf = !s->els || (s->els == s->buf);
+    if (!isInlineBuf) {
+        Free(s->allocator, s->els);
+    }
+    s->len = 0;
+    s->cap = 0;
+    s->els = s->buf;
+    s->buf[0] = 0;
 }
 
 void str::Builder::Reset(Str s) {
-    StrBuilderFree(this);
-    len = 0;
-    cap = 0;
-    els = buf;
-
-#if defined(DEBUG)
-#define kFillerStr "01234567890123456789012345678901"
-    // to catch mistakes earlier, fill the buffer with a known string
-    constexpr size_t nFiller = sizeof(kFillerStr) - 1;
-    static_assert(nFiller == str::Builder::kBufChars);
-    memcpy(buf, kFillerStr, kBufChars);
-#endif
-
-    buf[0] = 0;
+    StrBuilderReset(this);
     Append(s); // no-op if s is empty
 }
 
@@ -1494,14 +1499,16 @@ char str::Builder::LastChar() const {
 }
 
 static WCHAR* EnsureCap(wstr::Builder* s, size_t needed) {
-    if (needed + kPadding <= str::Builder::kBufChars) {
-        s->els = s->buf; // TODO: not needed?
+    bool isInlineBuf = !s->els || (s->els == s->buf);
+    // see the comment in str::Builder's EnsureCap()
+    if (isInlineBuf && (needed + kPadding <= wstr::Builder::kBufChars)) {
+        s->els = s->buf;
         return s->buf;
     }
 
     size_t capacityHint = s->cap;
     // tricky: to save sapce we reuse cap for capacityHint
-    if (!s->els || (s->els == s->buf)) {
+    if (isInlineBuf) {
         // on first expand cap might be capacityHint
         s->cap = 0;
     }
@@ -1558,29 +1565,28 @@ static WCHAR* MakeSpaceAt(wstr::Builder* s, size_t idx, size_t count) {
     return res;
 }
 
-static void WStrBuilderFree(wstr::Builder* s) {
+static void WStrBuilderReset(wstr::Builder* s) {
+    s->len = 0;
+    // see the comment in StrBuilderReset()
     if (!s->els || (s->els == s->buf)) {
-        return;
+        s->els = s->buf;
     }
-    Free(s->allocator, s->els);
-    s->els = nullptr;
+    s->els[0] = 0;
+}
+
+static void WStrBuilderFree(wstr::Builder* s) {
+    bool isInlineBuf = !s->els || (s->els == s->buf);
+    if (!isInlineBuf) {
+        Free(s->allocator, s->els);
+    }
+    s->len = 0;
+    s->cap = 0;
+    s->els = s->buf;
+    s->buf[0] = 0;
 }
 
 void wstr::Builder::Reset(WStr s) {
-    WStrBuilderFree(this);
-    len = 0;
-    cap = 0;
-    els = buf;
-
-#if defined(DEBUG)
-#define kFillerWStr L"01234567890123456789012345678901"
-    // to catch mistakes earlier, fill the buffer with a known string
-    constexpr size_t nFiller = sizeof(kFillerStr) - 1;
-    static_assert(nFiller == str::Builder::kBufChars);
-    memcpy(buf, kFillerWStr, nFiller * kElSize);
-#endif
-
-    buf[0] = 0;
+    WStrBuilderReset(this);
     Append(s); // no-op if s is empty
 }
 

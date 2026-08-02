@@ -55,6 +55,7 @@ struct CommandPaletteWnd : Wnd {
     MainWindow* win = nullptr;
 
     Edit* editQuery = nullptr;
+    Static* clearButton = nullptr; // \"×\" button that clears the query
     StrVecCP tabs;
     StrVecCP fileHistory;
     StrVecCP commands;
@@ -89,6 +90,8 @@ struct CommandPaletteWnd : Wnd {
 
     bool Create(MainWindow* win, Str prefix, int smartTabAdvance);
     void QueryChanged();
+    void UpdateResultCount();
+    void ClearQuery();
 
     void ExecuteCurrentSelection();
     bool AdvanceSelection(int dir);

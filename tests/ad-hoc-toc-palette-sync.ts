@@ -11,7 +11,7 @@
 // makes the tree selection stay put, so this throws.
 
 import { writeFileSync } from "node:fs";
-import { runStandalone, tmpPath } from "./util.ts";
+import { runStandalone, tmpPath, cmdId } from "./util.ts";
 import { launchSumatra, waitForFrame, findChildByClass, sendCommand, pressEnter } from "./win-automation.ts";
 import {
   sleep,
@@ -23,7 +23,9 @@ import {
   sendText,
 } from "./winapi.ts";
 
-const CmdCommandPaletteTOC = 434;
+// keep the TOC mode command id in sync with the generated Commands.h
+// (CmdCommandPaletteTOC moved from 434 to 435 when CmdOpenWithKnownExternalViewer* were added)
+const CmdCommandPaletteTOC = cmdId("CmdCommandPaletteTOC");
 
 // a 4-page PDF with 4 top-level bookmarks (one per page), /UseOutlines so the
 // bookmarks panel opens automatically

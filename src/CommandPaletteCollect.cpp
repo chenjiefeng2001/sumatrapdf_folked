@@ -229,7 +229,6 @@ static void AppendTab(StrVecCP& tabs, WindowTab* tab, WindowTab* currTab, int& c
     }
     if (tab == currTab) {
         currTabIdx = len(tabs) - 1;
-        logf("currTabIdx: %d\n", currTabIdx);
     }
 }
 

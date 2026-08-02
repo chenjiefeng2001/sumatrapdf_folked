@@ -461,6 +461,11 @@ bool CommandPaletteWnd::Create(MainWindow* win, Str prefix, int smartTabAdvance)
     vbox->alignCross = CrossAxisAlign::Stretch;
 
     {
+        // Query edit + \"×\" clear button in one row.
+        auto hbox = new HBox();
+        hbox->alignMain = MainAxisAlign::MainStart;
+        hbox->alignCross = CrossAxisAlign::CrossCenter;
+
         Edit::CreateArgs args;
         args.parent = hwnd;
         args.isMultiLine = false;
@@ -471,12 +476,20 @@ bool CommandPaletteWnd::Create(MainWindow* win, Str prefix, int smartTabAdvance)
         args.isRtl = IsUIRtl();
         auto c = new Edit();
         c->SetColors(colTxt, colBg);
-        c->maxDx = 150;
         HWND ok = c->Create(args);
         ReportIf(!ok);
         c->onTextChanged = MkMethod0<CommandPaletteWnd, &CommandPaletteWnd::QueryChanged>(this);
         editQuery = c;
-        vbox->AddChild(c);
+        hbox->AddChild(c, 1);
+
+        {
+            auto clear = CreateStatic(hwnd, font, StrL("×"));
+            clear->SetColors(colTxt, colBg);
+            clear->onClick = MkMethod0<CommandPaletteWnd, &CommandPaletteWnd::ClearQuery>(this);
+            clearButton = clear;
+            hbox->AddChild(new Padding(clear, Insets{4, 0, 4, 0}));
+        }
+        vbox->AddChild(hbox);
     }
 
     if (!smartTabMode) {
@@ -562,6 +575,11 @@ bool CommandPaletteWnd::Create(MainWindow* win, Str prefix, int smartTabAdvance)
         hbox->alignMain = MainAxisAlign::MainCenter;
         hbox->alignCross = CrossAxisAlign::CrossCenter;
         auto pad = Insets{0, 8, 0, 8};
+        // result count, shown on the left of the navigation hints
+        auto info = CreateStatic(hwnd, font, StrL(""));
+        info->SetColors(colTxt, colBg);
+        staticInfo = info;
+        hbox->AddChild(new Padding(info, Insets{0, 8, 0, 8}));
         for (int i = 0; i < 3; i++) {
             auto c = CreateStatic(hwnd, font, strings[i]);
             c->SetColors(colTxt, colBg);
@@ -595,6 +613,8 @@ bool CommandPaletteWnd::Create(MainWindow* win, Str prefix, int smartTabAdvance)
             CommandPaletteSetCurrentSelection(this, currTocIdx);
         }
     }
+
+    UpdateResultCount();
 
     SetIsVisible(true);
     HwndSetFocus(editQuery->hwnd);

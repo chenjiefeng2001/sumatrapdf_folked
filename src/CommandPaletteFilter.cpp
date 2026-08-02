@@ -7,6 +7,7 @@
 #include "wingui/Layout.h"
 #include "wingui/WinGui.h"
 
+#include "base/Win.h"
 #include "FilterHighlightDraw.h"
 #include "CommandPalette.h"
 #include "CommandPaletteInternal.h"
@@ -125,16 +126,17 @@ static void FilterAndSortStrings(StrVecCP& src, const StrVec& words, StrVecCP& d
 static void FilterStrings(StrVecCP& strs, const StrVec& words, StrVecCP& matchedOut, int groupTag) {
     int startLen = len(matchedOut);
     FilterAndSortStrings(strs, words, matchedOut);
-    ItemDataCP* data = matchedOut.AtData(startLen);
     int nAdded = len(matchedOut) - startLen;
-    if (groupTag == PaletteGroup_TOC) {
-        for (int i = 0; i < nAdded; i++) {
-            int realDepth = data[i].indent;
-            data[i].indent = kGroupTocOffset + realDepth;
-        }
-    } else {
-        for (int i = 0; i < nAdded; i++) {
-            data[i].indent = groupTag;
+    // StrVec is paged, so the items are NOT contiguous in memory: access each
+    // item individually instead of treating data as an array.
+    for (int i = 0; i < nAdded; i++) {
+        ItemDataCP* d = matchedOut.AtData(startLen + i);
+        ReportIf(!d);
+        if (groupTag == PaletteGroup_TOC) {
+            int realDepth = d->indent;
+            d->indent = kGroupTocOffset + realDepth;
+        } else {
+            d->indent = groupTag;
         }
     }
 }
@@ -204,6 +206,7 @@ void CommandPaletteWnd::QueryChanged() {
     FilterStringsForQuery(filter, m->strings);
     listBox->SetModel(m);
     int nItems = m->ItemsCount();
+    UpdateResultCount();
     if (nItems == 0) return;
     // If the only item is the "(no matching items)" placeholder, select it
     if (nItems == 1 && m->Data(0) && m->Data(0)->relevanceScore == -1) {
@@ -220,4 +223,35 @@ void CommandPaletteWnd::QueryChanged() {
         return;
     }
     CommandPaletteSetCurrentSelection(this, 0);
+}
+
+void CommandPaletteWnd::UpdateResultCount() {
+    if (!listBox || !staticInfo) {
+        return;
+    }
+    auto m = (ListBoxModelCP*)listBox->model;
+    int real = 0;
+    for (int i = 0; i < m->ItemsCount(); i++) {
+        ItemDataCP* d = m->Data(i);
+        if (!d || d->relevanceScore != -1) {
+            real++;
+        }
+    }
+    staticInfo->SetText(fmt("%d results", real));
+    ::SizeToIdealSize(staticInfo);
+
+    if (clearButton) {
+        bool hasQuery = len(CommandPaletteSkipWS(Str(editQuery->GetTextTemp()))) > 0;
+        clearButton->SetIsVisible(hasQuery);
+    }
+}
+
+void CommandPaletteWnd::ClearQuery() {
+    if (!editQuery) {
+        return;
+    }
+    editQuery->SetText(StrL(""));
+    HwndSetFocus(editQuery->hwnd);
+    // SetText triggers QueryChanged(), which repopulates the list and
+    // updates the result count + clear-button visibility.
 }

@@ -50,7 +50,69 @@ static bool IsPaletteGroupChange(ItemDataCP* cur, ItemDataCP* prev) {
     return cg != pg;
 }
 
-static void DrawGroupHeaderRect(HDC hdc, RECT rc, Str label, COLORREF colBg, COLORREF colTxt, HFONT font) {
+// 12x12 monochrome category glyph drawn next to each group header.
+static void DrawGroupIcon(HDC hdc, int group, int x, int y, COLORREF col) {
+    int cx = x + 6, cy = y + 6;
+    HPEN pen = CreatePen(PS_SOLID, 1, col);
+    HGDIOBJ oldPen = SelectObject(hdc, pen);
+    HBRUSH br = CreateSolidBrush(col);
+    HGDIOBJ oldBr = SelectObject(hdc, br);
+
+    switch (group) {
+        case PaletteGroup_Commands: { // ">_" prompt
+            MoveToEx(hdc, x + 2, y + 3, nullptr);
+            LineTo(hdc, cx, cy);
+            LineTo(hdc, x + 2, y + 9);
+            MoveToEx(hdc, cx + 1, y + 9, nullptr);
+            LineTo(hdc, x + 11, y + 9);
+            break;
+        }
+        case PaletteGroup_Tabs: { // two overlapping tab strips
+            Rectangle(hdc, x + 1, y + 2, x + 9, y + 7);
+            Rectangle(hdc, x + 4, y + 6, x + 12, y + 11);
+            break;
+        }
+        case PaletteGroup_FileHistory: { // clock
+            Ellipse(hdc, x + 1, y + 1, x + 12, y + 12);
+            MoveToEx(hdc, cx, cy, nullptr);
+            LineTo(hdc, cx, y + 3);
+            MoveToEx(hdc, cx, cy, nullptr);
+            LineTo(hdc, x + 9, y + 8);
+            break;
+        }
+        case PaletteGroup_TOC: { // tree outline
+            MoveToEx(hdc, x + 3, y + 2, nullptr);
+            LineTo(hdc, x + 3, y + 10);
+            MoveToEx(hdc, x + 3, y + 4, nullptr);
+            LineTo(hdc, x + 8, y + 4);
+            MoveToEx(hdc, x + 3, y + 7, nullptr);
+            LineTo(hdc, x + 8, y + 7);
+            Rectangle(hdc, x + 8, y + 2, x + 12, y + 5);
+            Rectangle(hdc, x + 8, y + 5, x + 12, y + 8);
+            break;
+        }
+        case PaletteGroup_Favorites: { // 5-point star
+            POINT pts[10] = {
+                {6, 1}, {7, 4}, {11, 4}, {8, 7}, {9, 10}, {6, 8}, {3, 10}, {4, 7}, {1, 4}, {5, 4},
+            };
+            for (auto& pt : pts) {
+                pt.x += x;
+                pt.y += y;
+            }
+            Polygon(hdc, pts, 10);
+            break;
+        }
+        default:
+            break;
+    }
+
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBr);
+    DeleteObject(pen);
+    DeleteObject(br);
+}
+
+static void DrawGroupHeaderRect(HDC hdc, RECT rc, int group, Str label, COLORREF colBg, COLORREF colTxt, HFONT font) {
     COLORREF headerBg = AccentColor(colBg, -10);
     SetBkColor(hdc, headerBg);
     ExtTextOutW(hdc, 0, 0, ETO_OPAQUE, &rc, nullptr, 0, nullptr);
@@ -66,6 +128,8 @@ static void DrawGroupHeaderRect(HDC hdc, RECT rc, Str label, COLORREF colBg, COL
     SetBkMode(hdc, TRANSPARENT);
     if (font) SelectFont(hdc, font);
     rc.left += 8;
+    DrawGroupIcon(hdc, group, rc.left, rc.top + (rc.bottom - rc.top) / 2 - 6, AccentColor(colTxt, 60));
+    rc.left += 16;
     DrawTextW(hdc, ToWStrTemp(label).s, -1, &rc, DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_LEFT);
     if (font) SelectFont(hdc, font);
 }
@@ -105,7 +169,7 @@ void CommandPaletteWnd::DrawListBoxItem(ListBox::DrawItemEvent* ev) {
         int curGroup = PaletteGroup_Commands;
         if (data) curGroup = (data->indent >= kGroupTocOffset) ? PaletteGroup_TOC : data->indent;
         Str label = ::GetGroupLabel(curGroup);
-        if (label.len > 0) DrawGroupHeaderRect(hdc, rc, label.s, colBg, colText, lb->font);
+        if (label.len > 0) DrawGroupHeaderRect(hdc, rc, curGroup, label.s, colBg, colText, lb->font);
     }
 
     if (ev->selected) colBg = AccentColor(colBg, 30);

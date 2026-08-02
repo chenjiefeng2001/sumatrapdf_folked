@@ -13,14 +13,19 @@
     <Filter Include="tools">
       <UniqueIdentifier>{36DF7010-A2F3-98C1-6B75-3C21D74895F2}</UniqueIdentifier>
     </Filter>
+    <Filter Include="wingui">
+      <UniqueIdentifier>{D80B1F25-C4AD-49FB-AD68-5D4F99A9D04B}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\src\Commands.h" />
     <ClInclude Include="..\src\DisplayMode.h" />
     <ClInclude Include="..\src\Flags.h" />
+    <ClInclude Include="..\src\HardwareProfile.h" />
     <ClInclude Include="..\src\RefHoverDetect.h" />
     <ClInclude Include="..\src\RefHoverTextDetect.h" />
     <ClInclude Include="..\src\SumatraConfig.h" />
+    <ClInclude Include="..\src\WindowLifecycle.h" />
     <ClInclude Include="..\src\base\Arena.h">
       <Filter>base</Filter>
     </ClInclude>
@@ -85,6 +90,9 @@
       <Filter>base</Filter>
     </ClInclude>
     <ClInclude Include="..\src\base\StrFormatParse.h">
+      <Filter>base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\base\StrHash.h">
       <Filter>base</Filter>
     </ClInclude>
     <ClInclude Include="..\src\base\StrQueue.h">
@@ -223,10 +231,19 @@
     <ClCompile Include="..\src\base\tests\GpuBackend_ut.cpp">
       <Filter>base\tests</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\base\tests\HardwareProfile_ut.cpp">
+      <Filter>base\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\tests\InputScrolling_ut.cpp">
+      <Filter>base\tests</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\base\tests\JsonParser_ut.cpp">
       <Filter>base\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\tests\RefHover_ut.cpp">
+      <Filter>base\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\tests\Renderer_ut.cpp">
       <Filter>base\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\tests\SettingsUtil_ut.cpp">
@@ -241,6 +258,9 @@
     <ClCompile Include="..\src\base\tests\StrFormat_ut.cpp">
       <Filter>base\tests</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\base\tests\StrHash_ut.cpp">
+      <Filter>base\tests</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\base\tests\StrVec_ut.cpp">
       <Filter>base\tests</Filter>
     </ClCompile>
@@ -253,11 +273,20 @@
     <ClCompile Include="..\src\base\tests\Win_ut.cpp">
       <Filter>base\tests</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\base\tests\WindowLifecycle_ut.cpp">
+      <Filter>base\tests</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\common\log.cpp">
       <Filter>common</Filter>
     </ClCompile>
     <ClCompile Include="..\src\tools\test_util.cpp">
       <Filter>tools</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\wingui\DWriteText.cpp">
+      <Filter>wingui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\wingui\Renderer.cpp">
+      <Filter>wingui</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>

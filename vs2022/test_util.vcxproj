@@ -881,9 +881,11 @@
     <ClInclude Include="..\src\Commands.h" />
     <ClInclude Include="..\src\DisplayMode.h" />
     <ClInclude Include="..\src\Flags.h" />
+    <ClInclude Include="..\src\HardwareProfile.h" />
     <ClInclude Include="..\src\RefHoverDetect.h" />
     <ClInclude Include="..\src\RefHoverTextDetect.h" />
     <ClInclude Include="..\src\SumatraConfig.h" />
+    <ClInclude Include="..\src\WindowLifecycle.h" />
     <ClInclude Include="..\src\base\Arena.h" />
     <ClInclude Include="..\src\base\Base.h" />
     <ClInclude Include="..\src\base\BitManip.h" />
@@ -906,6 +908,7 @@
     <ClInclude Include="..\src\base\SquareTreeParser.h" />
     <ClInclude Include="..\src\base\Str.h" />
     <ClInclude Include="..\src\base\StrFormatParse.h" />
+    <ClInclude Include="..\src\base\StrHash.h" />
     <ClInclude Include="..\src\base\StrQueue.h" />
     <ClInclude Include="..\src\base\StrUtf8.h" />
     <ClInclude Include="..\src\base\StrVec.h" />
@@ -958,20 +961,27 @@
     <ClCompile Include="..\src\base\tests\Dict_ut.cpp" />
     <ClCompile Include="..\src\base\tests\File_ut.cpp" />
     <ClCompile Include="..\src\base\tests\GpuBackend_ut.cpp" />
+    <ClCompile Include="..\src\base\tests\HardwareProfile_ut.cpp" />
+    <ClCompile Include="..\src\base\tests\InputScrolling_ut.cpp" />
     <ClCompile Include="..\src\base\tests\JsonParser_ut.cpp" />
     <ClCompile Include="..\src\base\tests\RefHover_ut.cpp" />
+    <ClCompile Include="..\src\base\tests\Renderer_ut.cpp" />
     <ClCompile Include="..\src\base\tests\SettingsUtil_ut.cpp" />
     <ClCompile Include="..\src\base\tests\SimpleLog_ut.cpp" />
     <ClCompile Include="..\src\base\tests\SquareTreeParser_ut.cpp" />
     <ClCompile Include="..\src\base\tests\StrFormat_ut.cpp" />
+    <ClCompile Include="..\src\base\tests\StrHash_ut.cpp" />
     <ClCompile Include="..\src\base\tests\StrVec_ut.cpp" />
     <ClCompile Include="..\src\base\tests\Str_ut.cpp" />
     <ClCompile Include="..\src\base\tests\Vec_ut.cpp" />
     <ClCompile Include="..\src\base\tests\Win_ut.cpp" />
+    <ClCompile Include="..\src\base\tests\WindowLifecycle_ut.cpp" />
     <ClCompile Include="..\src\common\log.cpp">
       <ObjectFileName>$(IntDir)\log1.obj</ObjectFileName>
     </ClCompile>
     <ClCompile Include="..\src\tools\test_util.cpp" />
+    <ClCompile Include="..\src\wingui\DWriteText.cpp" />
+    <ClCompile Include="..\src\wingui\Renderer.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

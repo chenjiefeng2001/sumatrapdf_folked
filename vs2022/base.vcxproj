@@ -881,6 +881,7 @@
     <ClInclude Include="..\src\base\SquareTreeParser.h" />
     <ClInclude Include="..\src\base\Str.h" />
     <ClInclude Include="..\src\base\StrFormatParse.h" />
+    <ClInclude Include="..\src\base\StrHash.h" />
     <ClInclude Include="..\src\base\StrQueue.h" />
     <ClInclude Include="..\src\base\StrUtf8.h" />
     <ClInclude Include="..\src\base\StrVec.h" />

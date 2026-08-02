@@ -378,6 +378,9 @@
     <ClInclude Include="..\src\Version.h">
       <Filter>src</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\WindowLifecycle.h">
+      <Filter>src</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\WindowTab.h">
       <Filter>src</Filter>
     </ClInclude>
@@ -839,6 +842,9 @@
     <ClCompile Include="..\src\UpdateCheck.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\Win7Compat.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\WindowTab.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -869,10 +875,19 @@
     <ClCompile Include="..\src\base\tests\GpuBackend_ut.cpp">
       <Filter>src\base\tests</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\base\tests\HardwareProfile_ut.cpp">
+      <Filter>src\base\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\tests\InputScrolling_ut.cpp">
+      <Filter>src\base\tests</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\base\tests\JsonParser_ut.cpp">
       <Filter>src\base\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\tests\RefHover_ut.cpp">
+      <Filter>src\base\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\tests\Renderer_ut.cpp">
       <Filter>src\base\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\tests\SettingsUtil_ut.cpp">
@@ -887,6 +902,9 @@
     <ClCompile Include="..\src\base\tests\StrFormat_ut.cpp">
       <Filter>src\base\tests</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\base\tests\StrHash_ut.cpp">
+      <Filter>src\base\tests</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\base\tests\StrVec_ut.cpp">
       <Filter>src\base\tests</Filter>
     </ClCompile>
@@ -897,6 +915,9 @@
       <Filter>src\base\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\tests\Win_ut.cpp">
+      <Filter>src\base\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\tests\WindowLifecycle_ut.cpp">
       <Filter>src\base\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\src\mui\Mui.cpp">
@@ -972,6 +993,9 @@
       <Filter>src\wingui</Filter>
     </ClCompile>
     <ClCompile Include="..\src\wingui\Progress.cpp">
+      <Filter>src\wingui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\wingui\Renderer.cpp">
       <Filter>src\wingui</Filter>
     </ClCompile>
     <ClCompile Include="..\src\wingui\Splitter.cpp">

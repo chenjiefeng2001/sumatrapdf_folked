@@ -820,6 +820,7 @@ function sumatrapdf_files()
     "CodexBuild.*",
     "GrokBuild.*",
     "HardwareProfile.*",
+    "WindowLifecycle.h",
     "CommandAvailability.*",
     "CommandPalette.*",
     "CommandPaletteCollect.*",
@@ -912,6 +913,7 @@ function sumatrapdf_files()
     "UpdateCheck.*",
     "Version.h",
     "VirtWnd.*",
+    "Win7Compat.*",
     "WindowTab.*",
   })
   filter { "configurations:Debug or DebugFull" }
@@ -1007,6 +1009,7 @@ function base_files()
     "StrFormatParse.*",
     "StrQueue.*",
     "Str.*",
+    "StrHash.h",
     "StrUtf8.*",
     "StrVec.*",
     "TgaReader.*",
@@ -1437,6 +1440,7 @@ function test_util_files()
     "StrFormatParse.*",
     "StrQueue.*",
     "Str.*",
+    "StrHash.h",
     "StrUtf8.*",
     "StrVec.*",
     "tests/*",
@@ -1453,11 +1457,15 @@ function test_util_files()
     "Flags.*",
     "RefHoverDetect.*",
     "RefHoverTextDetect.*",
+    "HardwareProfile.h",
+    "WindowLifecycle.h",
     "SettingsStructs.*",
     --"StressTesting.*",
     "SumatraConfig.*",
     "SumatraUnitTests.cpp",
-    "tools/test_util.cpp"
+    "tools/test_util.cpp",
+    "wingui/DWriteText.cpp",
+    "wingui/Renderer.cpp",
   })
 end
 

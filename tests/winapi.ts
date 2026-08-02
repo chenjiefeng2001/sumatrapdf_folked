@@ -21,6 +21,7 @@ const user32 = dlopen("user32.dll", {
   SendMessageW: { args: [FFIType.ptr, FFIType.u32, FFIType.i64, FFIType.i64], returns: FFIType.i64 },
   MoveWindow: { args: [FFIType.ptr, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.bool], returns: FFIType.bool },
   ShowWindow: { args: [FFIType.ptr, FFIType.i32], returns: FFIType.bool },
+  IsWindowVisible: { args: [FFIType.ptr], returns: FFIType.bool },
   GetClientRect: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.bool },
   GetScrollInfo: { args: [FFIType.ptr, FFIType.i32, FFIType.ptr], returns: FFIType.bool },
   SetCursorPos: { args: [FFIType.i32, FFIType.i32], returns: FFIType.bool },
@@ -68,6 +69,7 @@ export const WM_RBUTTONUP = 0x0205;
 export const WM_MBUTTONDOWN = 0x0207;
 export const WM_CONTEXTMENU = 0x007b;
 export const WM_COMMAND = 0x0111;
+export const WM_CLOSE = 0x0010;
 // virtual-key / mouse-button flags
 export const MK_LBUTTON = 0x0001;
 export const MK_MBUTTON = 0x0010;
@@ -178,6 +180,11 @@ export function findChildWindow(parent: number, className: string): number {
     return true;
   });
   return found;
+}
+
+// whether a window is visible on screen (IsWindowVisible)
+export function isWindowVisible(hwnd: number): boolean {
+  return user32.symbols.IsWindowVisible(hwnd);
 }
 
 // poll for findTopWindow until it appears or timeout (returns 0 on timeout)

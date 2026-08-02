@@ -27,6 +27,11 @@ extern void StrTest();
 extern void VecTest();
 extern void WinUtilTest();
 extern void StrVecTest();
+extern void WindowLifecycleTest();
+extern void HardwareProfileTest();
+extern void StrHashTest();
+extern void InputScrollingTest();
+extern void RendererTest();
 
 void GetPrintersInfo(struct str::Builder&) {
     /* stub: do nothing */
@@ -114,6 +119,11 @@ int main(int argc, char** argv) {
     VecTest();
     WinUtilTest();
     SumatraPDF_UnitTests();
+    WindowLifecycleTest();
+    HardwareProfileTest();
+    StrHashTest();
+    InputScrollingTest();
+    RendererTest();
 
     int res = utassert_print_results();
     DestroyTempArena();

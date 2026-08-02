@@ -22,6 +22,7 @@ const user32 = dlopen("user32.dll", {
   MoveWindow: { args: [FFIType.ptr, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.bool], returns: FFIType.bool },
   ShowWindow: { args: [FFIType.ptr, FFIType.i32], returns: FFIType.bool },
   IsWindowVisible: { args: [FFIType.ptr], returns: FFIType.bool },
+  IsWindow: { args: [FFIType.ptr], returns: FFIType.bool },
   GetClientRect: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.bool },
   GetScrollInfo: { args: [FFIType.ptr, FFIType.i32, FFIType.ptr], returns: FFIType.bool },
   SetCursorPos: { args: [FFIType.i32, FFIType.i32], returns: FFIType.bool },
@@ -187,6 +188,10 @@ export function isWindowVisible(hwnd: number): boolean {
   return user32.symbols.IsWindowVisible(hwnd);
 }
 
+export function isWindow(hwnd: number): boolean {
+  return user32.symbols.IsWindow(hwnd);
+}
+
 // poll for findTopWindow until it appears or timeout (returns 0 on timeout)
 export async function waitForTopWindow(pid: number, className: string, timeoutMs = 12000): Promise<number> {
   const deadline = Date.now() + timeoutMs;
@@ -332,6 +337,26 @@ export function setForegroundWindow(hwnd: number): boolean {
 export function sendText(hwnd: number, text: string): void {
   const buf = wideZ(text);
   sendMessage(hwnd, WM_SETTEXT, 0, ptr(buf));
+}
+
+// Send text as WM_CHAR messages (one per UTF-16 code unit, posted) so the
+// target Edit processes it like real keyboard input. Unlike sendText(), which
+// sends a cross-process WM_SETTEXT with a local pointer, WM_CHAR works reliably
+// for Edit controls in another process and triggers EN_CHANGE/QueryChanged.
+// Posting is async, so callers usually sleep before asserting on the result.
+export function sendChars(hwnd: number, text: string): void {
+  for (const ch of text) {
+    const code = ch.codePointAt(0)!;
+    if (code > 0xffff) {
+      // surrogate pair: two WM_CHARs with the UTF-16 units
+      const hi = 0xd800 + ((code - 0x10000) >> 10);
+      const lo = 0xdc00 + ((code - 0x10000) & 0x3ff);
+      postMessage(hwnd, WM_CHAR, hi, 1);
+      postMessage(hwnd, WM_CHAR, lo, 1);
+    } else {
+      postMessage(hwnd, WM_CHAR, code, 1);
+    }
+  }
 }
 
 // PNG encoder CLSID {557CF406-1A04-11D3-9A73-0000F81EF32E}

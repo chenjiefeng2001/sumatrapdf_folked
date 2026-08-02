@@ -43,7 +43,7 @@ enum class Arg {
     Control = 84, UnitTests = 85,
 };
 
-static SeqStrings gArgNames =
+static const char* gArgNames =
     "s\0" "silent\0" "fast-install\0" "print-to-default\0"
     "print-dialog\0" "p\0" "h\0" "?\0"
     "help\0" "exit-when-done\0" "exit-on-print\0" "restrict\0"

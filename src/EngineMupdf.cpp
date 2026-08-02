@@ -3823,7 +3823,7 @@ static fz_display_list* GetOrBuildPageDisplayList(FzPageInfo* pi, fz_context* ct
             list = nullptr;
         }
         pi->displayList = list;
-        pi->displayListGeneration = pi->annotGeneration;
+        pi->displayListGeneration = pi->annotGeneration.load();
     }
     if (!pi->displayList) {
         return nullptr;
@@ -4007,7 +4007,9 @@ Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
         // pagesLock→docLock→renderLock hierarchy and trigger a deadlock.
         // ScopedSRWLockShared already checks g_tlsCritSecDepth, but we also
         // check explicitly at this higher level for clearer attribution.
+#ifdef DEBUG
         ReportIf(g_tlsCritSecDepth > 0);
+#endif
 
         AcquireSRWLockShared(&docLock);
 

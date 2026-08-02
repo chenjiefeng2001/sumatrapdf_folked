@@ -1195,7 +1195,18 @@ int RenderCache::PaintTile(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, T
                 rt->BeginDraw();
                 D2D1_RECT_F dst = D2D1::RectF((float)bounds.x, (float)bounds.y, (float)(bounds.x + bounds.dx),
                                               (float)(bounds.y + bounds.dy));
-                rt->DrawBitmap(d2dBmp, dst, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                // GDI path computes xSrc/ySrc to skip the portion of the tile
+                // that is outside the viewport (pageOnScreen clipped).  The D2D
+                // path MUST mirror that with an equivalent source rect; without
+                // it the entire bitmap is drawn into `bounds`, vertically
+                // compressing the page content when the page extends beyond the
+                // viewport (fit-width mode etc.).
+                // See docs/reports/continuous-scroll-stretch-analysis.md §5.
+                int xSrc = -std::min(tileOnScreen.x, 0);
+                int ySrc = -std::min(tileOnScreen.y, 0);
+                D2D1_RECT_F src =
+                    D2D1::RectF((float)xSrc, (float)ySrc, (float)(xSrc + bounds.dx), (float)(ySrc + bounds.dy));
+                rt->DrawBitmap(d2dBmp, dst, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, &src);
                 HRESULT hrEnd = rt->EndDraw();
                 if (FAILED(hrEnd)) {
                     logfa(

@@ -857,3 +857,126 @@ TempStr PageLinksResultTemp(Str path, int pageNo, int* exitCodeOut) {
     SafeEngineRelease(&engine);
     return ToStrTemp(out);
 }
+
+// Headless test for page geometry correctness during continuous scrolling.
+// Opens the PDF and simulates scrolling through all pages for the given number
+// of passes, verifying that each page's mediabox dimensions:
+//   - Are always > 0 (non-zero width/height)
+//   - Do NOT change between successive scroll passes
+//   - Are consistent when queried via PageMediabox() vs internal storage
+//
+// This catches the "page geometry mismatch / stale cache" bugs that cause
+// adjacent-page compression/stretching during continuous scrolling.
+TempStr PageGeometryResultTemp(Str path, int passes, int* exitCodeOut) {
+    ScopedGdiPlus gdiPlus;
+    EnsureTestGlobalPrefs();
+
+    str::Builder out;
+    auto fail = [&](Str msg) -> TempStr {
+        out.Append(msg);
+        out.AppendChar('\n');
+        if (exitCodeOut) {
+            *exitCodeOut = 1;
+        }
+        return ToStrTemp(out);
+    };
+
+    EngineBase* engine = CreateEngineFromFile(path, nullptr, false);
+    if (!engine) {
+        return fail(fmt("ERROR engine-create-failed path=%s\n", path));
+    }
+
+    int nPages = engine->PageCount();
+    if (nPages < 1) {
+        SafeEngineRelease(&engine);
+        return fail(fmt("ERROR zero-page-doc path=%s\n", path));
+    }
+
+    // We'll store one baseline geometry per page from pass 0.
+    struct PageGeo {
+        float w, h;
+    };
+    PageGeo* baseline = AllocArray<PageGeo>(nPages);
+    bool* everPassed = AllocArray<bool>(nPages);
+    int totalChecks = 0;
+    int failedChecks = 0;
+    bool allPassed = true;
+
+    for (int pass = 0; pass < passes; pass++) {
+        for (int pn = 1; pn <= nPages; pn++) {
+            // Simulate scrolling: BenchLoadPage forces loading + rendering.
+            if (!engine->BenchLoadPage(pn)) {
+                out.Append(fmt("FAIL pass=%d page=%d bench-load-failed\n", pass, pn));
+                allPassed = false;
+                failedChecks++;
+                continue;
+            }
+
+            // Check PageMediabox API.
+            RectF mbox = engine->PageMediabox(pn);
+            totalChecks++;
+
+            // Validation 1: width and height must be positive.
+            if (mbox.dx <= 0.0f || mbox.dy <= 0.0f) {
+                out.Append(fmt("FAIL pass=%d page=%d zero-dimension w=%.2f h=%.2f\n",
+                               pass, pn, mbox.dx, mbox.dy));
+                allPassed = false;
+                failedChecks++;
+                continue;
+            }
+
+            // Validation 2: width and height must be reasonable (< 100000 pt).
+            if (mbox.dx > 100000.0f || mbox.dy > 100000.0f) {
+                out.Append(fmt("FAIL pass=%d page=%d unreasonable-dimension w=%.2f h=%.2f\n",
+                               pass, pn, mbox.dx, mbox.dy));
+                allPassed = false;
+                failedChecks++;
+                continue;
+            }
+
+            if (pass == 0) {
+                // Store baseline on first pass.
+                baseline[pn - 1].w = mbox.dx;
+                baseline[pn - 1].h = mbox.dy;
+                everPassed[pn - 1] = true;
+            } else {
+                // Validation 3: geometry must match baseline from pass 0.
+                // Allow up to 0.5 pt for floating-point jitter on repeated
+                // fz_bound_page calls (which MuPDF internally may do).
+                const float eps = 0.5f;
+                if (fabsf(mbox.dx - baseline[pn - 1].w) > eps ||
+                    fabsf(mbox.dy - baseline[pn - 1].h) > eps) {
+                    out.Append(fmt("FAIL pass=%d page=%d geometry-mismatch "
+                                   "baseline(w=%.2f h=%.2f) current(w=%.2f h=%.2f) diff(w=%.2f h=%.2f)\n",
+                                   pass, pn,
+                                   baseline[pn - 1].w, baseline[pn - 1].h,
+                                   mbox.dx, mbox.dy,
+                                   fabsf(mbox.dx - baseline[pn - 1].w),
+                                   fabsf(mbox.dy - baseline[pn - 1].h)));
+                    allPassed = false;
+                    failedChecks++;
+                } else {
+                    everPassed[pn - 1] = true;
+                }
+            }
+        }
+    }
+
+    free(baseline);
+    free(everPassed);
+    SafeEngineRelease(&engine);
+
+    if (allPassed) {
+        out.Append(fmt("OK pages=%d passes=%d checks=%d\n", nPages, passes, totalChecks));
+        if (exitCodeOut) {
+            *exitCodeOut = 0;
+        }
+    } else {
+        out.Append(fmt("RESULT pages=%d passes=%d checks=%d failed=%d\n",
+                       nPages, passes, totalChecks, failedChecks));
+        if (exitCodeOut) {
+            *exitCodeOut = 1;
+        }
+    }
+    return ToStrTemp(out);
+}

@@ -1,6 +1,8 @@
 /* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
+#include <atomic>
+
 struct Annotation;
 
 struct FitzPageImageInfo {
@@ -65,9 +67,13 @@ struct FzPageInfo {
     // generation counters for page versioning: every annotation modification
     // increments annotGeneration; the render thread compares
     // displayListGeneration to detect stale display lists and rebuilds.
-    // Under pagesLock for increment, under renderLock for the check/rebuild.
-    int annotGeneration = 0;        // bumped on each annotation change
-    int displayListGeneration = -1; // generation captured when displayList was built
+    // Both fields use std::atomic<int> for safe multi-threaded access — the
+    // increment (MarkNotificationAsModified, EngineMupdf.cpp) is outside all
+    // locks, while the read (GetOrBuildPageDisplayList, EngineMupdf.cpp) is
+    // under renderLock.  Plain int would be a data race (undefined behavior).
+    // See docs/reports/annot-render-crash-analysis.md §3.2.
+    std::atomic<int> annotGeneration{0};        // bumped on each annotation change
+    std::atomic<int> displayListGeneration{-1}; // generation captured when displayList was built
 };
 
 class EngineMupdf : public EngineBase {

@@ -42,6 +42,7 @@ enum class ControlCmd : u16 {
     TestPageInfoOverlay = 28,
     TestGetToc = 29,
     TestPageLinks = 30,
+    TestPageGeometry = 31,
 };
 
 enum class ControlArgType : u16 {
@@ -505,6 +506,20 @@ static void ExecuteControlRequest(ControlRequest* req) {
             int exitCode = 0;
             Str res = PageLinksResultTemp(path, pageNo, &exitCode);
             AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestPageGeometry: {
+            Str path = StringArg(req, 0);
+            i32 passes = 3;
+            if (!path) {
+                AppendError(req, "TestPageGeometry expects string path, optional int passes");
+                break;
+            }
+            IntArg(req, 1, passes);
+            int exitCode = 0;
+            Str geoRes = PageGeometryResultTemp(path, passes, &exitCode);
+            AppendTestResult(req, exitCode, geoRes);
             break;
         }
 

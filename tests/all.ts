@@ -42,6 +42,7 @@ import { testit as issueAnnotLocking } from "./issue-annot-locking.ts";
 import { testit as issueDisplayModeAnnot } from "./issue-display-mode-annot.ts";
 import { testit as issueRenderStability } from "./issue-render-stability.ts";
 import { testit as issueAnnotCache } from "./issue-annot-cache.ts";
+import { testit as issuePageGeometryScroll } from "./issue-page-geometry-scroll.ts";
 
 const tests: [string, () => void | Promise<void>][] = [
   ["combining-mark-first", combiningMarkFirst],
@@ -76,6 +77,7 @@ const tests: [string, () => void | Promise<void>][] = [
   ["issue-display-mode-annot", issueDisplayModeAnnot],
   ["issue-render-stability", issueRenderStability],
   ["issue-annot-cache", issueAnnotCache],
+  ["issue-page-geometry-scroll", issuePageGeometryScroll],
 ];
 
 export type AllTestOptions = {

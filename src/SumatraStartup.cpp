@@ -25,6 +25,9 @@
 #include "GpuBackend.h"
 #endif
 #include "PointerInput.h"
+#ifdef _MSC_VER
+#include "wingui/Renderer.h"
+#endif
 
 #include "Settings.h"
 #include "DisplayMode.h"
@@ -2139,6 +2142,13 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE, _In_ LPST
     } else {
         logf("GpuBackend: D2D1 not available, using GDI fallback\n");
     }
+
+    // Initialize the unified control-drawing backend. Tries Direct2D first and
+    // falls back to GDI when D2D is unavailable (risk #3 in the UI
+    // modernization report: dynamic API load + nullptr fallback). Custom
+    // controls draw through gRenderer instead of raw GDI.
+    gRenderer = CreateRenderer();
+    logf(gRendererKind == RendererBackendKind::D2D ? "Renderer: Direct2D backend\n" : "Renderer: GDI backend\n");
 #endif
 
     // Enable WM_POINTER high-precision input on Windows 8+ (precision touchpads,

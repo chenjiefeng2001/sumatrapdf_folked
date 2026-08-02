@@ -6,6 +6,7 @@
 
 #include "base/ScopedWin.h"
 #include "base/Win.h"
+#include "wingui/Renderer.h"
 
 /*
 Frame rate window is a debugging tool that shows the frame rate, most likely
@@ -24,8 +25,22 @@ that it's actually a part of that window.
 #define COL_WHITE RGB(0xff, 0xff, 0xff)
 #define COL_BLACK RGB(0, 0, 0)
 
-static void FrameRatePaint(FrameRateWnd* w, HDC hdc, PAINTSTRUCT&) {
+static void FrameRatePaint(FrameRateWnd* w, HDC hdc, PAINTSTRUCT& ps) {
     RECT rc = ClientRECT(w->hwnd);
+
+    // Preferred path: the unified Renderer backend (Direct2D + DirectWrite on
+    // machines where it's available, GDI otherwise). This is the first control
+    // drawing through gRenderer — if D2D fails mid-paint we fall through to
+    // plain GDI below.
+    if (gRenderer && gRenderer->BeginPaint(w->hwnd, &ps)) {
+        gRenderer->FillRect(rc, RgbaColor(0, 0, 0));
+        TempStr txt = fmt("%d", w->frameRate);
+        gRenderer->DrawText(txt, rc, RgbaColor(255, 255, 255), w->font, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        gRenderer->EndPaint();
+        return;
+    }
+
+    // Legacy GDI path (also the fallback when D2D is unavailable).
     AutoDeleteBrush brush = CreateSolidBrush(COL_BLACK);
     FillRect(hdc, &rc, brush);
 

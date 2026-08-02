@@ -18,6 +18,37 @@ struct DWriteTextFormat {
     // Format is owned by DWriteTextCache; do not Release().
 };
 
+// Cache key extracted from an HFONT: family name, size in DIPs, weight
+// (DWRITE_FONT_WEIGHT: 400 normal, 700 bold) and style (DWRITE_FONT_STYLE).
+// Sized to fit any font family name (LF_FACESIZE = 32 WCHARs).
+struct DWriteFormatKey {
+    WCHAR family[32] = {};
+    float size = 0;
+    int weight = 0;
+    int style = 0;
+};
+
+// Pure logic: whether two keys identify the same text format. Unit-tested
+// headlessly in Renderer_ut.cpp.
+static inline bool DWriteCacheKeysEqual(const DWriteFormatKey& a, const DWriteFormatKey& b) {
+    if (a.size != b.size || a.weight != b.weight || a.style != b.style) {
+        return false;
+    }
+    return wcsncmp(a.family, b.family, dimof(a.family)) == 0;
+}
+
+// Lazily built IDWriteTextFormat cache keyed by HFONT properties. Formats are
+// owned by the cache and must not be Released by callers. UI thread only.
+struct DWriteTextCache {
+    // Get (and lazily create) a cached text format for the given HFONT.
+    // Returns nullptr when DirectWrite is unavailable or the font is invalid.
+    static DWriteTextFormat* GetFormat(HFONT font);
+
+    // Drop all cached formats (releases the IDWriteTextFormat objects). Call
+    // on shutdown so the factory can be torn down.
+    static void Clear();
+};
+
 // Layout-and-render helper: creates an IDWriteTextLayout from a format + string,
 // measures it, and draws it onto an ID2D1RenderTarget.
 struct DWriteTextRenderer {

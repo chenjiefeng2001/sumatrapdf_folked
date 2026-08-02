@@ -215,7 +215,7 @@ export const commands = [
     "CmdPasteClipboardImage", "Paste Image From Clipboard",
     "CmdTabGroupSave", "Save Tab Group",
     "CmdTabGroupRestore", "Restore Tab Group",
-    "CmdToggleTips", "Toggle Tips",
+    // removed: CmdToggleTips (tips have been removed from the home page)
     "CmdChangeBackgroundColor", "Change Background Color",
     "CmdSetTabColor", "Set Tab Color",
     "CmdPdfCompress", "Compress PDF",

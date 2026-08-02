@@ -156,10 +156,6 @@ static TempStr UpdateCommandNameTemp(MainWindow* win, int cmdId, Str s) {
             isToggle = true;
             newIsOn = !wnd;
         } break;
-        case CmdToggleTips: {
-            isToggle = true;
-            newIsOn = !gGlobalPrefs->showTips;
-        } break;
         case CmdToggleReuseInstance: {
             isToggle = true;
             newIsOn = !gGlobalPrefs->reuseInstance;

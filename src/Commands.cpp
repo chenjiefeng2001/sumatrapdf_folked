@@ -224,7 +224,6 @@ static SeqStrings gCommandNames =
     "CmdPasteClipboardImage\0"
     "CmdTabGroupSave\0"
     "CmdTabGroupRestore\0"
-    "CmdToggleTips\0"
     "CmdChangeBackgroundColor\0"
     "CmdSetTabColor\0"
     "CmdPdfCompress\0"
@@ -481,7 +480,6 @@ static i32 gCommandIds[] = {
     CmdPasteClipboardImage,
     CmdTabGroupSave,
     CmdTabGroupRestore,
-    CmdToggleTips,
     CmdChangeBackgroundColor,
     CmdSetTabColor,
     CmdPdfCompress,
@@ -738,7 +736,6 @@ SeqStrings gCommandDescriptions =
     "Paste Image From Clipboard\0"
     "Save Tab Group\0"
     "Restore Tab Group\0"
-    "Toggle Tips\0"
     "Change Background Color\0"
     "Set Tab Color\0"
     "Compress PDF\0"

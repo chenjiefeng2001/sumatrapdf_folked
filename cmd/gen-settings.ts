@@ -835,7 +835,7 @@ const globalPrefs: Field[] = [
     mkField("ShowMenubarWithTabs", Bool, false, "if true, show the menu bar when using tabs (useTabs = true)"),
     "3.7",
   ),
-  setVersion(mkField("ShowTips", Bool, true, "if true, we show tips on the home page"), "3.7"),
+  // removed: ShowTips (tips have been removed from the home page)
   setVersion(mkField("CustomColors", Str, null, "up to 13 custom colors for the background color picker, separated by space (e.g. '#ff0000 #00ff00 #0000ff')"), "3.7"),
   mkField("ShowToolbar", Bool, true, "if true, we show the toolbar at the top of the window"),
   setVersion(

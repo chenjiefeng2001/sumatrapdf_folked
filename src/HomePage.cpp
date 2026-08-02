@@ -25,8 +25,8 @@
 #include "FilterHighlightDraw.h"
 #include "FileThumbnails.h"
 #include "Menu.h"
-#include "TipText.h"
 #include "HomePage.h"
+#include "TipText.h"
 #include "Translations.h"
 #include "Version.h"
 #include "Theme.h"
@@ -40,25 +40,6 @@
 #define ABOUT_LINE_OUTER_SIZE 1
 #endif
 #define ABOUT_LINE_SEP_SIZE 1
-
-static Str sumatraTips = StrL(R"tips(You can [customize scrollbar](CmdChangeScrollbar).
-You can [customize keyboard shortcuts](Help/Customize-keyboard-shortcuts).
-You can [customize toolbar](Help/Customize-toolbar).
-Press (Key/CmdCommandPalette) to open [command palette](CmdCommandPalette).
-To open file from history open [command palette](CmdCommandPalette) with (Key/CmdCommandPalette) and type `#`.
-You can [extract text from PDF file](Help/Tool-x-extract-text-from-pdf).
-You can [toggle menu bar](CmdToggleMenuBar) with (Key/CmdToggleMenuBar).
-You can [toggle toolbar](CmdToggleToolbar) with (Key/CmdToggleToolbar).
-You can [edit PDF annotations](Help/Editing-annotations).
-You can preview where a citation, figure or footnote link points by hovering it - enable in [advanced settings](CmdAdvancedSettings) via CitationHoverDelay.
-)tips");
-
-static Str sumatraPromos = StrL(R"promos(Try [Edna](https://edna.arslexis.io): a note taking web app for power users.
-Try [MarkLexis](https://marklexis.arslexis.io): a bookmarking web application.
-)promos");
-
-// TODO: leaks if set
-static Str promoFromServer;
 
 static bool IsTipWhitespace(char c) {
     return c == ' ' || c == '\t' || c == '\r' || c == '\n';
@@ -371,77 +352,6 @@ TempStr TipPlainTextTemp(ParsedTip& tip) {
     return ToStrTemp(sb);
 }
 
-static ParsedTip* gParsedTips = nullptr;
-static int gParsedTipCount = 0;
-static ParsedTip* gParsedPromos = nullptr;
-static int gParsedPromoCount = 0;
-static bool gSelectedIsPromo = false;
-static int gSelectedTipIdx = -1;
-
-static int ParseTipsFromString(Str src, Str prefix, ParsedTip*& outTips) {
-    StrVec lines;
-    Split(&lines, src, "\n");
-    int n = 0;
-    for (int i = 0; i < len(lines); i++) {
-        Str line = lines.At(i);
-        if (!str::IsEmptyOrWhiteSpace(line)) {
-            n++;
-        }
-    }
-    if (n == 0) {
-        return 0;
-    }
-    outTips = new ParsedTip[n];
-    int count = 0;
-    for (int i = 0; i < len(lines); i++) {
-        Str line = lines.At(i);
-        if (str::IsEmptyOrWhiteSpace(line)) {
-            continue;
-        }
-        if (prefix) {
-            TempStr prefixed = str::JoinTemp(prefix, line);
-            ParseTip(outTips[count], prefixed);
-        } else {
-            ParseTip(outTips[count], line);
-        }
-        count++;
-    }
-    return count;
-}
-
-static void PickRandomTipOrPromo() {
-    bool pickPromo = (gParsedPromoCount > 0) && (rand() % 100 < 30);
-    if (pickPromo) {
-        gSelectedIsPromo = true;
-        gSelectedTipIdx = rand() % gParsedPromoCount;
-    } else if (gParsedTipCount > 0) {
-        gSelectedIsPromo = false;
-        gSelectedTipIdx = rand() % gParsedTipCount;
-    }
-}
-
-static void EnsureTipsParsed() {
-    if (gParsedTips || gParsedPromos) {
-        return;
-    }
-    gParsedTipCount = ParseTipsFromString(sumatraTips, "Tip: ", gParsedTips);
-    gParsedPromoCount = ParseTipsFromString(sumatraPromos, {}, gParsedPromos);
-    PickRandomTipOrPromo();
-}
-
-static void PickAnotherRandomTip() {
-    bool prevIsPromo = gSelectedIsPromo;
-    int prev = gSelectedTipIdx;
-    // keep picking until we get a different one
-    int maxIter = 100;
-    while (maxIter-- > 0) {
-        PickRandomTipOrPromo();
-        if (gSelectedIsPromo != prevIsPromo || gSelectedTipIdx != prev) {
-            return;
-        }
-    }
-}
-
 constexpr COLORREF kAboutBorderCol = RGB(0, 0, 0);
 
 constexpr int kAboutLeftRightSpaceDx = 8;
@@ -497,10 +407,6 @@ static AboutLayoutInfoEl gAboutLayoutInfo[] = {
 
 static Vec<StaticLink*> gStaticLinks;
 
-void SetPromoString(Str s) {
-    if (!s) return;
-    str::ReplaceWithCopy(&promoFromServer, s);
-}
 
 static TempStr GetAppVersionTemp() {
     TempStr s = str::DupTemp("v" CURR_VERSION_STRA);
@@ -1055,10 +961,6 @@ struct HomePageLayout {
     Vec<u8> highlighted;
     Rect rcSearchBorder; // border rect drawn around the edit control
 
-    // tip layout
-    Rect rcTip;               // background rect for tip area
-    ParsedTip* tip = nullptr; // points to gParsedTips or gParsedPromos, not owned
-
     ~HomePageLayout();
 };
 
@@ -1128,9 +1030,6 @@ void HomePageFocusSearch(MainWindow* win) {
     HwndSetFocus(win->hwndHomeSearch);
 }
 
-void PickAnotherRandomPromotion() {
-    PickAnotherRandomTip();
-}
 
 // thumbnail tooltip: the file path, then two spaces and a human-readable size
 static TempStr HomeThumbTooltipTemp(Str path) {
@@ -1142,7 +1041,6 @@ static TempStr HomeThumbTooltipTemp(Str path) {
 }
 
 void LayoutHomePage(HomePageLayout& l) {
-    EnsureTipsParsed();
 
     Vec<FileState*> allFileStates;
     if (gGlobalPrefs->homePageSortByFrequentlyRead) {
@@ -1307,29 +1205,10 @@ void LayoutHomePage(HomePageLayout& l) {
     int searchAreaDy = headerSearchGap + searchEditDy + 2 + searchThumbsGap;
     headerBottomY += searchAreaDy;
 
-    // --- Step 2: calculate tip area at the bottom (before thumbnails) ---
-    int tipHeight = 0;
-    HFONT fontTip = CreateSimpleFont(hdc, "MS Shell Dlg", 16);
-    ParsedTip* tip = nullptr;
-    if (gGlobalPrefs->showTips && gSelectedTipIdx >= 0) {
-        if (gSelectedIsPromo && gSelectedTipIdx < gParsedPromoCount) {
-            tip = &gParsedPromos[gSelectedTipIdx];
-        } else if (!gSelectedIsPromo && gSelectedTipIdx < gParsedTipCount) {
-            tip = &gParsedTips[gSelectedTipIdx];
-        }
-    }
-    if (tip) {
-        MeasureTipWords(*tip, hdc, fontTip);
-        int tipPadding = DpiScale(hdc, 8);
-        // do a preliminary layout to get the height (use thumbnails content width)
-        LayoutTip(*tip, thumbsContentWidth, 0, 0);
-        tipHeight = tip->totalDy + 2 * tipPadding;
-    }
-
     // --- Step 3: middle area for thumbnails/list ---
     // content starts directly after headerBottomY (which includes kSearchThumbnailsGapY)
     int thumbsTopY = headerBottomY;
-    int thumbsBottomY = rc.dy - tipHeight - kThumbsMiddleMargin;
+    int thumbsBottomY = rc.dy - kThumbsMiddleMargin;
     int thumbsVisibleDy = std::max(0, thumbsBottomY - thumbsTopY);
 
     l.rcThumbsArea = {0, thumbsTopY, rc.dx, thumbsVisibleDy};
@@ -1455,43 +1334,7 @@ void LayoutHomePage(HomePageLayout& l) {
         }
     }
 
-    // layout tip at the bottom
-    if (tip) {
-        Rect rcClient = ClientRect(win->hwndCanvas);
-        int tipPadding = DpiScale(hdc, 8);
-
-        int tipY = rcClient.dy - tipHeight;
-        // background spans full window width
-        l.rcTip = {0, tipY, rcClient.dx, tipHeight};
-        l.tip = tip;
-
-        // text area aligned with thumbnails
-        int tipStartX = thumbsStartX;
-        int tipStartY = tipY + tipPadding;
-        LayoutTip(*tip, thumbsContentWidth, tipStartX, tipStartY);
-
-        // register tip links; per-link rects first so they take priority in hit testing
-        for (auto& link : tip->links) {
-            // compute bounding rect of all words in this link
-            Rect linkRect;
-            for (int i = link.firstWord; i <= link.lastWord; i++) {
-                auto& w = tip->words[i];
-                Rect wr = {w.x, w.y, w.dx, w.dy};
-                if (i == link.firstWord) {
-                    linkRect = wr;
-                } else {
-                    linkRect = linkRect.Union(wr);
-                }
-            }
-            auto slTip = new StaticLink(linkRect, link.cmd, link.cmd);
-            win->staticLinks.Append(slTip);
-        }
-        // tip background: clicking outside of links picks another tip
-        auto slBg = new StaticLink(l.rcTip, kLinkNextTip);
-        win->staticLinks.Append(slBg);
-    }
 }
-
 static void GetFileStateIcon(FileState* fs) {
     if (fs->himl) {
         return;
@@ -1886,16 +1729,6 @@ static void DrawHomePageLayout(HomePageLayout& l) {
         win->staticLinks.Append(sl);
     }
 
-    // draw tip at the bottom
-    if (l.tip) {
-        COLORREF tipBgCol = ThemeControlBackgroundColor();
-        FillRect(hdc, l.rcTip, tipBgCol);
-
-        HFONT fontTip = CreateSimpleFont(hdc, "MS Shell Dlg", 16);
-        COLORREF textCol = ThemeWindowTextColor();
-        COLORREF linkCol = ThemeWindowLinkColor();
-        DrawTipWords(hdc, *l.tip, fontTip, textCol, linkCol);
-    }
 }
 
 void DrawHomePage(MainWindow* win, HDC hdc) {

@@ -146,7 +146,6 @@ Available in [pre-release](https://www.sumatrapdfreader.org/prerelease) builds.
 - `CmdToggleToolbarPosition` : "Toggle Toolbar Position" (command palette shows the target, e.g. "set to bottom")
 - `CmdToggleDjvuEngine` : "Toggle DjVu Engine" (command palette shows the target, e.g. "set to libdjvu")
 - `CmdToggleTabsMru` : "Toggle Tabs MRU"
-- `CmdToggleTips` : "Toggle Tips"
 - `CmdToggleWindowsPreviewer` : "Toggle Windows Previewer"
 - `CmdToggleWindowsSearchFilter` : "Toggle Windows Search Filter"
 - `CmdTranslateSelectionWithClaudeCode` : "Translate Selection with Claude Code"

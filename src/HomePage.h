@@ -19,16 +19,12 @@ TempStr GetStaticLinkAtTemp(Vec<StaticLink*>& linkInfo, int x, int y, StaticLink
 constexpr const char* kLinkOpenFile = "<File,Open>";
 constexpr const char* kLinkShowList = "<View,ShowList>";
 constexpr const char* kLinkHideList = "<View,HideList>";
-constexpr const char* kLinkNextTip = "<NextTip>";
 constexpr const char* kLinkHomeListView = "<HomePage,ListView>";
 constexpr const char* kLinkHomeThumbnailView = "<HomePage,ThumbnailView>";
 constexpr const char* kLinkHomeRemoveFilePrefix = "<HomePage,RemoveFile>";
 constexpr const char* kLinkHomePinFilePrefix = "<HomePage,PinFile>";
 
-void SetPromoString(Str s);
-
 void DrawHomePage(MainWindow* win, HDC hdc);
-void PickAnotherRandomPromotion();
 void HomePageOnVScroll(MainWindow* win, WPARAM wp);
 void HomePageOnMouseWheel(MainWindow* win, int delta);
 void HomePageFocusSearch(MainWindow* win);

@@ -3017,7 +3017,6 @@ void LoadModelIntoTab(WindowTab* tab) {
     }
 
     UpdateUiForCurrentTab(win);
-    PickAnotherRandomPromotion();
 
     if (win->InPresentation()) {
         SetSidebarVisibility(win, tab->showTocPresentation, gGlobalPrefs->showFavorites);
@@ -8374,16 +8373,6 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
                 ReloadDocument(win, false);
             }
             return 0;
-        }
-
-        case CmdToggleTips: {
-            gGlobalPrefs->showTips = !gGlobalPrefs->showTips;
-            SaveSettings();
-            tab = win->CurrentTab();
-            if (!tab || tab->IsAboutTab()) {
-                win->RedrawAll(true);
-            }
-            break;
         }
 
         case CmdNavigateBack:

@@ -113,9 +113,6 @@ ShowMenubar = true
 ; version 3.7)
 ShowMenubarWithTabs = false
 
-; if true, we show tips on the home page (introduced in version 3.7)
-ShowTips = true
-
 ; up to 13 custom colors for the background color picker, separated by space
 ; (e.g. '#ff0000 #00ff00 #0000ff') (introduced in version 3.7)
 CustomColors =

@@ -67,7 +67,6 @@ static UINT_PTR gNoDocWhitelist[] = {
     CmdToggleDjvuEngine,
     CmdToggleUseTabs,
     CmdToggleTabsMru,
-    CmdToggleTips,
     CmdToggleFrequentlyRead,
     CmdToggleChmUI,
     CmdToggleReuseInstance,

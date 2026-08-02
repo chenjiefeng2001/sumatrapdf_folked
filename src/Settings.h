@@ -530,8 +530,6 @@ struct GlobalPrefs {
     bool showMenubar;
     // if true, show the menu bar when using tabs (useTabs = true)
     bool showMenubarWithTabs;
-    // if true, we show tips on the home page
-    bool showTips;
     // up to 13 custom colors for the background color picker, separated by
     // space (e.g. '#ff0000 #00ff00 #0000ff')
     Str customColors;
@@ -1048,7 +1046,6 @@ static const FieldInfo gGlobalPrefsFields[] = {
     {offsetof(GlobalPrefs, reuseInstance), SettingType::Bool, true},
     {offsetof(GlobalPrefs, showMenubar), SettingType::Bool, true},
     {offsetof(GlobalPrefs, showMenubarWithTabs), SettingType::Bool, false},
-    {offsetof(GlobalPrefs, showTips), SettingType::Bool, true},
     {offsetof(GlobalPrefs, customColors), SettingType::String, 0},
     {offsetof(GlobalPrefs, showToolbar), SettingType::Bool, true},
     {offsetof(GlobalPrefs, toolbar), SettingType::String, 0},
@@ -1137,19 +1134,19 @@ static const FieldInfo gGlobalPrefsFields[] = {
     {(size_t)-1, SettingType::Comment, (intptr_t)"Settings below are not recognized by the current version"},
 };
 static const StructInfo gGlobalPrefsInfo = {
-    sizeof(GlobalPrefs), 111, gGlobalPrefsFields,
+    sizeof(GlobalPrefs), 110, gGlobalPrefsFields,
     "\0\0CheckForUpdates\0CustomScreenDPI\0DefaultDisplayMode\0DefaultZoom\0DisableJavaScript\0AllowExternalImages\0Ena"
     "bleTeXEnhancements\0EscToExit\0FullPathInTitle\0InverseSearchCmdLine\0LazyLoading\0MainWindowBackground\0NoHomeTab"
     "\0HomePageSortByFrequentlyRead\0HomePageShowList\0ReloadModifiedDocuments\0RememberOpenedFiles\0RememberStatePerDo"
-    "cument\0RestoreSession\0ReuseInstance\0ShowMenubar\0ShowMenubarWithTabs\0ShowTips\0CustomColors\0ShowToolbar\0Tool"
-    "bar\0ToolbarPosition\0SearchUIFloating\0ShowFavorites\0ShowToc\0ShowLinks\0ShowStartPage\0SidebarDx\0Scrollbars\0S"
-    "crollbarInSinglePage\0SmoothScroll\0DjvuEngine\0CitationHoverDelay\0ReadAloudVoiceId\0FastScrollOverScrollbar\0Pre"
-    "ventSleepInFullscreen\0TabWidth\0Theme\0TocDy\0ToolbarSize\0TreeFontName\0TreeFontSize\0UIFontSize\0DisableAntiAli"
-    "as\0DisableAutoLinks\0UseSysColors\0UseTabs\0TabsMru\0ZoomLevels\0ZoomIncrement\0\0FixedPageUI\0\0EBookUI\0\0Comic"
-    "BookUI\0\0ImageUI\0\0ChmUI\0\0ClaudeCode\0\0GrokBuild\0\0CodexBuild\0\0AIChatSidebarDx\0\0TranslateToLang\0\0Annot"
-    "ations\0\0ExternalViewers\0\0ForwardSearch\0\0PrinterDefaults\0\0Fullscreen\0\0SelectionHandlers\0\0Shortcuts\0\0T"
-    "hemes\0\0TabGroups\0\0\0DefaultPasswords\0UiLanguage\0VersionToSkip\0WindowState\0WindowPos\0SearchUIWindowPos\0Fi"
-    "leStates\0SessionData\0ReopenOnce\0TimeOfLastUpdateCheck\0OpenCountWeek\0PropWinPos\0\0"};
+    "cument\0RestoreSession\0ReuseInstance\0ShowMenubar\0ShowMenubarWithTabs\0CustomColors\0ShowToolbar\0Toolbar\0Toolb"
+    "arPosition\0SearchUIFloating\0ShowFavorites\0ShowToc\0ShowLinks\0ShowStartPage\0SidebarDx\0Scrollbars\0ScrollbarIn"
+    "SinglePage\0SmoothScroll\0DjvuEngine\0CitationHoverDelay\0ReadAloudVoiceId\0FastScrollOverScrollbar\0PreventSleepI"
+    "nFullscreen\0TabWidth\0Theme\0TocDy\0ToolbarSize\0TreeFontName\0TreeFontSize\0UIFontSize\0DisableAntiAlias\0Disabl"
+    "eAutoLinks\0UseSysColors\0UseTabs\0TabsMru\0ZoomLevels\0ZoomIncrement\0\0FixedPageUI\0\0EBookUI\0\0ComicBookUI\0\0"
+    "ImageUI\0\0ChmUI\0\0ClaudeCode\0\0GrokBuild\0\0CodexBuild\0\0AIChatSidebarDx\0\0TranslateToLang\0\0Annotations\0\0"
+    "ExternalViewers\0\0ForwardSearch\0\0PrinterDefaults\0\0Fullscreen\0\0SelectionHandlers\0\0Shortcuts\0\0Themes\0\0T"
+    "abGroups\0\0\0DefaultPasswords\0UiLanguage\0VersionToSkip\0WindowState\0WindowPos\0SearchUIWindowPos\0FileStates\0"
+    "SessionData\0ReopenOnce\0TimeOfLastUpdateCheck\0OpenCountWeek\0PropWinPos\0\0"};
 static const FieldInfo gTheme_1_Fields[] = {
     {offsetof(Theme, name), SettingType::String, (intptr_t)""},
     {offsetof(Theme, textColor), SettingType::Color, (intptr_t)""},

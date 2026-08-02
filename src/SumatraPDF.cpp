@@ -40,6 +40,7 @@
 #include "FormFields.h"
 #include "PdfTools.h"
 #include "GlobalPrefs.h"
+#include "HardwareProfile.h"
 #include "ChmModel.h"
 #include "PalmDbReader.h"
 #include "EbookBase.h"
@@ -2047,7 +2048,9 @@ static MainWindow* CreateMainWindow() {
     }
 
     // WM_NCCALCSIZE returning 0 disables DWM rounded corners; re-enable them.
-    if (!IsRunningOnWine()) {
+    // Skip both on low-end machines and under RDP/VM (DWM effects can produce
+    // black windows there - see risk matrix in docs/UI_REPORT.md).
+    if (!IsRunningOnWine() && MicaEnabled()) {
         dwm::SetWindowRoundedCorners(hwndFrame, true);
         // Apply Mica backdrop on Windows 11 22H2+
         dwm::SetWindowMica(hwndFrame, true);

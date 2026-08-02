@@ -25,11 +25,33 @@
 #include "SumatraPDF.h"
 #include "Canvas.h"
 #include "MainWindow.h"
+#include "HardwareProfile.h"
 #include "WindowTab.h"
 #include "Selection.h"
 #include "Toolbar.h"
 #include "Translations.h"
 #include "uia/Provider.h"
+
+// AlphaBlend lives in msimg32.h, which our pinned Windows SDK doesn't ship;
+// load it dynamically at first use (msimg32.dll is present on Win7+).
+typedef BOOL(WINAPI* Sig_AlphaBlend)(HDC, int, int, int, int, HDC, int, int, int, int, BLENDFUNCTION);
+static Sig_AlphaBlend DynAlphaBlend = nullptr;
+static bool triedLoadAlphaBlend = false;
+
+static bool EnsureAlphaBlendLoaded() {
+    if (triedLoadAlphaBlend) {
+        return DynAlphaBlend != nullptr;
+    }
+    triedLoadAlphaBlend = true;
+    HMODULE h = GetModuleHandleW(L"msimg32.dll");
+    if (!h) {
+        h = LoadLibraryW(L"msimg32.dll");
+    }
+    if (h) {
+        DynAlphaBlend = (Sig_AlphaBlend)GetProcAddress(h, "AlphaBlend");
+    }
+    return DynAlphaBlend != nullptr;
+}
 
 SelectionOnPage::SelectionOnPage(int pageNo, const RectF* const rect) {
     this->pageNo = pageNo;
@@ -109,8 +131,85 @@ void DeleteOldSelectionInfo(MainWindow* win, bool alsoTextSel) {
     }
 }
 
+// Low-end Fast-Path: paint the translucent overlay with plain GDI
+// (one 1x1 premultiplied DIBSection, AlphaBlend-stretched per rect) instead of
+// GDI+ GraphicsPath/SolidBrush. Same visual result, an order of magnitude less
+// CPU on machines without GPU acceleration. The selection border is dropped.
+static void PaintTransparentRectanglesGdi(HDC hdc, Vec<Rect>& rects, COLORREF selectionColor, u8 alpha, int pad) {
+    if (len(rects) == 0 || alpha == 0) {
+        return;
+    }
+
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = 1;
+    bmi.bmiHeader.biHeight = -1; // top-down
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = nullptr;
+    HDC memdc = CreateCompatibleDC(hdc);
+    if (!memdc) {
+        return;
+    }
+    HBITMAP bmp = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!bmp || !bits) {
+        if (bmp) DeleteObject(bmp);
+        DeleteDC(memdc);
+        return;
+    }
+    HGDIOBJ oldBmp = SelectObject(memdc, bmp);
+
+    u8 r, g, b;
+    UnpackColor(selectionColor, r, g, b);
+    // AC_SRC_ALPHA sources must be premultiplied
+    u32* px = (u32*)bits;
+    *px = ((u32)alpha << 24) | ((u32)(r * alpha / 255) << 16) | ((u32)(g * alpha / 255) << 8) | (u32)(b * alpha / 255);
+
+    BLENDFUNCTION bf = {};
+    bf.BlendOp = AC_SRC_OVER;
+    bf.SourceConstantAlpha = alpha;
+    bf.AlphaFormat = AC_SRC_ALPHA;
+
+    bool canBlend = EnsureAlphaBlendLoaded();
+    HBRUSH fallbackBrush = nullptr;
+    if (!canBlend) {
+        fallbackBrush = CreateSolidBrush(selectionColor);
+    }
+
+    for (int i = 0; i < len(rects); i++) {
+        Rect rc = rects.at(i);
+        if (pad > 0) {
+            rc.Inflate(pad, pad);
+        }
+        if (rc.dx <= 0 || rc.dy <= 0) {
+            continue;
+        }
+        if (canBlend) {
+            DynAlphaBlend(hdc, rc.x, rc.y, rc.dx, rc.dy, memdc, 0, 0, 1, 1, bf);
+        } else {
+            RECT rcRect = {rc.x, rc.y, rc.x + rc.dx, rc.y + rc.dy};
+            FillRect(hdc, &rcRect, fallbackBrush);
+        }
+    }
+
+    if (fallbackBrush) {
+        DeleteObject(fallbackBrush);
+    }
+    SelectObject(memdc, oldBmp);
+    DeleteObject(bmp);
+    DeleteDC(memdc);
+}
+
 void PaintTransparentRectangles(HDC hdc, Rect screenRc, Vec<Rect>& rects, COLORREF selectionColor, u8 alpha, int pad,
                                 bool drawBorder) {
+    // Low-end Fast-Path: plain GDI AlphaBlend, skips D2D/GDI+ overhead
+    if (g_hwProfile.isLowEnd) {
+        PaintTransparentRectanglesGdi(hdc, rects, selectionColor, alpha, pad);
+        return;
+    }
+
     // GPU-accelerated path via Direct2D (when available). Falls back to GDI+.
 #ifdef _MSC_VER
     if (gGpuBackend && gGpuBackend->isAvailable) {

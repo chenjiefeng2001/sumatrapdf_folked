@@ -3012,6 +3012,21 @@ static void EnsurePointerApiLoaded() {
     }
 }
 
+// Start inertial scrolling from a velocity measured in pixels/ms (what
+// PointerVelocityTracker reports) and arm the driving timer. The scroller
+// itself works in pixels per 16ms tick, so convert first.
+static void StartInertialScroll(MainWindow* win, double vxPerMs, double vyPerMs) {
+    if (!win || !win->inertiaScroll) {
+        return;
+    }
+    double vx = InertiaPxPerMsToPxPerTick(vxPerMs);
+    double vy = InertiaPxPerMsToPxPerTick(vyPerMs);
+    win->inertiaScroll->Start(win, vx, vy);
+    if (win->inertiaScroll->active) {
+        SetTimer(win->hwndCanvas, kInertiaScrollTimerID, USER_TIMER_MINIMUM, nullptr);
+    }
+}
+
 // handle WM_POINTER* messages for pen input by translating to mouse handlers
 // pen input on Windows 8+ generates WM_POINTER* instead of WM_LBUTTON*
 // and gesture configuration can prevent automatic promotion to mouse messages
@@ -3051,6 +3066,7 @@ static bool OnPointerMessage(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LP
 
         if (msg == WM_POINTERDOWN) {
             win->inertiaScroll->Stop();
+            KillTimer(hwnd, kInertiaScrollTimerID);
             win->pointerVelocity->Init();
             return true;
         }
@@ -3060,7 +3076,7 @@ static bool OnPointerMessage(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LP
             if (!inContact) {
                 double vx, vy;
                 win->pointerVelocity->GetVelocity(&vx, &vy);
-                win->inertiaScroll->Start(win, vx, vy);
+                StartInertialScroll(win, vx, vy);
                 return true;
             }
 
@@ -3084,7 +3100,7 @@ static bool OnPointerMessage(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LP
         if (msg == WM_POINTERUP) {
             double vx, vy;
             win->pointerVelocity->GetVelocity(&vx, &vy);
-            win->inertiaScroll->Start(win, vx, vy);
+            StartInertialScroll(win, vx, vy);
             return true;
         }
         return false;
@@ -3188,10 +3204,20 @@ static LRESULT WndProcCanvasFixedPageUI(MainWindow* win, HWND hwnd, UINT msg, WP
         case WM_MOUSEWHEEL:
             return CanvasOnMouseWheel(win, msg, wp, lp);
 
-            // WM_POINTERWHEEL from precision touchpads (Win8+): sub-pixel deltas.
-            // Do NOT intercept — let DefWindowProc promote it to WM_MOUSEWHEEL.
-            // Intercepting it here would lose the wheel delta (wParam format differs),
-            // and forcing MK_CONTROL caused zoom instead of scroll (see #XXXX).
+        case WM_POINTERWHEEL: {
+            // Precision touchpads (Win8+) deliver fine-grained wheel deltas via
+            // WM_POINTERWHEEL. Resolve the delta with GetPointerFrameInfo and
+            // feed it through the exact same accumulation/navigation logic as a
+            // WM_MOUSEWHEEL message. When the API isn't available, fall through
+            // to DefWindowProc which promotes the message to WM_MOUSEWHEEL.
+            UINT32 pointerId = LOWORD(wp);
+            INT32 delta = 0;
+            if (GetPointerWheelDelta(pointerId, &delta) && delta != 0) {
+                WPARAM wheelWp = MAKEWPARAM(0, (short)delta);
+                return CanvasOnMouseWheel(win, WM_MOUSEWHEEL, wheelWp, lp);
+            }
+            return DefWindowProc(hwnd, msg, wp, lp);
+        }
 
         case WM_MOUSEHWHEEL:
             return CanvasOnMouseHWheel(win, msg, wp, lp);
@@ -3429,6 +3455,13 @@ static void OnTimer(MainWindow* win, HWND hwnd, WPARAM timerId) {
             if (!win->inertiaScroll->Tick()) {
                 // Inertia stopped — kill timer
                 KillTimer(hwnd, kInertiaScrollTimerID);
+            }
+            break;
+
+        case OverscrollState::kOverscrollTimerID:
+            if (win->overscroll && !win->overscroll->TickSpring(win)) {
+                // Spring-back finished — kill timer
+                KillTimer(hwnd, OverscrollState::kOverscrollTimerID);
             }
             break;
 

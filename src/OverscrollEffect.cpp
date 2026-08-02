@@ -10,6 +10,7 @@
 #include "EngineBase.h"
 #include "DisplayModel.h"
 #include "MainWindow.h"
+#include "HardwareProfile.h"
 #include "OverscrollEffect.h"
 #include "wingui/Animation.h"
 
@@ -18,10 +19,7 @@ bool OverscrollState::ApplyDelta(int dy, MainWindow* win) {
         return false;
     }
 
-    offsetY += dy;
-
-    // Clamp to max stretch
-    offsetY = std::clamp(offsetY, -maxStretch, maxStretch);
+    offsetY = OverscrollClampOffset(offsetY, dy, maxStretch);
 
     // Schedule repaint to show the overscroll visual
     if (win) {
@@ -36,19 +34,54 @@ void OverscrollState::Release(MainWindow* win) {
         return;
     }
 
-    // Lazily create the AnimProp for spring-back animation
+    // Lazily create the AnimProp for the spring-back animation
     if (!springAnim) {
         springAnim = new AnimProp();
     }
 
-    float currentOffset = (float)offsetY;
-    springAnim->Animate(&currentOffset, 0.0f, 300, Easing::EaseOutQuad);
+    springOffset = (float)offsetY;
+    springAnim->from = springOffset;
+    springAnim->to = 0.0f;
+    springAnim->current = springOffset;
+    springAnim->durationMs = 300;
+    springAnim->easing = Easing::EaseOutQuad;
+    springAnim->elapsedMs = 0;
+    springAnim->active = true;
 
-    // Link to win's animation manager (assumes win has animMgr).
-    // This is a simplified integration — we schedule repaints during animation.
-    offsetY = 0;
+    // Low-end hardware fast-path: snap back to zero instead of animating.
+    if (!AnimationsEnabled()) {
+        offsetY = 0;
+        springOffset = 0;
+        springAnim->active = false;
+        ScheduleRepaint(win, 0);
+        return;
+    }
+
+    // Drive the animation from a timer (ticked in the canvas WndProc).
+    SetTimer(win->hwndCanvas, kOverscrollTimerID, USER_TIMER_MINIMUM, nullptr);
     ScheduleRepaint(win, 0);
+}
 
-    // In a full implementation, animMgr.Tick() would drive offsetY toward 0
-    // via the springAnim prop.
+bool OverscrollState::TickSpring(MainWindow* win) {
+    if (!springAnim || !springAnim->active) {
+        return false;
+    }
+
+    springAnim->elapsedMs += 16; // assume ~60 fps timer tick
+    float t = (float)springAnim->elapsedMs / (float)springAnim->durationMs;
+    if (t >= 1.0f) {
+        t = 1.0f;
+        springOffset = springAnim->to;
+        springAnim->active = false;
+    } else {
+        // EaseOutQuad (matches wingui/Animation.cpp)
+        float eased = t * (2.0f - t);
+        springOffset = springAnim->from + (springAnim->to - springAnim->from) * eased;
+    }
+    offsetY = (int)springOffset;
+
+    if (win) {
+        ScheduleRepaint(win, 0);
+    }
+    return springAnim->active;
 }

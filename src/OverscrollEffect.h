@@ -8,6 +8,12 @@
 struct AnimProp;
 struct MainWindow;
 
+// Clamp the accumulated overscroll offset so the stretch can't grow unbounded
+// (pure math, unit-testable).
+static inline int OverscrollClampOffset(int offsetY, int dy, int maxStretch) {
+    return std::clamp(offsetY + dy, -maxStretch, maxStretch);
+}
+
 struct OverscrollState {
     // Accumulated overscroll offset (negative = past top, positive = past bottom)
     int offsetY = 0;
@@ -17,6 +23,12 @@ struct OverscrollState {
 
     // AnimProp for spring-back (dynamically owned so header stays lightweight)
     AnimProp* springAnim = nullptr;
+    // Inline value animated by TickSpring() — must outlive the animation, so it
+    // lives here instead of on the Release() stack
+    float springOffset = 0;
+
+    // Timer driving the spring-back animation (kOverscrollTimerID)
+    static constexpr UINT_PTR kOverscrollTimerID = 13;
 
     bool HasOverscroll() const { return offsetY != 0; }
 
@@ -26,6 +38,10 @@ struct OverscrollState {
 
     // Animate the overscroll back to zero.
     void Release(MainWindow* win);
+
+    // Advance the spring-back animation by one frame (called from WM_TIMER).
+    // Returns true while the animation is still active.
+    bool TickSpring(MainWindow* win);
 
     // Get the current visual offset to apply when rendering.
     int GetVisualOffset() const { return offsetY; }

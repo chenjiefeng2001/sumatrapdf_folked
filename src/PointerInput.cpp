@@ -6,6 +6,15 @@
 #include "base/WinDynCalls.h"
 #include "PointerInput.h"
 
+// Pointer input type values (from winuser.h). The SDK shipped with this tree
+// predates POINTER_INPUT_TYPE, so define the ones we need ourselves.
+#define SUMATRA_PT_TOUCH 2
+#define SUMATRA_PT_PEN 3
+#define SUMATRA_PT_MOUSE 4
+#define SUMATRA_PT_TOUCHPAD 5
+
+typedef BOOL(WINAPI* Sig_GetPointerFrameInfo)(UINT32 pointerId, UINT32* pointerCount, PointerInfoMin* pointerInfo);
+
 static bool gPointerInputEnabled = false;
 static bool gPointerInputChecked = false;
 
@@ -32,7 +41,7 @@ void EnablePointerInput() {
     if (!user32) {
         return;
     }
-    typedef BOOL(WINAPI* EnableMouseInPointerFn)(BOOL);
+    typedef BOOL(WINAPI * EnableMouseInPointerFn)(BOOL);
     auto fnEnableMouseInPointer = (EnableMouseInPointerFn)GetProcAddress(user32, "EnableMouseInPointer");
     if (!fnEnableMouseInPointer) {
         return;
@@ -44,6 +53,47 @@ void EnablePointerInput() {
 
 bool IsPointerInputEnabled() {
     return gPointerInputEnabled;
+}
+
+static Sig_GetPointerFrameInfo gFnGetPointerFrameInfo = nullptr;
+static bool gPointerFrameInfoChecked = false;
+
+static void EnsurePointerFrameInfoLoaded() {
+    if (gPointerFrameInfoChecked) {
+        return;
+    }
+    gPointerFrameInfoChecked = true;
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    if (user32) {
+        gFnGetPointerFrameInfo = (Sig_GetPointerFrameInfo)GetProcAddress(user32, "GetPointerFrameInfo");
+    }
+}
+
+bool GetPointerWheelDelta(UINT32 pointerId, INT32* deltaOut) {
+    if (!deltaOut) {
+        return false;
+    }
+    EnsurePointerFrameInfoLoaded();
+    if (!gFnGetPointerFrameInfo) {
+        return false;
+    }
+
+    PointerWheelInfoMin wheelInfo = {};
+    UINT32 pointerCount = 1;
+    if (!gFnGetPointerFrameInfo(pointerId, &pointerCount, &wheelInfo.pointerInfo)) {
+        return false;
+    }
+    // WM_POINTERWHEEL comes from the mouse itself (PT_MOUSE) or a precision
+    // touchpad (PT_TOUCHPAD, Win10 1703+)
+    if (pointerCount < 1) {
+        return false;
+    }
+    if (wheelInfo.pointerInfo.pointerType != SUMATRA_PT_MOUSE &&
+        wheelInfo.pointerInfo.pointerType != SUMATRA_PT_TOUCHPAD) {
+        return false;
+    }
+    *deltaOut = (INT32)wheelInfo.utDistance;
+    return true;
 }
 
 void PointerVelocityTracker::Init() {
@@ -79,9 +129,8 @@ void PointerVelocityTracker::AddSample(double x, double y, LARGE_INTEGER now) {
     double dy = y - lastPosY;
 
     // Exponential moving average for velocity smoothing
-    double alpha = std::min(1.0, 16.0 / dt); // higher weight for longer frames
-    velocityX = velocityX * (1.0 - alpha) + (dx / dt) * alpha;
-    velocityY = velocityY * (1.0 - alpha) + (dy / dt) * alpha;
+    velocityX = PointerBlendVelocity(velocityX, dx, dt);
+    velocityY = PointerBlendVelocity(velocityY, dy, dt);
 
     lastPosX = x;
     lastPosY = y;

@@ -47,4 +47,72 @@ docs/md/.obsidian
 tests/tmp/
 /.tmp
 /terminals
-tests/tmp/ 
+
+# ---------------------------------------------------------------------------
+# Compilation & build artifacts
+# ---------------------------------------------------------------------------
+
+# MSVC / cl.exe intermediate files (also covers GCC/Clang *.o)
+*.obj
+*.o
+*.pdb
+*.ilk
+*.idb
+*.iobj
+*.ipdb
+*.pch
+*.ipch
+*.tlog
+*.res
+*.exp
+*.lastbuildstate
+*.map
+
+# Linker / build output. bin/ tools (MakeLZSA.exe, premake5.exe, ...) and
+# packages/ WebView2 .lib files are already tracked, so unaffected.
+*.exe
+*.dll
+*.lib
+*.so
+*.a
+*.dylib
+
+# Build logs and root-level scratch written by local build / analysis runs
+# (e.g. bld.log, build_log.txt, *_diff.txt, tmp_*.txt)
+*.log
+/build_*.txt
+/*_diff*.txt
+/diffs.txt
+/ps_test.txt
+/rcache_diff.txt
+/tmp_*.txt 
+
+# ---------------------------------------------------------------------------
+# Local ad-hoc helper scripts (build/check/install helpers, not part of the
+# real build system under cmd/; keep the official tools tracked)
+# ---------------------------------------------------------------------------
+/do_build.cmd
+/do_build.ps1
+/do_build.py
+/build_fix.py
+/build_release.py
+/check_build.py
+vs2022/add_test_file.py
+vs2022/check_installer*.py
+vs2022/check_resources.py
+cmd/package-installer.ts
+tests/_gen.py
+
+# ---------------------------------------------------------------------------
+# Visual Studio local artifacts. The project management files themselves
+# (*.sln, *.vcxproj, *.vcxproj.filters) are tracked and must stay tracked;
+# only VS-local data is ignored here. (.vs/ above already covers the
+# vs2022/.vs/ IntelliSense database directory.)
+# ---------------------------------------------------------------------------
+*.VC.db
+*.VC.db-shm
+*.VC.db-wal
+*.VC.VC.opendb
+*.opendb
+*.browser
+

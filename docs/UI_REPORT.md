@@ -326,7 +326,7 @@ ExecuteCurrentSelection()
 
 | 前缀 | 模式 | 进入方式 |
 |---|---|---|
-| `>` | 命令 (默认) | `Ctrl + K` |
+| `>` | 命令 (默认) | `Ctrl + K` (打开时查询框为空, 即默认命令模式; 键入 `>` 可显式锁定) |
 | `#` | 文件历史 | 键入 `#`; 选中项按 `Delete` 可从历史移除 |
 | `@` | 标签页 | 键入 `@`; `Ctrl+Tab` / `Ctrl+Shift+Tab` 进入 smartTab (MRU) 模式 |
 | `:` | Everything (3.4/3.5 组合视图) | 高级设置将 `Ctrl + K` 绑定到 `CmdCommandPalette :` |
@@ -391,7 +391,8 @@ DrawListBoxItem
 ### 7.7 验证结果 (2026-08-02)
 
 - **面板打开/关闭**: 连续 3 次开→关循环无崩溃、无挂起 (每次仅 1 个面板窗口)
-- **命令加载**: 打开即显示 196 条命令, 底部显示 "196 results"
+- **Esc 两次语义实测**: 查询非空时第一次 Esc 清空查询 (Edit 文本 ">Op"→""), 第二次 Esc 关闭面板; 查询为空时单次 Esc 即关闭 — 由 `tests/ad-hoc-command-palette-enhancements.ts` 验证 (以 `IsWindow(palette)` 精确判定关闭, 见下方附注)
+- **命令加载**: 打开 (Ctrl+K) 时查询框为空, 默认命令模式, 底部显示 "196 results" (196 条命令)
 - **查询过滤**: 注入 "op" 查询后 Edit 文本长度 0→2, 列表 196→1 (QueryChanged → FilterStringsForQuery 生效)
 - **导航执行**: `bun tests/ad-hoc-toc-palette-sync.ts` 通过 (~4s, TOC 模式跳转 + 书签面板选中同步, 对应 issue #5716)
 - **增强回归**: `bun tests/ad-hoc-command-palette-enhancements.ts` 通过 (结果计数 "N results" / "×" 清除按钮 / 分类图标在输入与选择后无崩溃; 回退这些实现该测试会抛错)
@@ -399,9 +400,12 @@ DrawListBoxItem
 - **源码核对**: 2026-08-02 依据 CommandPalette.cpp / Filter / Draw / Collect 逐项核对 — 6 种前缀、前缀切换条、结果计数、清除按钮、分类图标、Esc 两次语义、toggle 动态名称、smartTab sticky 均与本节描述一致
 - **修复前对照**: 未修复构建在 PageHeap 下打开面板稳定崩溃于 FilterStrings
 
-> 附: 跨进程 GUI 自动化的注意点 — `sendText()` (跨进程 WM_SETTEXT 传本地指针)
-> 与 `getWindowText()` 对 Edit 控件均不可靠; 验证 Edit 输入应改用 WM_CHAR 注入 +
-> EM_GETTEXTLENGTH / LB_GETCOUNT 等控件消息确认效果。
+> 附: 跨进程 GUI 自动化的注意点 —
+> `sendText()` (跨进程 WM_SETTEXT 传本地指针) 与 `getWindowText()` 对 Edit 控件均不可靠;
+> 验证 Edit 输入改用 `sendChars()` (tests/winapi.ts, 逐字符 post WM_CHAR, 触发 EN_CHANGE/QueryChanged);
+> 面板关闭状态应以 `IsWindow(paletteHwnd)` 精确判定 — 进程内其它顶层窗口 (如 frame 的查找条)
+> 也可能带 Edit 子窗口, 用 `findChildWindow(h, "Edit")` 判断会误报面板仍打开。
+> 面板打开时 (CmdCommandPalette) 查询框初始为空 (即默认命令模式), 并非 `">"`。
 
 
 ## 8. 标签页 (TabsCtrl) 分析

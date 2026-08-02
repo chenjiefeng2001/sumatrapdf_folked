@@ -24,8 +24,9 @@ import {
   getClassName,
   findChildWindow,
   getWindowText,
-  sendText,
+  sendChars,
   isWindowVisible,
+  isWindow,
 } from "./winapi.ts";
 
 const CmdCommandPalette = 370;
@@ -115,8 +116,10 @@ export async function testit(): Promise<void> {
     if (!edit) {
       throw new Error("palette edit box not found");
     }
-    // the palette is opened in ">" (commands) mode, so the query is non-empty
-    if (getWindowText(edit) !== ">") {
+    // CmdCommandPalette (Ctrl+K) opens the palette with an empty query, which
+    // means default commands mode (all commands shown); an explicit ">" prefix
+    // is only needed after typing.
+    if (getWindowText(edit) !== "") {
       throw new Error(`unexpected initial query: "${getWindowText(edit)}"`);
     }
 
@@ -135,19 +138,20 @@ export async function testit(): Promise<void> {
     if (!clearBtn) {
       throw new Error("clear button not found");
     }
-    if (!isWindowVisible(clearBtn)) {
-      throw new Error("clear button should be visible while the query is non-empty");
+    if (isWindowVisible(clearBtn)) {
+      throw new Error("clear button should be hidden while the query is empty");
     }
 
-    // type a query (keep the ">" prefix) -> result set shrinks, count updates
-    sendText(edit, ">Op");
+    // type a query (keep the ">" prefix) -> result set shrinks, count updates,
+    // clear button appears (WM_CHAR posts, so wait for the app to process them)
+    sendChars(edit, ">Op");
     await sleep(500);
     const narrowedCount = parseResults(getWindowText(info));
     if (narrowedCount <= 0 || narrowedCount >= initialCount) {
       throw new Error(`expected narrower result set, got ${narrowedCount} (was ${initialCount})`);
     }
     if (!isWindowVisible(clearBtn)) {
-      throw new Error("clear button should stay visible while typing");
+      throw new Error("clear button should be visible while typing");
     }
 
     // click the clear button -> query empties, full list returns, button hides
@@ -165,16 +169,24 @@ export async function testit(): Promise<void> {
     }
 
     // typing again re-shows the clear button
-    sendText(edit, ">Op");
+    sendChars(edit, ">Op");
     await sleep(500);
     if (!isWindowVisible(clearBtn)) {
       throw new Error("clear button should reappear when typing resumes");
     }
 
-    // --- close with Esc ---
+    // --- close with Esc (twice: the query is non-empty, so the first Esc
+    // clears it, the second closes the palette) ---
     await pressEscape(edit);
-    await sleep(500);
-    if (topWindows(proc.pid).some((h) => findChildWindow(h, "Edit") && h !== frame)) {
+    await sleep(400);
+    if (getWindowText(edit) !== "") {
+      throw new Error(`first Esc should clear the query, got "${getWindowText(edit)}"`);
+    }
+    await pressEscape(edit);
+    await sleep(1200);
+    // the frame and other top-level windows of the process can also have Edit
+    // children (e.g. the find bar), so check the palette hwnd directly
+    if (isWindow(palette)) {
       throw new Error("Command Palette didn't close on Esc");
     }
   } finally {

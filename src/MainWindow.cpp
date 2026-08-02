@@ -101,6 +101,21 @@ MainWindow::MainWindow(HWND hwnd) {
     pointerVelocity->Init();
 }
 
+bool MainWindow::IsWindowReady() const {
+    return lifecycleState == WindowLifecycleState::Ready;
+}
+
+// Change the lifecycle state. Invalid transitions are logged (they indicate a
+// logic bug in the startup/shutdown sequence) but still applied, so the window
+// can keep working; the WndProc guard never blocks a state change.
+void MainWindow::SetLifecycleState(WindowLifecycleState s) {
+    if (!IsValidLifecycleTransition(lifecycleState, s)) {
+        logf("SetLifecycleState: invalid transition %d -> %d (hwndFrame: 0x%p)\n", (int)lifecycleState, (int)s,
+             hwndFrame);
+    }
+    lifecycleState = s;
+}
+
 static WORD dotPatternBmp[8] = {0x00aa, 0x0055, 0x00aa, 0x0055, 0x00aa, 0x0055, 0x00aa, 0x0055};
 
 void CreateMovePatternLazy(MainWindow* win) {

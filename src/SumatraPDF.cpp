@@ -1748,6 +1748,14 @@ static void ReplaceDocumentInCurrentTab(LoadArgs* args, DocController* ctrl, Fil
                     wr.x, wr.y, wr.dx, wr.dy, cr.x, cr.y, cr.dx, cr.dy, win->captionRect.x, win->captionRect.y,
                     win->captionRect.dx, win->captionRect.dy);
             }
+            // Startup path that bypasses ShowMainWindow (see LoadOnStartup): the
+            // window was created hidden and is only now shown with a complete
+            // layout, so release the WndProc lifecycle guard the same way
+            // ShowMainWindow does (issue #1 in the UI modernization report: with
+            // the guard stuck active, WM_COMMAND/WM_HOTKEY were silently dropped).
+            if (!win->IsWindowReady()) {
+                win->SetLifecycleState(WindowLifecycleState::Ready);
+            }
         }
 
 #if 0
@@ -2185,6 +2193,9 @@ void ShowMainWindow(MainWindow* win, int windowState) {
     // Hidden startup windows can miss the final titlebar/menu-bar geometry
     // until they become visible. Force one relayout before the first paint.
     RelayoutFrame(win);
+    // From here on the window is visible with a complete layout: release the
+    // WndProc lifecycle guard so paint/layout/user-input messages are handled.
+    win->SetLifecycleState(WindowLifecycleState::Ready);
     UpdateWindow(win->hwndFrame);
     UpdateToolbarFindText(win);
     HwndEnsureVisible(win->hwndFrame);
@@ -2224,6 +2235,11 @@ MainWindow* CreateAndShowMainWindow(SessionData* data, bool showWin) {
     MainWindow* win = CreateMainWindow();
     if (!win) {
         return nullptr;
+    }
+    if (data) {
+        // session restore: keep the WndProc lifecycle guard active until the
+        // window is shown with its restored layout (see WindowLifecycle.h)
+        win->SetLifecycleState(WindowLifecycleState::Restoring);
     }
     // CreateMainWindow can inadvertently change windowState (e.g. via layout); restore it
     gGlobalPrefs->windowState = windowState;
@@ -10404,6 +10420,15 @@ LRESULT CALLBACK WndProcSumatraFrame(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
         return res;
     }
 
+    // Lifecycle guard (see WindowLifecycle.h): while a window is being set up
+    // (startup / session restore) or torn down, defer paint/layout/user-input
+    // messages that could dereference half-initialized MainWindow members. The
+    // initial layout is done explicitly (RelayoutFrame), so dropping these is
+    // safe; DefWindowProc validates the paint region and handles the rest.
+    if (win && !win->IsWindowReady() && IsLifecycleGuardedMessage(msg)) {
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+
     switch (msg) {
         case WM_CREATE:
             // do nothing
@@ -10623,6 +10648,9 @@ LRESULT CALLBACK WndProcSumatraFrame(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
         case WM_CLOSE: {
             if (!win) {
                 logf("WM_CLOSE to 0x%p, but didn't find MainWindow for it\n", hwnd);
+            }
+            if (win) {
+                win->SetLifecycleState(WindowLifecycleState::Destroying);
             }
             if (CanCloseWindow(win)) {
                 CloseWindow(win, true, false);

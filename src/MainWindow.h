@@ -31,6 +31,8 @@ struct ChmModel;
 struct TabState;
 struct FileState;
 
+#include "WindowLifecycle.h"
+
 // one search match with a text snippet around it, for the floating results list
 struct FindMatch {
     int startPage = 0;
@@ -129,6 +131,12 @@ struct MainWindow {
     bool IsCurrentTabAbout() const;
     bool IsDocLoaded() const;
     bool HasDocsLoaded() const;
+
+    // lifecycle state machine (see WindowLifecycle.h): the frame WndProc
+    // defers paint/layout/user-input messages until the window is Ready
+    WindowLifecycleState lifecycleState = WindowLifecycleState::Uninitialized;
+    bool IsWindowReady() const;
+    void SetLifecycleState(WindowLifecycleState s);
 
     DisplayModel* AsFixed() const;
     ChmModel* AsChm() const;
@@ -430,8 +438,8 @@ struct MainWindow {
     struct PointerVelocityTracker* pointerVelocity = nullptr;
 
     // Phase 4: Visual - custom non-client area with rounded corners
-    bool borderless = false;             // true when using custom titlebar
-    int captionButtonsHeight = 0;        // height of caption buttons area
+    bool borderless = false;      // true when using custom titlebar
+    int captionButtonsHeight = 0; // height of caption buttons area
     ButtonInfo captionBtns[CB_BTN_COUNT];
 
     // Thumbnail sidebar panel (Phase 4)

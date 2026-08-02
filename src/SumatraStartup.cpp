@@ -306,6 +306,13 @@ static MainWindow* LoadOnStartup(Str filePath, const Flags& flags, bool isFirstW
         MaybeGoTo(win, flags.namedDest, flags.pageNumber);
     }
 
+    if (flags.hwndPluginParent && win) {
+        // plugin embedding shows the window directly (MaybeMakePluginWindow),
+        // bypassing ShowMainWindow: the document is loaded and laid out by
+        // LoadDocument, so release the lifecycle guard before it is painted
+        win->SetLifecycleState(WindowLifecycleState::Ready);
+    }
+
     bool ok = MaybeMakePluginWindow(win, flags.hwndPluginParent);
     if (!ok) {
         return nullptr;

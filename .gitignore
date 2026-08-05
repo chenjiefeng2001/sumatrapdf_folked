@@ -102,6 +102,7 @@ vs2022/check_installer*.py
 vs2022/check_resources.py
 cmd/package-installer.ts
 tests/_gen.py
+scripts/
 
 # ---------------------------------------------------------------------------
 # Visual Studio local artifacts. The project management files themselves

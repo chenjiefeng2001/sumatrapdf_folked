@@ -669,8 +669,18 @@ static float GetZoomComboBoxValue(HWND hDlg, UINT idComboBox, float defaultZoom)
     float newZoom = defaultZoom;
     int idx = ComboBox_GetCurSel(GetDlgItem(hDlg, idComboBox));
     if (idx == -1) {
-        TempStr customZoom = HwndGetTextTemp(GetDlgItem(hDlg, idComboBox));
-        float zoom = (float)atof(customZoom.s);
+        TempStr customZoom = HwndGetTextTemp(GetDlgItem(hDlg, (int)idComboBox));
+        // an emptied zoom box has no text at all, and atof(nullptr) trips the
+        // CRT's invalid-parameter handler, which kills the process (#5909).
+        // Text that isn't a number at all parses as 0, which is no more of a
+        // zoom level than nothing is: keep the current zoom in both cases
+        if (len(customZoom) == 0) {
+            return defaultZoom;
+        }
+        float zoom = (float)atof(CStrTemp(customZoom));
+        if (zoom == 0) {
+            return defaultZoom;
+        }
         newZoom = limitValue(zoom, kZoomMin, kZoomMax);
         return newZoom;
     }

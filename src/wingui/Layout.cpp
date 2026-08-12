@@ -53,6 +53,45 @@ bool IsCollapsed(ILayout* l) {
     return l->GetVisibility() == Visibility::Collapse;
 }
 
+// A layout tree is a tree, not a graph: adding a child that (directly or
+// through wrappers) is the parent again makes every measuring pass recurse
+// until the stack is gone - e.g. box->AddChild(new Padding(box, ...)) instead
+// of wrapping the child that needs the padding.
+// gRefusedBoxElement is returned when a child is refused, so callers can
+// still tweak "the element" without crashing.
+static boxElementInfo gRefusedBoxElement;
+
+static bool LayoutTreeContains(ILayout* l, ILayout* needle) {
+    if (!l || !needle) {
+        return false;
+    }
+    if (l == needle) {
+        return true;
+    }
+    // adapted to this fork's layout model: VBox/HBox keep Vec<boxElementInfo>,
+    // Padding wraps a single child (upstream's ILayout has child iterators)
+    Kind k = l->GetKind();
+    if (k == paddingKind) {
+        auto* p = (Padding*)l;
+        return LayoutTreeContains(p->child, needle);
+    }
+    Vec<boxElementInfo>* children = nullptr;
+    if (k == kindVBox) {
+        children = &((VBox*)l)->children;
+    } else if (k == kindHBox) {
+        children = &((HBox*)l)->children;
+    }
+    if (!children) {
+        return false;
+    }
+    for (auto& el : *children) {
+        if (LayoutTreeContains(el.layout, needle)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void PositionRB(const Rect& container, Rect& r) {
     r.x = container.dx - r.dx;
     r.y = container.dy - r.dy;
@@ -675,6 +714,10 @@ void VBox::SetBoundsForChild(int i, ILayout* v, int posX, int posY, int posX2, i
 }
 
 boxElementInfo& VBox::AddChild(ILayout* child, int flex) {
+    if (LayoutTreeContains(child, this)) {
+        ReportIf(true);
+        return gRefusedBoxElement;
+    }
     boxElementInfo v{};
     v.layout = child;
     v.flex = flex;
@@ -1003,6 +1046,10 @@ void HBox::SetBoundsForChild(int i, ILayout* v, int posX, int posY, int posX2, i
 }
 
 boxElementInfo& HBox::AddChild(ILayout* child, int flex) {
+    if (LayoutTreeContains(child, this)) {
+        ReportIf(true);
+        return gRefusedBoxElement;
+    }
     boxElementInfo v{};
     v.layout = child;
     v.flex = flex;

@@ -1018,10 +1018,16 @@ static void EnsureHomeSearchCreated(MainWindow* win) {
 }
 
 void HomePageDestroySearch(MainWindow* win) {
-    if (win->hwndHomeSearch) {
-        DestroyWindow(win->hwndHomeSearch);
-        win->hwndHomeSearch = nullptr;
+void HomePageDestroySearch(MainWindow* win) {
+    if (!win->hwndHomeSearch) {
+        return;
     }
+    // DestroyWindow pumps messages and the canvas answers most of them by
+    // calling us again (see WndProcCanvas), so drop our pointer before
+    // destroying - otherwise the re-entered call destroys the window twice
+    HWND hwnd = win->hwndHomeSearch;
+    win->hwndHomeSearch = nullptr;
+    DestroyWindow(hwnd);
 }
 
 void HomePageFocusSearch(MainWindow* win) {

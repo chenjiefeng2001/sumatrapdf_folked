@@ -55,6 +55,12 @@ struct DWriteTextRenderer {
     // Create a text layout from the cached format.
     static IDWriteTextLayout* CreateLayout(DWriteTextFormat* fmt, Str text, float maxWidth, float maxHeight);
 
+    // Create a single-line layout that truncates overflowing text with a
+    // trailing "…" — the DirectWrite equivalent of GDI's
+    // DT_SINGLELINE | DT_END_ELLIPSIS. Falls back to CreateLayout() when the
+    // text fits. Returns nullptr on failure; caller Releases the layout.
+    static IDWriteTextLayout* CreateEllipsisedLayout(DWriteTextFormat* fmt, Str text, float maxWidth, float maxHeight);
+
     // Draw the layout onto a D2D render target at (x, y).
     static void DrawLayout(ID2D1RenderTarget* rt, IDWriteTextLayout* layout, float x, float y, COLORREF color);
 

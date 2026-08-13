@@ -142,7 +142,7 @@ struct Wnd : ILayout {
     void SetPos(RECT* r);
     void SetIsVisible(bool isVisible);
     bool IsVisible() const;
-    void SetText(Str);
+    virtual void SetText(Str);
     TempStr GetTextTemp();
 
     HFONT GetFont();
@@ -198,15 +198,32 @@ struct Static : Wnd {
         HFONT font = nullptr;
         Str text;
         bool isRtl = false;
+        // word-wrap the text to the width the layout engine gives us instead of
+        // clipping it (the control also word-wraps since SS_LEFTNOWORDWRAP is off)
+        bool wrap = false;
+        // single line, truncate with an ellipsis when the control is too narrow
+        bool ellipsis = false;
     };
 
     Static();
 
     Func0 onClick;
+    // called after the text changes (via SetText), e.g. to re-run the layout
+    // that contains this Static
+    Func0 onTextChanged;
 
     HWND Create(const CreateArgs&);
 
     Size GetIdealSize() override;
+    int MinIntrinsicHeight(int width) override;
+    int MinIntrinsicWidth(int height) override;
+    Size Layout(Constraints bc) override;
+    void SetText(Str) override;
+
+    // if true, text wraps to the width given by the layout engine
+    bool wrap = false;
+    // if true, text is single-line and truncated with an ellipsis when too wide
+    bool ellipsis = false;
 
     LRESULT OnMessageReflect(UINT msg, WPARAM wparam, LPARAM lparam) override;
     bool OnCommand(WPARAM wparam, LPARAM lparam) override;
@@ -332,6 +349,12 @@ struct ListBox : Wnd {
         int idealSizeLines = 0;
         HFONT font = nullptr;
         bool isRtl = false;
+        // LBS_NODATA "virtual" list: no per-item strings are stored in the
+        // control; the item count comes from the model via LB_SETCOUNT and the
+        // draw callback reads text from the model by index. For lists rebuilt on
+        // every keystroke (command palette) this avoids ResetContent + one
+        // LB_ADDSTRING + UTF-8->WStr conversion per item on each rebuild.
+        bool ownerData = false;
     };
 
     struct DrawItemEvent {
@@ -894,3 +917,7 @@ struct DrawCloseButtonArgs {
 
 void DrawCloseButton(const DrawCloseButtonArgs& args);
 void DrawCloseButton2(const DrawCloseButtonArgs&);
+// GDI+ 独立于后端；当控件绘制走统一 Renderer（gRenderer）时，用这个版本
+// 保持关闭按钮与后端一致（GDI RoundRect/DrawLine 或 D2D 圆角矩形/线）。
+// 仅在 gRenderer 可用时有效；否则退化为 DrawCloseButton2 的纯 GDI 行为。
+void DrawCloseButtonViaRenderer(const DrawCloseButtonArgs& args);

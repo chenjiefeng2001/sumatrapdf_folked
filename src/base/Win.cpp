@@ -3360,6 +3360,22 @@ Size HdcMeasureText(HDC hdc, Str s, HFONT font) {
     return HdcMeasureText(hdc, s, fmt, font);
 }
 
+// word-wrap the text to fit within maxDx and return the wrapped size; falls back
+// to a single-line measure for an unusable maxDx (<= 0). DT_WORD_ELLIPSIS makes
+// words that are themselves longer than maxDx (e.g. file paths) truncate instead
+// of overflowing the line, mirroring what NotificationWnd::Layout does.
+Size HdcMeasureWrappedText(HDC hdc, Str s, int maxDx, HFONT font) {
+    if (maxDx <= 0) {
+        return HdcMeasureText(hdc, s, font);
+    }
+    uint fmt = DT_WORDBREAK | DT_WORD_ELLIPSIS | DT_NOPREFIX | DT_LEFT;
+    Size size = HdcMeasureText(hdc, s, maxDx, fmt, font);
+    if (size.dx > maxDx) {
+        size.dx = maxDx;
+    }
+    return size;
+}
+
 void DrawCenteredText(HDC hdc, const Rect r, Str txt, bool isRTL) {
     WCHAR* ws = CWStrTemp(txt);
     int prevMode = SetBkMode(hdc, TRANSPARENT);

@@ -133,6 +133,10 @@ int HdcDrawText(HDC hdc, Str s, const Point& pos, uint fmt, HFONT font = nullptr
 Size HdcMeasureText(HDC hdc, Str s, int maxDx, uint format, HFONT font);
 Size HdcMeasureText(HDC hdc, Str s, uint format, HFONT font);
 Size HdcMeasureText(HDC hdc, Str s, HFONT font = nullptr);
+// like HdcMeasureText but measures the text word-wrapped to fit within maxDx;
+// returns the wrapped width/height (the feedback loop behind elastic text
+// layout: a narrower constraint produces more lines and a taller result)
+Size HdcMeasureWrappedText(HDC hdc, Str s, int maxDx, HFONT font);
 
 HWND HwndSetFocus(HWND hwnd);
 bool HwndIsFocused(HWND);

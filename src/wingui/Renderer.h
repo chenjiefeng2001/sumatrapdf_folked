@@ -54,6 +54,13 @@ struct Renderer {
     virtual void FillRectF(const RectF& rc, RgbaColor color) = 0;
     virtual void DrawRect(RECT rc, RgbaColor color, float strokeWidth = 1.0f) = 0;
     virtual void DrawLine(int x1, int y1, int x2, int y2, RgbaColor color, float strokeWidth = 1.0f) = 0;
+    // Rounded rect (radius in pixels; <= 0 degrades to a plain rect). Needed by
+    // tabs / notifications / overlay scrollbar to keep their rounded look when
+    // painting through the unified backend.
+    virtual void FillRoundRect(RECT rc, RgbaColor color, float radius) = 0;
+    virtual void DrawRoundRect(RECT rc, RgbaColor color, float radius, float strokeWidth = 1.0f) = 0;
+    // Filled triangle (scrollbar arrows, small chevrons).
+    virtual void FillTriangle(int x1, int y1, int x2, int y2, int x3, int y3, RgbaColor color) = 0;
 
     // Text
     virtual void DrawText(Str text, RECT rc, RgbaColor color, HFONT font, UINT format = 0) = 0;
@@ -98,6 +105,10 @@ struct GDIRenderer : Renderer {
     void FillRectF(const RectF& rc, RgbaColor color) override;
     void DrawRect(RECT rc, RgbaColor color, float strokeWidth = 1.0f) override;
     void DrawLine(int x1, int y1, int x2, int y2, RgbaColor color, float strokeWidth = 1.0f) override;
+    void FillRoundRect(RECT rc, RgbaColor color, float radius) override;
+    void DrawRoundRect(RECT rc, RgbaColor color, float radius, float strokeWidth = 1.0f) override;
+    void FillTriangle(int x1, int y1, int x2, int y2, int x3, int y3, RgbaColor color) override;
+
     void DrawText(Str text, RECT rc, RgbaColor color, HFONT font, UINT format = 0) override;
     void DrawTextW(WStr text, RECT rc, RgbaColor color, HFONT font, UINT format = 0) override;
     void DrawBitmap(HBITMAP hbmp, RECT dst, RECT src) override;
@@ -130,6 +141,10 @@ struct D2DRenderer : Renderer {
     void FillRect(RECT rc, RgbaColor color) override;
     void FillRectF(const RectF& rc, RgbaColor color) override;
     void DrawRect(RECT rc, RgbaColor color, float strokeWidth = 1.0f) override;
+    void FillRoundRect(RECT rc, RgbaColor color, float radius) override;
+    void DrawRoundRect(RECT rc, RgbaColor color, float radius, float strokeWidth = 1.0f) override;
+    void FillTriangle(int x1, int y1, int x2, int y2, int x3, int y3, RgbaColor color) override;
+
     void DrawLine(int x1, int y1, int x2, int y2, RgbaColor color, float strokeWidth = 1.0f) override;
     void DrawText(Str text, RECT rc, RgbaColor color, HFONT font, UINT format = 0) override;
     void DrawTextW(WStr text, RECT rc, RgbaColor color, HFONT font, UINT format = 0) override;

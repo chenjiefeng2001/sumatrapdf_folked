@@ -342,6 +342,44 @@ static void DWriteMeasureTest() {
     DWriteTextCache::Clear();
 }
 
+static void DWriteEllipsisTest() {
+    HFONT font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    DWriteTextFormat* fmt = DWriteTextCache::GetFormat(font);
+    if (!fmt || !fmt->format) {
+        return;
+    }
+    // A wide layout room fits the text as-is: no truncation.
+    IDWriteTextLayout* layout = DWriteTextRenderer::CreateEllipsisedLayout(fmt, StrL("Hello World"), 200, 50);
+    utassert(layout != nullptr);
+    float w0 = 0, h0 = 0;
+    DWriteTextRenderer::MeasureLayout(layout, &w0, &h0);
+    utassert(w0 > 0 && h0 > 0);
+    layout->Release();
+
+    // A narrow width forces a single line (no wrap) ending in "…"; the height
+    // must stay single-line-ish and the width must fit the constraint.
+    layout =
+        DWriteTextRenderer::CreateEllipsisedLayout(fmt, StrL("A very long file name that cannot possibly fit"), 60, 30);
+    utassert(layout != nullptr);
+    float w1 = 0, h1 = 0;
+    DWriteTextRenderer::MeasureLayout(layout, &w1, &h1);
+    utassert(w1 > 0 && w1 <= 60);
+    utassert(h1 <= h0 + 0.5f); // single line, not wrapped into multiple lines
+    layout->Release();
+
+    // Non-ASCII (UTF-8) long text: truncation must not split a multi-byte char.
+    layout =
+        DWriteTextRenderer::CreateEllipsisedLayout(fmt, StrL("这是一个非常长的中文文件名，用来检查省略号"), 60, 30);
+    utassert(layout != nullptr);
+    float w2 = 0, h2 = 0;
+    DWriteTextRenderer::MeasureLayout(layout, &w2, &h2);
+    utassert(w2 > 0 && w2 <= 60);
+    utassert(h2 <= h0 + 0.5f);
+    layout->Release();
+
+    DWriteTextCache::Clear();
+}
+
 void RendererTest() {
     RgbaColorTest();
     DWriteCacheKeyTest();
@@ -349,6 +387,7 @@ void RendererTest() {
     D2dRendererSmokeTest();
     CreateRendererTest();
     DWriteMeasureTest();
+    DWriteEllipsisTest();
 }
 
 #else

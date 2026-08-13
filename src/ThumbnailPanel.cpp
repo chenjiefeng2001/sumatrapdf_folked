@@ -14,6 +14,7 @@
 #include "MainWindow.h"
 #include "Theme.h"
 #include "ThumbnailPanel.h"
+#include "wingui/Renderer.h"
 
 // Window class for the thumbnail panel
 static WStr GetThumbClass() {
@@ -39,7 +40,35 @@ static LRESULT CALLBACK WndProcThumbnail(HWND hwnd, UINT msg, WPARAM wp, LPARAM 
             RECT rc;
             GetClientRect(hwnd, &rc);
 
-            // Fill background
+            // Phase 2: unified backend path. Direct2D + DirectWrite when the
+            // backend is available, plain GDI otherwise. The GDI path below is
+            // kept as the fallback (e.g. D2D binding fails mid-paint).
+            if (gRenderer && gRenderer->BeginPaint(hwnd, &ps)) {
+                gRenderer->FillRect(ps.rcPaint, RgbaColor(ThemeControlBackgroundColor()));
+                if (!panel || panel->selectedPage < 0) {
+                    gRenderer->DrawTextW(WStrL(L"No thumbnails"), rc, RgbaColor(ThemeWindowTextColor()),
+                                         GetDefaultGuiFont(), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                } else {
+                    int y = -panel->scrollPos;
+                    for (int i = 0; i < 10 && y < rc.bottom; i++, y += panel->itemHeight) {
+                        RECT itemRc = {0, y, rc.right, y + panel->itemHeight - 4};
+                        if (i == panel->selectedPage) {
+                            RECT selRc = itemRc;
+                            InflateRect(&selRc, -2, -2);
+                            gRenderer->FillRect(selRc, RgbaColor(ThemeWindowLinkColor()));
+                        }
+                        WCHAR buf[32];
+                        int cch = swprintf_s(buf, L"Page %d", i + 1);
+                        gRenderer->DrawTextW(WStr(buf, cch), itemRc, RgbaColor(ThemeWindowTextColor()),
+                                             GetDefaultGuiFont(), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                    }
+                }
+                gRenderer->EndPaint();
+                EndPaint(hwnd, &ps);
+                return 0;
+            }
+
+            // Legacy GDI path (also the fallback when D2D is unavailable).
             HBRUSH bgBrush = CreateSolidBrush(ThemeControlBackgroundColor());
             FillRect(hdc, &ps.rcPaint, bgBrush);
             DeleteObject(bgBrush);
@@ -100,7 +129,6 @@ static LRESULT CALLBACK WndProcThumbnail(HWND hwnd, UINT msg, WPARAM wp, LPARAM 
             InvalidateRect(hwnd, nullptr, TRUE);
             return 0;
         }
-
     }
 
     return DefWindowProcW(hwnd, msg, wp, lp);
@@ -124,10 +152,8 @@ void ThumbnailPanel::Create(HWND parent) {
 
     int panelWidth = DpiScale(parent, width);
     int panelHeight = DpiScale(parent, 400);
-    hwnd = CreateWindowExW(WS_EX_NOACTIVATE, clsName.s, nullptr,
-                           WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
-                           0, 0, panelWidth, panelHeight,
-                           parent, nullptr, GetModuleHandleW(nullptr), this);
+    hwnd = CreateWindowExW(WS_EX_NOACTIVATE, clsName.s, nullptr, WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, 0, 0,
+                           panelWidth, panelHeight, parent, nullptr, GetModuleHandleW(nullptr), this);
     if (hwnd) {
         ShowWindow(hwnd, SW_HIDE);
     }
@@ -156,8 +182,7 @@ void ThumbnailPanel::ReloadThumbnails() {
 void ThumbnailPanel::UpdateLayout(int parentY, int parentHeight) {
     if (!hwnd) return;
     int panelWidth = DpiScale(hwndOwner, width);
-    SetWindowPos(hwnd, nullptr, 0, parentY, panelWidth, parentHeight,
-                 SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(hwnd, nullptr, 0, parentY, panelWidth, parentHeight, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 void ThumbnailPanel::Invalidate() {

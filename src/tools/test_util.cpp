@@ -32,6 +32,9 @@ extern void HardwareProfileTest();
 extern void StrHashTest();
 extern void InputScrollingTest();
 extern void RendererTest();
+extern void CommandPaletteScoringTest();
+extern void ElasticLayoutTest();
+extern void AnnotHitTestTest();
 
 void GetPrintersInfo(struct str::Builder&) {
     /* stub: do nothing */
@@ -124,6 +127,9 @@ int main(int argc, char** argv) {
     StrHashTest();
     InputScrollingTest();
     RendererTest();
+    CommandPaletteScoringTest();
+    ElasticLayoutTest();
+    AnnotHitTestTest();
 
     int res = utassert_print_results();
     DestroyTempArena();

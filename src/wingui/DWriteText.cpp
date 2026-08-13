@@ -7,6 +7,7 @@
 #ifdef _MSC_VER
 #include <d2d1.h>
 #include <dwrite.h>
+#include "base/ComSafe.h"
 #include "GpuBackend.h"
 #include "wingui/DWriteText.h"
 
@@ -95,6 +96,95 @@ void DWriteTextRenderer::MeasureLayout(IDWriteTextLayout* layout, /*out*/ float*
     }
 }
 
+// Width of the first `len` bytes of `text` (a UTF-8 char boundary) laid out
+// with no width constraint. Used by the binary search below.
+static float MeasurePrefixWidth(IDWriteTextFormat* format, Str text, int len) {
+    if (!gDWriteFactory || len <= 0) {
+        return 0;
+    }
+    TempWStr wtext = ToWStrTemp(Str(text.s, len));
+    if (!wtext.s) {
+        return 0;
+    }
+    IDWriteTextLayout* layout = nullptr;
+    HRESULT hr = gDWriteFactory->CreateTextLayout(wtext.s, (UINT32)wtext.len, format, 10000.0f, 10000.0f, &layout);
+    if (FAILED(hr) || !layout) {
+        return 0;
+    }
+    DWRITE_TEXT_METRICS tm{};
+    float width = 0;
+    if (SUCCEEDED(layout->GetMetrics(&tm))) {
+        width = tm.widthIncludingTrailingWhitespace;
+    }
+    SafeReleaseSeh(&layout);
+    return width;
+}
+
+// Longest UTF-8 prefix of `text` (in bytes, ending on a char boundary) whose
+// laid-out width is <= maxWidth. Returned length can be 0.
+static int CharCountFittingWidth(IDWriteTextFormat* format, Str text, float maxWidth) {
+    if (maxWidth <= 0 || text.len == 0) {
+        return 0;
+    }
+    int lo = 0;
+    int hi = text.len;
+    while (lo < hi) {
+        int mid = (lo + hi + 1) / 2;
+        // don't split a multi-byte UTF-8 char in the middle
+        while (mid > lo && mid < text.len && (text.s[mid] & 0xC0) == 0x80) {
+            mid--;
+        }
+        if (mid == lo) {
+            break;
+        }
+        float w = MeasurePrefixWidth(format, text, mid);
+        if (w <= maxWidth) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    return lo;
+}
+
+IDWriteTextLayout* DWriteTextRenderer::CreateEllipsisedLayout(DWriteTextFormat* fmt, Str text, float maxWidth,
+                                                              float maxHeight) {
+    IDWriteTextLayout* layout = CreateLayout(fmt, text, maxWidth, maxHeight);
+    if (!layout) {
+        return nullptr;
+    }
+    layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    float fullWidth = 0, fullHeight = 0;
+    MeasureLayout(layout, &fullWidth, &fullHeight);
+    if (fullWidth <= maxWidth || text.len == 0) {
+        return layout;
+    }
+    // The text overflows: rebuild it as the longest fitting prefix + "…" so a
+    // narrow tab / notification truncates like GDI's DT_END_ELLIPSIS instead of
+    // word-wrapping to multiple lines.
+    float ellipsisWidth = MeasurePrefixWidth(fmt->format, StrL("\xE2\x80\xA6"), 3);
+    if (ellipsisWidth <= 0) {
+        ellipsisWidth = maxWidth * 0.2f;
+    }
+    int keep = CharCountFittingWidth(fmt->format, text, maxWidth - ellipsisWidth);
+    if (keep <= 0) {
+        // don't drop the whole filename; keep at least one char so the tab
+        // shows something meaningful
+        keep = 1;
+    }
+    Str prefix = keep < text.len ? Str(text.s, keep) : text;
+    TempStr truncated = str::JoinTemp(prefix, StrL("\xE2\x80\xA6"));
+    SafeReleaseSeh(&layout);
+    if (!truncated) {
+        return nullptr;
+    }
+    layout = CreateLayout(fmt, truncated, maxWidth, maxHeight);
+    if (layout) {
+        layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    }
+    return layout;
+}
+
 // ── DWriteTextCache ──────────────────────────────────────────────────
 // Fixed-capacity cache of IDWriteTextFormat objects keyed by HFONT-derived
 // properties (family/size/weight/style). The UI uses only a handful of fonts
@@ -148,8 +238,9 @@ DWriteTextFormat* DWriteTextCache::GetFormat(HFONT font) {
     }
     if (gCacheCount >= (int)dimof(gCache)) {
         // Cache full: evict the oldest entry.
-        gCache[0].fmt.format->Release();
-        gCache[0].fmt.format = nullptr;
+        // SEH-wrapped: MacType hooks IDWriteTextFormat and its hooked
+        // Release() can corrupt the heap (see base/ComSafe.h).
+        SafeReleaseSeh(&gCache[0].fmt.format);
         for (int i = 1; i < gCacheCount; i++) {
             gCache[i - 1] = gCache[i];
         }
@@ -170,10 +261,9 @@ DWriteTextFormat* DWriteTextCache::GetFormat(HFONT font) {
 
 void DWriteTextCache::Clear() {
     for (int i = 0; i < gCacheCount; i++) {
-        if (gCache[i].fmt.format) {
-            gCache[i].fmt.format->Release();
-            gCache[i].fmt.format = nullptr;
-        }
+        // SEH-wrapped: MacType hooks IDWriteTextFormat and its hooked
+        // Release() can corrupt the heap (see base/ComSafe.h).
+        SafeReleaseSeh(&gCache[i].fmt.format);
         gCache[i] = {};
     }
     gCacheCount = 0;

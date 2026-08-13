@@ -17,6 +17,7 @@
 #include "EngineBase.h"
 #include "MainWindow.h"
 #include "Theme.h"
+#include "HardwareProfile.h"
 #include "WindowTab.h"
 #include "SumatraConfig.h"
 #include "Commands.h"
@@ -27,6 +28,7 @@
 #include "DarkModeSubclass.h"
 #include "Translations.h"
 #include "CommandPalette.h"
+#include "CommandPaletteScoring.h"
 #include "CommandPaletteInternal.h"
 
 #include "base/Log.h"
@@ -541,6 +543,10 @@ bool CommandPaletteWnd::Create(MainWindow* win, Str prefix, int smartTabAdvance)
         args.parent = hwnd;
         args.font = font;
         args.isRtl = IsUIRtl();
+        // virtual LBS_NODATA list: the result list can be thousands of items and
+        // is rebuilt on every keystroke (QueryChanged); per-item strings are
+        // unnecessary since DrawListBoxItem reads text from the model by index.
+        args.ownerData = true;
         auto c = new ListBox();
         c->onDoubleClick = MkMethod0<CommandPaletteWnd, &CommandPaletteWnd::OnListDoubleClick>(this);
         c->onDrawItem =
@@ -617,6 +623,11 @@ bool CommandPaletteWnd::Create(MainWindow* win, Str prefix, int smartTabAdvance)
     UpdateResultCount();
 
     SetIsVisible(true);
+    // Phase 3: fade the palette in (popup windows are not layered; AnimateWindow
+    // temporarily applies alpha). Skipped when animations are disabled.
+    if (AnimationsEnabled()) {
+        AnimateWindow(hwnd, 150, AW_BLEND);
+    }
     HwndSetFocus(editQuery->hwnd);
     return true;
 }

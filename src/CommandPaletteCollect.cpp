@@ -30,6 +30,7 @@
 #include "Notifications.h"
 #include "CommandAvailability.h"
 #include "CommandPalette.h"
+#include "CommandPaletteScoring.h"
 #include "CommandPaletteInternal.h"
 
 #include "base/Log.h"

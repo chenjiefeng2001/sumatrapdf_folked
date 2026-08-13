@@ -66,6 +66,11 @@ struct CommandPaletteWnd : Wnd {
 
     StrVec filterWords;
     Vec<u8> highlighted;
+    // Pre-lowercased copy of filterWords (temp arena), used by the filter
+    // scoring so it doesn't fold the query needle on every comparison
+    StrVec filterWordsLower;
+    // Rebuilt-once-per-command shortcut strings for the list drawing
+    PaletteAccelCache accelKeyCache;
 
     int currTabIdx = 0;
     int currTocIdx = 0;

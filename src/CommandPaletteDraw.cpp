@@ -14,7 +14,11 @@
 #include "Theme.h"
 #include "Accelerators.h"
 #include "FilterHighlightDraw.h"
+#include "CommandPaletteScoring.h"
 #include "CommandPaletteInternal.h"
+
+// forward declaration: defined at the end of this file
+static TempStr BuildPaletteAccelKey(int cmdId);
 
 void PositionCommandPalette(HWND hwnd, HWND hwndRelative) {
     Rect rRelative = WindowRect(hwndRelative);
@@ -184,8 +188,11 @@ void CommandPaletteWnd::DrawListBoxItem(ListBox::DrawItemEvent* ev) {
 
     TempStr rightStr = nullptr;
     if (data && data->cmdId != 0) {
-        TempStr withAccel = AppendAccelKeyToMenuStringTemp("", data->cmdId);
-        if (withAccel && withAccel.s[0] == '\t') rightStr = Str(withAccel.s + 1);
+        // Shortcut strings are built once per (command, language) and reused
+        // across redraws/scrolls instead of re-running AppendAccelKeyToMenuStringTemp
+        // (string building + linear accelerator-table lookup) per row per paint.
+        Str accel = accelKeyCache.Get(data->cmdId, trans::GetCurrentLangCode(), BuildPaletteAccelKey);
+        if (accel && accel.s[0]) rightStr = accel;
     } else if (data && data->pageNo > 0) {
         rightStr = fmt("p%d", data->pageNo);
     } else if (data && data->filePath) {
@@ -248,4 +255,17 @@ void CommandPaletteWnd::DrawListBoxItem(ListBox::DrawItemEvent* ev) {
     }
 
     if (oldFont) SelectFont(hdc, oldFont);
+}
+
+// Raw shortcut text for a command item, in the palette's "right-side label"
+// form (the part after the "\t" of a menu string, e.g. "Ctrl+K"), as a temp
+// string. The text is localized (German "Strg +" vs "Ctrl +"), so the language
+// code is part of the cache key; a language switch therefore rebuilds instead
+// of serving a stale string.
+static TempStr BuildPaletteAccelKey(int cmdId) {
+    TempStr s = AppendAccelKeyToMenuStringTemp("", cmdId);
+    if (s && s.s[0] == '\t') {
+        return Str(s.s + 1);
+    }
+    return StrL("");
 }

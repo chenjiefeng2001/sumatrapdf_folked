@@ -10,74 +10,12 @@
 #include "base/Win.h"
 #include "FilterHighlightDraw.h"
 #include "CommandPalette.h"
+#include "CommandPaletteScoring.h"
 #include "CommandPaletteInternal.h"
 
 // ---------------------------------------------------------------------------
 // Relevance scoring for search results
 // ---------------------------------------------------------------------------
-
-static bool IsWordBoundary(char c) {
-    return c == ' ' || c == '/' || c == '\\' || c == '-' || c == '_' || c == '.' || c == ',' || c == '\0';
-}
-
-static int ScoreSingleWord(const char* text, int textLen, const char* word, int wordLen) {
-    if (wordLen <= 0 || textLen < wordLen) return 0;
-    int score = 0;
-    for (int i = 0; i <= textLen - wordLen; i++) {
-        bool substrMatch = true;
-        for (int j = 0; j < wordLen; j++) {
-            char tc = text[i + j], wc = word[j];
-            if (tc >= 'A' && tc <= 'Z') tc += 0x20;
-            if (wc >= 'A' && wc <= 'Z') wc += 0x20;
-            if (tc != wc) {
-                substrMatch = false;
-                break;
-            }
-        }
-        if (!substrMatch) continue;
-        bool isWordStart = (i == 0) || IsWordBoundary(text[i - 1]);
-        int end = i + wordLen;
-        bool isWordEnd = (end >= textLen) || IsWordBoundary(text[end]);
-        if (isWordStart && isWordEnd) {
-            score = 1000;
-            break;
-        }
-        if (isWordStart && score < 500)
-            score = 500;
-        else if (score < 200)
-            score = 200;
-    }
-    if (score == 0 && wordLen > 1) {
-        int ti = 0, matched = 0;
-        for (int wi = 0; wi < wordLen && ti < textLen; wi++) {
-            char wc = word[wi];
-            if (wc >= 'A' && wc <= 'Z') wc += 0x20;
-            while (ti < textLen) {
-                char tc = text[ti++];
-                if (tc >= 'A' && tc <= 'Z') tc += 0x20;
-                if (tc == wc) {
-                    matched++;
-                    break;
-                }
-            }
-        }
-        if (matched == wordLen) score = 50;
-    }
-    return score;
-}
-
-static int ComputeRelevanceScore(Str itemText, const StrVec& words) {
-    if (len(words) == 0) return 100;
-    int totalScore = 0;
-    const char* text = itemText.s;
-    int textLen = itemText.len;
-    for (int wi = 0; wi < len(words); wi++) {
-        Str w = words.At(wi);
-        totalScore += ScoreSingleWord(text, textLen, w.s, w.len);
-    }
-    totalScore -= textLen / 8;
-    return totalScore;
-}
 
 struct ScoredIdx {
     int idx;
@@ -97,13 +35,23 @@ static void FilterAndSortStrings(StrVecCP& src, const StrVec& words, StrVecCP& d
     Vec<ScoredIdx> scored;
     scored.capacityHint = n;
     for (int i = 0; i < n; i++) {
-        Str s = src.At(i);
-        if (str::IsEmpty(s)) continue;
-        if (!FilterMatches(s, words)) continue;
-        int score = ComputeRelevanceScore(s, words);
+        // ScorePaletteItem merges the old FilterMatches + ComputeRelevanceScore
+        // into one scan: matching and scoring are decided per word in a single
+        // pass, with an early exit for non-matching items (see CommandPaletteScoring.h).
+        bool matched = false;
+        int score = ScorePaletteItem(src.At(i), words, &matched);
+        if (!matched) continue;
         scored.Append({i, score});
     }
     if (len(scored) == 0) return;
+    if (PaletteShouldSkipSort(len(scored))) {
+        // Very broad query (e.g. every TOC entry matching "*c"): ranking barely
+        // adds anything, so keep the source order and skip the scoring sort.
+        for (int i = 0; i < len(scored); i++) {
+            dst.AppendFrom(&src, scored[i].idx);
+        }
+        return;
+    }
     if (len(scored) <= 200) {
         for (int i = 1; i < len(scored); i++) {
             ScoredIdx key = scored[i];
@@ -142,6 +90,9 @@ static void FilterStrings(StrVecCP& strs, const StrVec& words, StrVecCP& matched
 }
 
 void CommandPaletteWnd::FilterStringsWithRelevance(StrVecCP& src, const StrVec& words, StrVecCP& dst) {
+    // The words must be pre-lowercased (the palette pre-lowercases its query
+    // words into filterWordsLower, see FilterStringsForQuery): the merged
+    // scoring in ScorePaletteItem assumes the needle is already folded.
     FilterAndSortStrings(src, words, dst);
 }
 
@@ -175,11 +126,24 @@ void CommandPaletteWnd::FilterStringsForQuery(Str filter, StrVecCP& strings) {
     filterWords.Reset();
     SplitFilterToWords(filter, filterWords);
 
-    if (searchCommands) FilterStrings(commands, filterWords, strings, PaletteGroup_Commands);
-    if (searchTabs) FilterStrings(tabs, filterWords, strings, PaletteGroup_Tabs);
-    if (searchHistory) FilterStrings(fileHistory, filterWords, strings, PaletteGroup_FileHistory);
-    if (searchToc) FilterStrings(toc, filterWords, strings, PaletteGroup_TOC);
-    if (searchFavorites) FilterStrings(favorites, filterWords, strings, PaletteGroup_Favorites);
+    // Pre-lowercase the query words into temp arena storage (freed at the next
+    // message loop) so ScorePaletteSingleWord doesn't fold the needle on every
+    // character comparison. filterWords itself is left untouched: its Str slices
+    // may alias the edit control's text buffer and it's also used verbatim by
+    // the highlight drawing (DrawMaybeHighlightedText case-folds internally).
+    filterWordsLower.Reset();
+    for (int i = 0; i < len(filterWords); i++) {
+        Str w = filterWords.At(i);
+        TempStr lower = str::DupTemp(w);
+        str::ToLowerInPlace(lower);
+        filterWordsLower.Append(lower);
+    }
+
+    if (searchCommands) FilterStrings(commands, filterWordsLower, strings, PaletteGroup_Commands);
+    if (searchTabs) FilterStrings(tabs, filterWordsLower, strings, PaletteGroup_Tabs);
+    if (searchHistory) FilterStrings(fileHistory, filterWordsLower, strings, PaletteGroup_FileHistory);
+    if (searchToc) FilterStrings(toc, filterWordsLower, strings, PaletteGroup_TOC);
+    if (searchFavorites) FilterStrings(favorites, filterWordsLower, strings, PaletteGroup_Favorites);
 
     // Show a placeholder when no items match the query
     if (len(strings) == 0 && len(filterWords) > 0) {
@@ -237,12 +201,26 @@ void CommandPaletteWnd::UpdateResultCount() {
             real++;
         }
     }
-    staticInfo->SetText(fmt("%d results", real));
-    ::SizeToIdealSize(staticInfo);
+    TempStr newText = fmt("%d results", real);
+    if (!str::Eq(staticInfo->GetTextTemp(), newText)) {
+        staticInfo->SetText(newText);
+        // The count text changes the width of the results static. Re-run the
+        // layout so the hints row re-centers and the static doesn't keep a stale
+        // size/position (it was laid out at 0x0 and could end up over the query
+        // edit). The palette window keeps its size; only children are
+        // repositioned. Skip the layout when the count text didn't change (e.g.
+        // extra keystrokes that don't narrow the results): it's pure overhead.
+        if (layout) {
+            Rect rc = ClientRect(hwnd);
+            LayoutToSize(layout, rc.Size());
+        }
+    }
 
     if (clearButton) {
         bool hasQuery = len(CommandPaletteSkipWS(Str(editQuery->GetTextTemp()))) > 0;
-        clearButton->SetIsVisible(hasQuery);
+        if (hasQuery != clearButton->IsVisible()) {
+            clearButton->SetIsVisible(hasQuery);
+        }
     }
 }
 

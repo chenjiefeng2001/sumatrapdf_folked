@@ -17,11 +17,19 @@ void FillWithItems(HWND hwnd, ListBoxModel* model) {
     ListBox_ResetContent(hwnd);
     if (model) {
         int n = model->ItemsCount();
-        SendMessageW(hwnd, LB_INITSTORAGE, (WPARAM)n, 0);
-        for (int i = 0; i < n; i++) {
-            auto sv = model->Item(i);
-            WCHAR* ws = CWStrTemp(sv);
-            ListBox_AddString(hwnd, ws);
+        if (GetWindowLongPtrW(hwnd, GWL_STYLE) & LBS_NODATA) {
+            // virtual (LBS_NODATA) list: just tell the control how many items
+            // there are. Items carry no strings, so a rebuild is O(1) instead
+            // of ResetContent + one LB_ADDSTRING (with a UTF-8->WStr copy) per
+            // item; the owner-draw callback reads text from the model by index.
+            SendMessageW(hwnd, LB_SETCOUNT, (WPARAM)n, 0);
+        } else {
+            SendMessageW(hwnd, LB_INITSTORAGE, (WPARAM)n, 0);
+            for (int i = 0; i < n; i++) {
+                auto sv = model->Item(i);
+                WCHAR* ws = CWStrTemp(sv);
+                ListBox_AddString(hwnd, ws);
+            }
         }
     }
     SendMessageW(hwnd, WM_SETREDRAW, TRUE, 0);

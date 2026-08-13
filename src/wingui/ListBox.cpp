@@ -41,6 +41,11 @@ HWND ListBox::Create(const CreateArgs& args) {
     cargs.style |= LBS_NOINTEGRALHEIGHT | LBS_NOTIFY;
     if (onDrawItem.IsValid()) {
         cargs.style |= LBS_OWNERDRAWFIXED;
+        if (args.ownerData) {
+            // virtual list: items carry no strings; the count is set via
+            // LB_SETCOUNT (see FillWithItems) and drawing reads the model
+            cargs.style |= LBS_NODATA;
+        }
     }
     // args.style |= WS_BORDER;
     Wnd::CreateControl(cargs);

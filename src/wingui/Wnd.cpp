@@ -10,6 +10,7 @@
 
 #include "wingui/Layout.h"
 #include "wingui/WinGui.h"
+#include "wingui/Renderer.h"
 
 Kind kindWnd = "wnd";
 
@@ -1237,4 +1238,33 @@ void DrawCloseButton2(const DrawCloseButtonArgs& args) {
 
     MoveToEx(hdc, r.x + r.dx, r.y, nullptr);
     LineTo(hdc, r.x, r.y + r.dy);
+}
+
+void DrawCloseButtonViaRenderer(const DrawCloseButtonArgs& args) {
+    if (!gRenderer) {
+        // 无统一后端时退化为纯 GDI 版本
+        DrawCloseButton2(args);
+        return;
+    }
+    const Rect& r = args.r;
+    if (args.colBg != kColorNoChange) {
+        gRenderer->FillRect(ToRECT(r), RgbaColor(args.colBg));
+    }
+    if (args.isHover) {
+        // 红色圆形背景（dx==dy 时大半径圆角矩形即圆）
+        RECT rc2 = ToRECT(r);
+        rc2.right -= 2;
+        rc2.bottom -= 2;
+        int d = (rc2.right - rc2.left) / 2;
+        gRenderer->FillRoundRect(rc2, RgbaColor(args.colHoverBg), (float)std::max(1, d));
+    }
+    RgbaColor xCol = RgbaColor(args.isHover ? args.colXHover : args.colX);
+    float sw = 2.0f;
+    if (args.isHover) {
+        gRenderer->DrawLine(r.x + 4, r.y + 4, r.x + r.dx - 6, r.y + r.dy - 6, xCol, sw);
+        gRenderer->DrawLine(r.x + r.dx - 6, r.y + 4, r.x + 4, r.y + r.dy - 6, xCol, sw);
+    } else {
+        gRenderer->DrawLine(r.x + 4, r.y + 5, r.x + r.dx - 6, r.y + r.dy - 5, xCol, sw);
+        gRenderer->DrawLine(r.x + r.dx - 6, r.y + 5, r.x + 4, r.y + r.dy - 5, xCol, sw);
+    }
 }

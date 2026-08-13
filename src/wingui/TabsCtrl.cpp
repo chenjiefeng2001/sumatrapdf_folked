@@ -9,6 +9,7 @@
 
 #include "wingui/Layout.h"
 #include "wingui/WinGui.h"
+#include "wingui/Renderer.h"
 
 #include "Theme.h"
 
@@ -191,6 +192,86 @@ bool TabsCtrl::IsValidIdx(int idx) {
     return idx >= 0 && idx < TabCount();
 }
 
+// Phase 2: TabsCtrl painted through the unified Renderer backend. Semantics
+// mirror the GDI+ fallback in TabsCtrl::Paint (same geometry, same colors);
+// text goes through DrawText (GDI) / DirectWrite (D2D) instead of GDI+.
+static void PaintTabsViaRenderer(TabsCtrl* tabs, const RECT& rc, int selectedIdx, int tabUnderMouse, bool overClose) {
+    HWND hwnd = tabs->hwnd;
+    gRenderer->FillRect(rc, RgbaColor(ThemeControlBackgroundColor()));
+
+    COLORREF tabBgSelected = ThemeControlBackgroundColor();
+    COLORREF tabBgBackground = AccentColor(tabBgSelected, 25);
+    COLORREF tabBgHighlight = AccentColor(tabBgSelected, 35);
+
+    int n = tabs->TabCount();
+    for (int i = 0; i < n; i++) {
+        TabInfo* ti = tabs->GetTab(i);
+        if (!ti) {
+            continue;
+        }
+        bool isSelected = selectedIdx == i;
+        bool isUnderMouse = tabUnderMouse == i;
+        COLORREF tabBgCol = tabBgBackground;
+        if (isSelected) {
+            tabBgCol = tabBgSelected;
+        } else if (isUnderMouse) {
+            tabBgCol = tabBgHighlight;
+        }
+        if (!IsSpecialColor(ti->tabColor)) {
+            tabBgCol = ti->tabColor;
+            if (!isSelected) {
+                tabBgCol = AccentColor(ti->tabColor, isUnderMouse ? 35 : 25);
+            }
+        }
+
+        COLORREF textColor = TabTextColorForBackground(tabBgCol);
+        gRenderer->FillRect(ToRECT(ti->r), RgbaColor(tabBgCol));
+
+        // text area: leave room for the close button, matching the GDI+ path
+        // ([8px][text][close][8px] in LTR, mirrored in RTL)
+        RECT rTxt = ToRECT(ti->r);
+        if (IsTabsRtl(hwnd)) {
+            rTxt.left += 8 + ti->rClose.dx;
+        } else {
+            rTxt.left += 8;
+        }
+        rTxt.right -= 8 + ti->rClose.dx;
+        if (rTxt.right > rTxt.left) {
+            uint fmt = DT_SINGLELINE | DT_NOPREFIX | DT_VCENTER | DT_END_ELLIPSIS;
+            fmt |= IsTabsRtl(hwnd) ? DT_RIGHT : DT_LEFT;
+            gRenderer->DrawText(ti->text, rTxt, RgbaColor(textColor), tabs->GetFont(), fmt);
+        }
+
+        // red dot for dirty (unsaved) tabs, placed after the rendered text.
+        // The GDI+ path measures the actual (possibly ellipsized) text width via
+        // MeasureString; we approximate with the layout-time titleSize, then
+        // clamp to the text area — same visual result for non-truncated titles.
+        if (ti->isDirty && rTxt.right > rTxt.left) {
+            int dotRadius = DpiScale(hwnd, 3);
+            int dotX = ti->titlePos.x + ti->titleSize.dx + dotRadius;
+            int maxX = rTxt.right - dotRadius * 2;
+            if (dotX > maxX) {
+                dotX = maxX;
+            }
+            int dotY = ti->r.y + (ti->r.dy - dotRadius * 2) / 2;
+            if (dotX >= rTxt.left) {
+                RECT dotRc = {dotX, dotY, dotX + 2 * dotRadius, dotY + 2 * dotRadius};
+                gRenderer->FillRoundRect(dotRc, RgbaColor(RGB(0xEE, 0x22, 0x22)), (float)dotRadius);
+            }
+        }
+
+        bool closeVisible = ti->canClose && (isSelected || (isUnderMouse && ti->r.dx >= kMinTabWidthForClose));
+        if (closeVisible) {
+            DrawCloseButtonArgs closeArgs;
+            closeArgs.hdc = gRenderer->GetHDC();
+            closeArgs.r = ti->rClose;
+            closeArgs.isHover = overClose && isUnderMouse;
+            closeArgs.colBg = tabBgCol;
+            DrawCloseButtonViaRenderer(closeArgs);
+        }
+    }
+}
+
 void TabsCtrl::Paint(HDC hdc, const RECT& rc) {
     // verify the cursor is actually inside the tab control; if not, ignore stale lastMousePos
     Point cursorPos = HwndGetCursorPos(hwnd);
@@ -205,6 +286,19 @@ void TabsCtrl::Paint(HDC hdc, const RECT& rc) {
     int selectedIdx = GetSelected();
     if (IsValidIdx(tabForceShowSelected)) {
         selectedIdx = tabForceShowSelected;
+    }
+
+    // Phase 2: unified backend path. The GDI+ fallback below is kept for the
+    // (theoretical) case of gRenderer being unavailable at paint time.
+    if (gRenderer) {
+        PAINTSTRUCT ps{};
+        ps.hdc = hdc;
+        ps.rcPaint = rc;
+        if (gRenderer->BeginPaint(hwnd, &ps)) {
+            PaintTabsViaRenderer(this, rc, selectedIdx, tabUnderMouse, overClose);
+            gRenderer->EndPaint();
+            return;
+        }
     }
 
     // logfa("TabsCtrl::Paint, underMouse: %d, overClose: %d, selected: %d, rc: pos: (%d, %d), size: (%d, %d)\n",

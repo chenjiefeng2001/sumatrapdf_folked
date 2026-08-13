@@ -864,16 +864,22 @@ static void OnAnnotationModified(MainWindow* win, Annotation* annot, RectF* know
         return;
     }
     int pageNo = annot->pageNo;
-    RectF r = knownBounds ? *knownBounds : GetRect(annot);
-    if (r.IsEmpty()) {
+    // Invalidate BOTH the old rect (knownBounds — where the annotation used to
+    // be, still showing stale pixels) and the new rect (where it is now), so
+    // a move/resize never leaves a stale "ghost" tile behind on large pages
+    // (report §9.1 / §10 P1 — no reliance on the full-page fallback).
+    RectF invalidation = knownBounds ? *knownBounds : GetRect(annot);
+    RectF newBounds = GetRect(annot);
+    invalidation = invalidation.Union(newBounds);
+    if (invalidation.IsEmpty()) {
         // Guard against zero-area rect: fall back to the full page so the
         // tile-level granularity still works (a zero rect would match no tiles).
         EngineBase* engine = dm->GetEngine();
         if (engine) {
-            r = engine->PageMediabox(pageNo);
+            invalidation = engine->PageMediabox(pageNo);
         }
     }
-    gRenderCache->Invalidate(dm, pageNo, r);
+    gRenderCache->Invalidate(dm, pageNo, invalidation);
     NotifyAnnotationsChanged(win->CurrentTab()->editAnnotsWindow);
     MainWindowRerender(win);
     ToolbarUpdateStateForWindow(win, true);

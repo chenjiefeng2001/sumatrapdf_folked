@@ -2201,6 +2201,9 @@ EngineMupdf::~EngineMupdf() {
         if (pi->displayList) {
             fz_drop_display_list(ctx, pi->displayList);
         }
+        if (pi->annotDisplayList) {
+            fz_drop_display_list(ctx, pi->annotDisplayList);
+        }
         if (pi->stextPage) {
             fz_drop_stext_page(ctx, pi->stextPage);
         }
@@ -3655,6 +3658,10 @@ FzPageInfo* EngineMupdf::GetFzPageInfo(int pageNo, bool loadQuick, fz_cookie* co
         }
 
         RebuildCommentsFromAnnotations(ctx, pageInfo);
+
+        // the wrapper lists were just populated (under pagesLock): the spatial
+        // hit-test indexes (built lazily on the UI thread) must be rebuilt too
+        pageInfo->hitIndexDirty = true;
     } else if (docLockAcquired) {
         // docLock was acquired for dimensions loading but annotations were
         // already loaded.  Release it now (before the loadQuick check) so
@@ -3797,11 +3804,15 @@ RectF EngineMupdf::PageMediabox(int pageNo) {
     return pi->mediabox;
 }
 
-// returns a kept reference to the cached "View" display list for the page,
+// returns a kept reference to the cached *contents* display list for the page,
 // building+caching it on first call. Caller must fz_drop_display_list when done.
 // must be called with pi->renderLock held (this both protects pi->displayList
-// and serializes the page-running done by fz_new_display_list_from_page).
-static fz_display_list* GetOrBuildPageDisplayList(FzPageInfo* pi, fz_context* ctx) {
+// and serializes the page-running done by the builders).
+// For PDF docs only the page contents are recorded (no annotations/widgets);
+// those live in annotDisplayList (see GetOrBuildAnnotDisplayList) so the
+// content list survives annotation edits unchanged (report §10 P1). Non-PDF
+// formats have no annotation layer, so fz_new_display_list_from_page is fine.
+static fz_display_list* GetOrBuildContentDisplayList(EngineMupdf* e, FzPageInfo* pi, fz_context* ctx) {
 #ifdef DEBUG
     // Must be called with renderLock held (serializes MuPDF MuPDF calls).
     // g_tlsCritSecDepth check: the caller's ScopedCritSec(&renderLock)
@@ -3809,26 +3820,88 @@ static fz_display_list* GetOrBuildPageDisplayList(FzPageInfo* pi, fz_context* ct
     // forgot to acquire renderLock, which would race with other threads.
     if (g_tlsCritSecDepth == 0) ReportIf(g_tlsCritSecDepth == 0);
 #endif
-    if (pi->displayList && pi->displayListGeneration != pi->annotGeneration) {
-        fz_drop_display_list(ctx, pi->displayList);
-        pi->displayList = nullptr;
+    if (pi->displayList) {
+        return fz_keep_display_list(ctx, pi->displayList);
     }
-    if (!pi->displayList) {
-        fz_display_list* list = nullptr;
-        fz_try(ctx) {
+    fz_display_list* list = nullptr;
+    fz_device* dev = nullptr;
+    fz_try(ctx) {
+        if (e->pdfdoc) {
+            pdf_page* pdfpage = pdf_page_from_fz_page(ctx, pi->page);
+            fz_var(pdfpage);
+            list = fz_new_display_list(ctx, fz_bound_page(ctx, pi->page));
+            dev = fz_new_list_device(ctx, list);
+            pdf_run_page_contents_with_usage(ctx, pdfpage, dev, fz_identity, "View", nullptr);
+            fz_close_device(ctx, dev);
+        } else {
             list = fz_new_display_list_from_page(ctx, pi->page);
         }
-        fz_catch(ctx) {
-            fz_report_error(ctx);
-            list = nullptr;
-        }
-        pi->displayList = list;
-        pi->displayListGeneration = pi->annotGeneration.load();
     }
+    fz_always(ctx) {
+        fz_drop_device(ctx, dev);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        fz_drop_display_list(ctx, list);
+        list = nullptr;
+    }
+    pi->displayList = list;
     if (!pi->displayList) {
         return nullptr;
     }
     return fz_keep_display_list(ctx, pi->displayList);
+}
+
+// returns a kept reference to the cached annotation/widget overlay display
+// list, building+caching it on first call. Caller must fz_drop_display_list
+// when done. must be called with pi->renderLock held.
+// The overlay is invalidated (dropped) by MarkNotificationAsModified whenever
+// an annotation changes and regenerated here on the next render; the *content*
+// display list (GetOrBuildContentDisplayList) is untouched by that, which is
+// what keeps annotation edits cheap — only the annotations are re-run.
+// Returns nullptr for non-PDF documents (no annotation layer).
+static fz_display_list* GetOrBuildAnnotDisplayList(EngineMupdf* e, FzPageInfo* pi, fz_context* ctx) {
+#ifdef DEBUG
+    // same renderLock contract as GetOrBuildContentDisplayList
+    if (g_tlsCritSecDepth == 0) ReportIf(g_tlsCritSecDepth == 0);
+#endif
+    if (pi->annotDisplayList && pi->annotDisplayListGeneration != pi->annotGeneration.load()) {
+        fz_drop_display_list(ctx, pi->annotDisplayList);
+        pi->annotDisplayList = nullptr;
+    }
+    if (!e->pdfdoc) {
+        return nullptr;
+    }
+    if (!pi->annotDisplayList) {
+        fz_display_list* list = nullptr;
+        fz_device* dev = nullptr;
+        fz_try(ctx) {
+            pdf_page* pdfpage = pdf_page_from_fz_page(ctx, pi->page);
+            fz_var(pdfpage);
+            list = fz_new_display_list(ctx, fz_bound_page(ctx, pi->page));
+            dev = fz_new_list_device(ctx, list);
+            // annots and widgets are separate lists in mupdf (pdf-run.c:
+            // pdf_run_page_annots iterates page->annots, pdf_run_page_widgets
+            // iterates page->widgets); run both so the overlay is complete.
+            pdf_run_page_annots_with_usage(ctx, pdfpage, dev, fz_identity, "View", nullptr);
+            pdf_run_page_widgets_with_usage(ctx, pdfpage, dev, fz_identity, "View", nullptr);
+            fz_close_device(ctx, dev);
+        }
+        fz_always(ctx) {
+            fz_drop_device(ctx, dev);
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+            fz_drop_display_list(ctx, list);
+            list = nullptr;
+        }
+        pi->annotDisplayList = list;
+        pi->annotDisplayListGeneration = pi->annotGeneration.load();
+    }
+    if (!pi->annotDisplayList) {
+        return nullptr;
+    }
+    return fz_keep_display_list(ctx, pi->annotDisplayList);
 }
 
 RectF EngineMupdf::PageContentBox(int pageNo, RenderTarget target) {
@@ -3884,7 +3957,7 @@ RectF EngineMupdf::PageContentBox(int pageNo, RenderTarget target) {
         // these caches, so it MUST be serialized under renderLock.
         ScopedCritSec scope(&renderLock);
         pagerect = fz_bound_page(ctx, pageInfo->page);
-        keptList = GetOrBuildPageDisplayList(pageInfo, ctx);
+        keptList = GetOrBuildContentDisplayList(this, pageInfo, ctx);
         if (keptList) {
             fz_try(ctx) {
                 dev = fz_new_bbox_device(ctx, &rect);
@@ -3987,14 +4060,17 @@ Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
     // thread can still acquire it via TryEnterCriticalSection for click
     // detection / link hit-testing without stalling.
 
-    // The "View" rendering (no Print, no hideAnnotations) is what
-    // fz_new_display_list_from_page produces; safe to cache and re-run lock-free.
+    // The "View" rendering (no Print, no hideAnnotations) is split into a
+    // *contents* display list (cached once per page) plus an *annotation*
+    // overlay display list (rebuilt only after annotation edits); both are safe
+    // to cache and re-run lock-free.
     bool useCache = (args.target == RenderTarget::View) && !hideAnnotations;
 
     fz_rect pRect;
     fz_matrix ctm;
     fz_irect ibounds;
     fz_display_list* keptList = nullptr;
+    fz_display_list* keptAnnotList = nullptr;
 
     // Hold docLock [Shared] + renderLock across ALL MuPDF operations so that
     // both UAF protection (docLock blocking UI annotation mutation) and MuPDF
@@ -4030,9 +4106,17 @@ Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
         ctm = viewctm(page, zoom, rotation);
         ibounds = fz_round_rect(fz_transform_rect(pRect, ctm));
 
-        keptList = GetOrBuildPageDisplayList(pageInfo, ctx);
-
+        keptList = GetOrBuildContentDisplayList(this, pageInfo, ctx);
         if (keptList) {
+            keptAnnotList = GetOrBuildAnnotDisplayList(this, pageInfo, ctx);
+        }
+        // for a PDF, a missing annotation overlay means the cached path can't
+        // produce the full image → fall through to the fallback path (which
+        // runs the whole page including annotations). non-PDF docs simply have
+        // no annotation layer.
+        bool hasFullImage = keptList && (keptAnnotList || !this->pdfdoc);
+
+        if (hasFullImage) {
             fz_colorspace* csRgb = fz_device_rgb(ctx);
             fz_pixmap* pix = nullptr;
             fz_device* dev = nullptr;
@@ -4043,27 +4127,30 @@ Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
             fz_var(bitmap);
 
             fz_try(ctx) {
-                // The display list was built (or validated) by
-                // GetOrBuildPageDisplayList (line 4031) which compares
-                // displayListGeneration vs annotGeneration and rebuilds
-                // when they differ.  After that call, keptList is either
-                // nullptr (build failed) or a generation-matched list.
-                // Re-checking the generation here is REDUNDANT and
-                // DANGEROUS: if the check DID trigger (which it can't
-                // under correct locking — we hold docLock Shared so the
-                // UI thread can't increment annotGeneration), keptList
-                // would be set to nullptr, skipping THE ENTIRE render
-                // replay and falling through to the unprotected fallback
-                // path (no docLock Shared).  Remove the dead check to
-                // eliminate this starvation trap.  See report §5.1 Fix 8.
-                if (keptList) {
-                    pix = fz_new_pixmap_with_bbox(ctx, csRgb, ibounds, nullptr, 1);
-                    fz_clear_pixmap_with_value(ctx, pix, 0xff);
-                    dev = fz_new_draw_device(ctx, ctm, pix);
-                    fz_run_display_list(ctx, keptList, dev, fz_identity, pRect, fzcookie);
-                    fz_close_device(ctx, dev);
-                    bitmap = NewRenderedFzPixmap(ctx, pix);
+                // The two display lists were built (or validated) above:
+                // GetOrBuildContentDisplayList returns the cached contents
+                // list (never invalidated by annotation edits) and
+                // GetOrBuildAnnotDisplayList returns a generation-matched
+                // annotation overlay (rebuilt after each edit). Re-checking
+                // the generation here is REDUNDANT and DANGEROUS: if the
+                // check DID trigger (which it can't under correct locking —
+                // we hold docLock Shared so the UI thread can't increment
+                // annotGeneration), the render would skip THE ENTIRE replay
+                // and fall through to the unprotected fallback path (no
+                // docLock Shared).  Remove the dead check to eliminate this
+                // starvation trap.  See report §5.1 Fix 8.
+                pix = fz_new_pixmap_with_bbox(ctx, csRgb, ibounds, nullptr, 1);
+                fz_clear_pixmap_with_value(ctx, pix, 0xff);
+                dev = fz_new_draw_device(ctx, ctm, pix);
+                // replay contents first, then the annotation/widget overlay on
+                // top — the same draw order pdf_run_page_with_usage uses
+                // (contents → annots → widgets)
+                fz_run_display_list(ctx, keptList, dev, fz_identity, pRect, fzcookie);
+                if (keptAnnotList) {
+                    fz_run_display_list(ctx, keptAnnotList, dev, fz_identity, pRect, fzcookie);
                 }
+                fz_close_device(ctx, dev);
+                bitmap = NewRenderedFzPixmap(ctx, pix);
             }
             fz_always(ctx) {
                 if (dev) {
@@ -4073,6 +4160,7 @@ Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
                     fz_drop_pixmap(ctx, pix);
                 }
                 fz_drop_display_list(ctx, keptList);
+                fz_drop_display_list(ctx, keptAnnotList);
             }
             fz_catch(ctx) {
                 fz_report_error(ctx);
@@ -4095,6 +4183,14 @@ Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
             ReleaseSRWLockShared(&docLock);
             return result;
         }
+
+        // cached path couldn't produce the full image (display-list build
+        // failed): drop the kept references and fall through to the fallback
+        // path below
+        fz_drop_display_list(ctx, keptList);
+        fz_drop_display_list(ctx, keptAnnotList);
+        keptList = nullptr;
+        keptAnnotList = nullptr;
 
         ReleaseSRWLockShared(&docLock);
     }
@@ -5308,7 +5404,29 @@ Str EngineMupdfLoadAnnotAttachment(EngineBase* engine, int objNum) {
     return PdfLoadAnnotationAttachment(epdf->Ctx(), epdf->pdfdoc, objNum);
 }
 
-// if an elements fully obscures another, remove it from the list
+// (re)builds the spatial hit-test indexes for a page's annotations and
+// widgets from the wrapper lists. Caller must hold docLock (the wrapper
+// bounds are only mutated under docLock Exclusive, and the lists under
+// pagesLock — same-thread UI access makes the plain hitIndexDirty flag safe).
+// The index payload is the Annotation* itself, so the hit-test result is the
+// wrapper that Canvas.cpp works with.
+static void BuildHitIndexes(EngineMupdf* e, FzPageInfo* pi) {
+    pi->hitIndexDirty = false;
+
+    pi->annotHitEntries.Reset();
+    for (Annotation* a : pi->annotations) {
+        pi->annotHitEntries.Append(AnnotHitEntry{a->bounds, a});
+    }
+    pi->annotHitIndex.Build(&pi->annotHitEntries, pi->mediabox);
+
+    pi->widgetHitEntries.Reset();
+    for (Annotation* w : pi->widgets) {
+        pi->widgetHitEntries.Append(AnnotHitEntry{w->bounds, w});
+    }
+    pi->widgetHitIndex.Build(&pi->widgetHitEntries, pi->mediabox);
+}
+
+// if an element fully obscures another, remove it from the list
 Annotation* EngineMupdfGetAnnotationAtPos(EngineBase* engine, int pageNo, PointF pos, Annotation* preferredAnnot) {
     EngineMupdf* epdf = AsEngineMupdf(engine);
     if (!epdf->pdfdoc) {
@@ -5323,39 +5441,10 @@ Annotation* EngineMupdfGetAnnotationAtPos(EngineBase* engine, int pageNo, PointF
     // Shared lock is sufficient and avoids STATUS_RESOURCE_NOT_OWNED
     // when GetFzPageInfo acquires docLock Shared on the same thread.
     ScopedSRWLockShared cs(&epdf->docLock);
-    Vec<Annotation*> els;
-    for (auto& annot : pi->annotations) {
-        auto& atp = annot->type;
-        RectF bounds = annot->bounds;
-        if (!bounds.Contains(pos)) {
-            continue;
-        }
-        els.Append(annot);
+    if (pi->hitIndexDirty) {
+        BuildHitIndexes(epdf, pi);
     }
-    if (len(els) == 0) {
-        return nullptr;
-    }
-    for (const auto& a : els) {
-        if (a == preferredAnnot) {
-            return preferredAnnot;
-        }
-    }
-
-    // pick the annotation with the smallest rect: if the click lands inside
-    // a big highlight that also wraps a smaller annotation, the smaller one
-    // is almost always what the user meant
-    Annotation* best = els[0];
-    RectF br = best->bounds;
-    float bestArea = br.dx * br.dy;
-    for (int i = 1; i < len(els); i++) {
-        RectF r = els[i]->bounds;
-        float area = r.dx * r.dy;
-        if (area < bestArea) {
-            best = els[i];
-            bestArea = area;
-        }
-    }
-    return best;
+    return (Annotation*)pi->annotHitIndex.HitTest(pos, preferredAnnot);
 }
 
 // Like EngineMupdfGetAnnotationAtPos but for form fields (widgets), which live
@@ -5373,20 +5462,10 @@ Annotation* EngineMupdfGetWidgetAtPos(EngineBase* engine, int pageNo, PointF pos
     // and avoids STATUS_RESOURCE_NOT_OWNED when GetFzPageInfo (called indirectly
     // during the annotation-loading path) acquires docLock Shared.
     ScopedSRWLockShared cs(&epdf->docLock);
-    Annotation* best = nullptr;
-    float bestArea = 0;
-    for (auto& w : pi->widgets) {
-        RectF bounds = w->bounds;
-        if (!bounds.Contains(pos)) {
-            continue;
-        }
-        float area = bounds.dx * bounds.dy;
-        if (!best || area < bestArea) {
-            best = w;
-            bestArea = area;
-        }
+    if (pi->hitIndexDirty) {
+        BuildHitIndexes(epdf, pi);
     }
-    return best;
+    return (Annotation*)pi->widgetHitIndex.HitTest(pos, nullptr);
 }
 
 // Next/previous editable (text/choice, non-read-only) widget on the same page
@@ -5444,11 +5523,35 @@ Annotation* EngineMupdfGetAdjacentWidget(EngineBase* engine, Annotation* cur, bo
 static bool gSkipAnnotatoinValidation = true;
 
 // check that pageInfo->annotations has the same info as in mupdf
+// (debug-only cross-check of the wrapper list vs. mupdf's own annot list;
+// the wrappers are produced by the same pdf_first_annot iteration as
+// GetFzPageInfo's annotation loading, so the counts and order must match).
 NO_INLINE void ValidateAnnotationsInSync(EngineMupdf* e, FzPageInfo* pageInfo) {
     if (gSkipAnnotatoinValidation) {
         return;
     }
-    // TODO: write me
+    if (!e->pdfdoc || !pageInfo->page || !pageInfo->annotsLoaded) {
+        return;
+    }
+    auto ctx = e->Ctx();
+    ScopedCritSec rl(&e->renderLock); // mupdf calls must be serialized
+    int mupdfCount = 0;
+    int wrapperCount = len(pageInfo->annotations);
+    fz_try(ctx) {
+        pdf_page* pdfpage = pdf_page_from_fz_page(ctx, pageInfo->page);
+        for (pdf_annot* a = pdf_first_annot(ctx, pdfpage); a; a = pdf_next_annot(ctx, a)) {
+            mupdfCount++;
+        }
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        return;
+    }
+    if (mupdfCount != wrapperCount) {
+        logfa("ValidateAnnotationsInSync: page %d has %d annots in mupdf but %d wrappers (possible desync)\n",
+              pageInfo->pageNo, mupdfCount, wrapperCount);
+        ReportIf(true);
+    }
 }
 
 // in a function so that we can set a breakpoint or add logging
@@ -5499,6 +5602,10 @@ NO_INLINE void MarkNotificationAsModified(EngineMupdf* e, Annotation* annot, Ann
         } else {
             ReportIf(change != AnnotationChange::Modify);
         }
+        // any change (including Modify, which may move an annotation's rect)
+        // invalidates the spatial hit-test indexes; they are rebuilt lazily on
+        // the next EngineMupdfGetAnnotationAtPos / GetWidgetAtPos call
+        pageInfo->hitIndexDirty = true;
     } // pagesLock released → g_tlsCritSecDepth → 0
 
     if (!pageInfo) {
@@ -5523,7 +5630,11 @@ NO_INLINE void MarkNotificationAsModified(EngineMupdf* e, Annotation* annot, Ann
     pageInfo->elementsNeedRebuilding = true;
 
     // ─────────────────────────────────────────────────────────────────
-    // Phase 3: Drop the stale displayList under renderLock (CS only).
+    // Phase 3: Drop the stale *annotation overlay* display list under
+    // renderLock (CS only).  The page contents display list (displayList) is
+    // deliberately NOT dropped: contents never change with annotation edits,
+    // so keeping the cached list is what makes annotation edits cheap (report
+    // §10 P1 — editing an annotation no longer re-runs the page contents).
     //   No SRW held → no violation of the pagesLock→docLock→renderLock
     //   hierarchy.  docLock was released in Phase 2, so the following
     //   ScopedCritSec(&renderLock) is safe.
@@ -5531,9 +5642,9 @@ NO_INLINE void MarkNotificationAsModified(EngineMupdf* e, Annotation* annot, Ann
     {
         auto ctx = e->Ctx();
         ScopedCritSec rl(&e->renderLock);
-        if (pageInfo->displayList) {
-            fz_drop_display_list(ctx, pageInfo->displayList);
-            pageInfo->displayList = nullptr;
+        if (pageInfo->annotDisplayList) {
+            fz_drop_display_list(ctx, pageInfo->annotDisplayList);
+            pageInfo->annotDisplayList = nullptr;
         }
     }
 }

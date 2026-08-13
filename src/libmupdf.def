@@ -49,6 +49,7 @@ EXPORTS
 	pdf_set_annot_border_width
 	pdf_set_annot_line_start_style
 	pdf_set_annot_line_end_style
+	pdf_run_page_annots_with_usage
 	pdf_run_page_widgets_with_usage
 	pdf_run_page_contents_with_usage
 	pdf_new_vectorize_filter

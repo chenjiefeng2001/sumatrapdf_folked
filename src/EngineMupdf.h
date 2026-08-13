@@ -2,6 +2,7 @@
    License: GPLv3 */
 
 #include <atomic>
+#include "base/AnnotHitTest.h"
 
 struct Annotation;
 
@@ -56,24 +57,43 @@ struct FzPageInfo {
     // even before full annotation/text loading.  See docs/reports §3.2.
     bool dimensionsLoaded = false;
 
-    // cached "View" rendering of the page; built lazily under
-    // EngineMupdf::renderLock. fz_display_list is safe to *replay* across
-    // cloned contexts in principle, but the image objects it references are
-    // not -- shared images (notably JBIG2 with shared dictionaries) trigger
-    // races inside mupdf's image store on concurrent decode. So renderLock
-    // is engine-wide, not per-page.
+    // cached rendering of the page *contents* (no annotations/widgets) built
+    // lazily under EngineMupdf::renderLock. fz_display_list is safe to *replay*
+    // across cloned contexts in principle, but the image objects it references
+    // are not -- shared images (notably JBIG2 with shared dictionaries) trigger
+    // races inside mupdf's image store on concurrent decode. So renderLock is
+    // engine-wide, not per-page.
+    // Annotations/widgets are recorded separately in annotDisplayList, so this
+    // list is built once per page and *survives* annotation edits (report §10
+    // P1): editing an annotation no longer re-runs the page contents.
     fz_display_list* displayList = nullptr;
+
+    // cached overlay of the page's annotations + form-field widgets, rebuilt
+    // (dropped) whenever an annotation changes. Only meaningful for PDF docs;
+    // other formats have no annotation layer and leave this null.
+    fz_display_list* annotDisplayList = nullptr;
 
     // generation counters for page versioning: every annotation modification
     // increments annotGeneration; the render thread compares
-    // displayListGeneration to detect stale display lists and rebuilds.
+    // annotDisplayListGeneration to detect a stale annotation overlay and
+    // rebuilds it (the content displayList above is never invalidated).
     // Both fields use std::atomic<int> for safe multi-threaded access — the
     // increment (MarkNotificationAsModified, EngineMupdf.cpp) is outside all
-    // locks, while the read (GetOrBuildPageDisplayList, EngineMupdf.cpp) is
-    // under renderLock.  Plain int would be a data race (undefined behavior).
+    // locks, while the read (GetOrBuildAnnotDisplayList, EngineMupdf.cpp) is
+    // under renderLock. Plain int would be a data race (undefined behavior).
     // See docs/reports/annot-render-crash-analysis.md §3.2.
-    std::atomic<int> annotGeneration{0};        // bumped on each annotation change
-    std::atomic<int> displayListGeneration{-1}; // generation captured when displayList was built
+    std::atomic<int> annotGeneration{0};             // bumped on each annotation change
+    std::atomic<int> annotDisplayListGeneration{-1}; // generation when annotDisplayList was built
+
+    // spatial hit-test indexes for annotations/widgets, lazily rebuilt when
+    // hitIndexDirty is set (on annotation list changes). The mirror Vecs keep
+    // the AnnotHitEntry storage alive — AnnotHitIndex only keeps a pointer to
+    // them. See BuildHitIndexes in EngineMupdf.cpp; read under docLock.
+    Vec<AnnotHitEntry> annotHitEntries;
+    AnnotHitIndex annotHitIndex;
+    Vec<AnnotHitEntry> widgetHitEntries;
+    AnnotHitIndex widgetHitIndex;
+    bool hitIndexDirty = true;
 };
 
 class EngineMupdf : public EngineBase {

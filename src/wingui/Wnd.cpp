@@ -342,7 +342,11 @@ Size Wnd::Layout(const Constraints bc) {
     auto innerConstraints = bc.Inset(hinset, vinset);
 
     int dx = MinIntrinsicWidth(0);
-    int dy = MinIntrinsicHeight(0);
+    // hand the bounded width down to MinIntrinsicHeight so wrap-aware controls
+    // (e.g. Static with wrap=true) can measure how tall the text is when it
+    // wraps to the available width — the width->height elastic feedback loop.
+    int widthForHeight = innerConstraints.max.dx == Inf ? 0 : innerConstraints.max.dx;
+    int dy = MinIntrinsicHeight(widthForHeight);
     childSize = innerConstraints.Constrain(Size{dx, dy});
     auto res = Size{
         childSize.dx + hinset,
@@ -1041,9 +1045,17 @@ void SizeToIdealSize(Wnd* wnd) {
         return;
     }
     auto size = wnd->GetIdealSize();
-    // TODO: don't change x,y, only dx/dy
-    RECT r{0, 0, size.dx, size.dy};
-    wnd->SetBounds(r);
+    // don't change x,y, only dx/dy
+    POINT pt{};
+    RECT r{};
+    if (::GetWindowRect(wnd->hwnd, &r)) {
+        pt = {r.left, r.top};
+        HWND parent = ::GetParent(wnd->hwnd);
+        if (parent) {
+            ::ScreenToClient(parent, &pt);
+        }
+    }
+    wnd->SetBounds(Rect{pt.x, pt.y, size.dx, size.dy});
 }
 
 //--- misc code

@@ -6,6 +6,7 @@
 
 #ifdef _MSC_VER
 #include "base/Pixmap.h"
+#include "base/ComSafe.h"
 #include "base/Log.h"
 #include "GpuBackend.h"
 
@@ -33,12 +34,17 @@ GpuBackend::GpuBackend() {
 }
 
 GpuBackend::~GpuBackend() {
-    if (cachedRT) {
-        cachedRT->Release();
-    }
-    if (factory) {
-        factory->Release();
-    }
+#ifdef DEBUG
+    // D2D objects are single-threaded: the destructor runs at shutdown on the
+    // UI thread, which is also the thread that created the factory (asserted
+    // here so a future background-thread teardown is caught immediately).
+    ReportIf(g_mainThreadId != 0 && g_mainThreadId != GetCurrentThreadId());
+#endif
+    // Release in reverse creation order (render target before factory).
+    // SEH-wrapped: MacType's hooked Release() can raise STATUS_HEAP_CORRUPTION
+    // while unwinding its own allocations (see base/ComSafe.h).
+    SafeReleaseSeh(&cachedRT);
+    SafeReleaseSeh(&factory);
 }
 
 GpuBackend* GpuBackend::Create() {

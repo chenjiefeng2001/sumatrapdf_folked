@@ -14,6 +14,7 @@
 #include "base/Thread.h"
 #include "base/UITask.h"
 #include "base/Win.h"
+#include "base/ComSafe.h"
 
 #include "SumatraConfig.h"
 
@@ -1829,7 +1830,6 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE, _In_ LPST
     bool openInNewWindow = false;
     WindowTab* tabToSelect = nullptr;
     Str logFilePath;
-    bool logFileBecauseDebug = false;
 
     supressThrowFromNew();
 
@@ -1920,7 +1920,6 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE, _In_ LPST
             // from the perm arena like all other flag strings (~Flags frees nothing)
             flags.logFile = str::Dup(GetPermArena(), StrL("sumlog.txt"));
             flags.log = true;
-            logFileBecauseDebug = true;
         }
     }
     if (flags.log && !noLogHere) {
@@ -2130,6 +2129,14 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE, _In_ LPST
     ReRegisterFileAssociations();
 
     gRenderCache = new RenderCache();
+
+    if (IsMacTypeLoaded()) {
+        // MacType hooks IDWriteFactory / ID2D1RenderTarget vtables for font
+        // beautification; its hooked Release() cleanup can corrupt the process
+        // heap during D2D/DWrite teardown (STATUS_HEAP_CORRUPTION in ntdll).
+        // We compensate at shutdown (SEH-protected Release + fast exit below).
+        log("MacType detected: D2D/DWrite Release() sites are SEH-protected, exit will be fast\n");
+    }
 
 #ifdef _MSC_VER
     // Initialize GPU compositing backend (Direct2D). If it fails (no GPU driver,
@@ -2490,10 +2497,21 @@ Exit:
     LogArenaStats("temp allocator", GetTempArena());
     LogArenaStats("perm arena", gPermArena);
 
-    if (!logFileBecauseDebug) {
-        LaunchFileIfExists(logFilePath);
-    }
+    // Don't auto-open the log file at exit: ShellExecuteExW() can block indefinitely
+    // on shell IPC once the message loop is gone and the windows are destroyed
+    // (observed stuck in windows_storage!RealShellExecuteA/NtUserMsgWaitForMultipleObjectsEx;
+    // even a bounded helper-thread launch deadlocks the process heap). The log file is
+    // written to the path given with -log-to-file regardless; a hung exit is worse than
+    // not opening it.
     str::FreePtr(&logFilePath);
+    if (IsMacTypeLoaded()) {
+        // MacType's hooked Release() can corrupt the heap while we tear down
+        // D2D/DWrite objects (STATUS_HEAP_CORRUPTION in ntdll.dll). Skip the
+        // deep cleanup: settings were already saved when the last window
+        // closed and the OS reclaims everything at process exit.
+        log("MacType detected: fast-exiting to skip D2D/DWrite teardown\n");
+        fastExit = true;
+    }
     if (AreDangerousThreadsPending()) {
         if (gIsDebugBuild) {
             // in debug builds wait for the threads instead of fast-exiting so

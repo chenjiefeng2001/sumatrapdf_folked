@@ -578,6 +578,20 @@ static LONG WINAPI CrashDumpVectoredExceptionHandler(EXCEPTION_POINTERS* excepti
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
+    // On Win10+ the heap manager raises STATUS_HEAP_CORRUPTION while still
+    // holding the process-heap lock (RtlpLogHeapFailure -> RtlRaiseException).
+    // Any allocation from here would deadlock: log() -> OutputDebugStringA ->
+    // CreateDBWinMutex -> GlobalAlloc, and MiniDumpWriteDump on the dump thread
+    // (observed hang in RtlpAcquireSRWLockExclusiveContended during teardown).
+    // The heap is corrupt beyond recovery, so terminate immediately instead of
+    // hanging. On older Windows the failure path doesn't hold the lock, so the
+    // full crash handling below (dump + message) still works there.
+    OSVERSIONINFOEX ver{};
+    if (GetOsVersion(ver) && ver.dwMajorVersion >= 10) {
+        TerminateProcess(GetCurrentProcess(), 1);
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
     if (!TryStartCrashHandling("CrashDumpVectoredExceptionHandler")) {
         return EXCEPTION_CONTINUE_SEARCH; // Note: or should TerminateProcess()?
     }

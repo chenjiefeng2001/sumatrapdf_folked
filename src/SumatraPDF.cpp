@@ -13,6 +13,7 @@
 #include "base/Thread.h"
 #include "base/UITask.h"
 #include "base/Win.h"
+#include "base/ComSafe.h"
 #include "base/GdiPlus.h"
 #include "base/Archive.h"
 #include "base/Timer.h"
@@ -2284,9 +2285,40 @@ void DeleteMainWindow(MainWindow* win) {
     ReportIf(win->findThread && WaitForSingleObject(win->findThread, 0) == WAIT_TIMEOUT);
     ReportIf(win->printThread && WaitForSingleObject(win->printThread, 0) == WAIT_TIMEOUT);
 
+    // Freeze background work that could touch this window's UI/D2D state while
+    // it's being torn down:
+    // 1. unsubscribe file watchers first, so the FileWatcher thread can no
+    //    longer post ReloadTab tasks for this window's tabs (~WindowTab
+    //    unsubscribes them as well, but doing it up-front guarantees no
+    //    watcher callback races with the teardown below).
+    for (WindowTab* tab : win->Tabs()) {
+        if (tab->watcher) {
+            FileWatcherUnsubscribe(tab->watcher);
+            tab->watcher = nullptr;
+        }
+    }
+    // 2. drain the ui task queue now that win is no longer in gWindows: every
+    //    queued task that captured a win/tab pointer validates it first
+    //    (IsMainWindowValid / FindMainWindowByTab) and bails, so nothing can
+    //    dereference this window's freed memory after delete win below.
+    logf("DeleteMainWindow: draining ui task queue (win 0x%p removed from gWindows)\n", win);
+    uitask::DrainQueue();
+
     if (win->uiaProvider) {
         // tell UIA to release all objects cached in its store
         UiaReturnRawElementProvider(win->hwndCanvas, 0, 0, nullptr);
+    }
+
+    if (IsMacTypeLoaded()) {
+        // ~MainWindow tears down the D2D render target, DWrite text and other
+        // UI objects; MacType's hooked Release() corrupts the process heap while
+        // doing so (STATUS_HEAP_CORRUPTION in ntdll.dll, seen on Win7 SP1 during
+        // "~MainWindow: destroy tabsCtrl"). Settings were already saved by
+        // CloseWindow(), so skip the teardown entirely: when this is the last
+        // window the process exits right after anyway (fast exit), otherwise the
+        // window object is intentionally leaked to avoid the crash.
+        logf("DeleteMainWindow: MacType detected, skipping window teardown to avoid heap corruption\n");
+        return;
     }
 
     delete win;

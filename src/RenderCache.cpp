@@ -8,6 +8,7 @@
 #include "base/File.h"
 #include "base/UITask.h"
 #include "base/Timer.h"
+#include "base/ComSafe.h"
 
 #include "wingui/UIModels.h"
 
@@ -63,7 +64,9 @@ static void FlushSafeD2dReleases() {
     gD2dReleaseHead = nullptr;
     LeaveCriticalSection(&gD2dReleaseCS);
     while (node) {
-        node->obj->Release();
+        // SEH-wrapped: MacType's hooked Release() can corrupt the heap while
+        // unwinding its own allocations (see base/ComSafe.h).
+        SafeReleaseSeh(&node->obj);
         DeferredReleaseNode* next = node->next;
         HeapFree(GetProcessHeap(), 0, node);
         node = next;
@@ -183,6 +186,14 @@ RenderCache::~RenderCache() {
                requestCount, cacheCount);
         ReportIf(true);
     }
+
+#ifdef _MSC_VER
+    // Release any ID2D1Bitmaps that were queued but never flushed (the UI
+    // thread flushes at each PaintTile; after the last paint some may remain).
+    // Runs here on the main thread, after the render threads exited, so every
+    // D2D resource is released on the thread that owns the D2D factory.
+    FlushSafeD2dReleases();
+#endif
 
     DeleteCriticalSection(&cacheAccess);
     DeleteCriticalSection(&requestAccess);

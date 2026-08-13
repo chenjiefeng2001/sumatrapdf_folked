@@ -158,6 +158,10 @@ HMENU GetReadAloudContextSubmenu();
 bool CanCloseWindow(MainWindow* win);
 void CloseWindow(MainWindow* win, bool quitIfLast, bool forceClose);
 void SetSidebarVisibility(MainWindow* win, bool tocVisible, bool showFavorites, bool relayout = true);
+// Relayout the frame with an explicit (possibly animated) sidebar width; used
+// by the Canvas WM_TIMER tick while the sidebar slide-in/out animation runs.
+// sidebarDx < 0 keeps the previous default-width behavior.
+void RelayoutSidebarAnimated(MainWindow* win, int sidebarDx);
 void RememberFavTreeExpansionState(MainWindow* win);
 void AdvanceFocus(MainWindow* win);
 void SetCurrentLanguageAndRefreshUI(Str langCode);

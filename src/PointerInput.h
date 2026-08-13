@@ -92,6 +92,12 @@ struct PointerWheelInfoMin {
 // promote the message to WM_MOUSEWHEEL).
 bool GetPointerWheelDelta(UINT32 pointerId, INT32* deltaOut);
 
+// Returns up to maxCount pointer positions (screen coordinates) of the frame
+// containing pointerId. Returns the actual number of pointers in the frame
+// (capped at maxCount). Used for multi-touch pinch-to-zoom. Returns 0 when the
+// frame API isn't available or there are no pointers.
+int GetPointerFramePoints(UINT32 pointerId, POINT* ptsOut, int maxCount);
+
 // State for tracking velocity during pointer wheel or pan gestures.
 // Used by the inertial scrolling system to produce smooth deceleration.
 struct PointerVelocityTracker {

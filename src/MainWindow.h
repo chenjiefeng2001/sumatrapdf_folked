@@ -25,6 +25,7 @@ struct OverscrollState;
 struct PointerVelocityTracker;
 struct ThumbnailPanel;
 struct AnimationManager;
+struct AnimProp;
 struct DocController;
 struct DisplayModel;
 struct ChmModel;
@@ -437,6 +438,17 @@ struct MainWindow {
     struct OverscrollState* overscroll = nullptr;
     struct PointerVelocityTracker* pointerVelocity = nullptr;
 
+    // Phase 3: last touch-pan position in canvas client coords, per-window.
+    // Kept on the window (not static) so multiple canvases don't cross-talk
+    // (a pan started in one window used another window's last position).
+    double panLastX = 0;
+    double panLastY = 0;
+
+    // Phase 3: multi-touch pinch-to-zoom state (see Canvas::OnPointerMessage).
+    bool pinchActive = false;
+    float pinchStartZoom = 0; // zoom level (%) when the pinch gesture started
+    float pinchLastDist = 0;  // distance between the two touch points (last)
+
     // Phase 4: Visual - custom non-client area with rounded corners
     bool borderless = false;      // true when using custom titlebar
     int captionButtonsHeight = 0; // height of caption buttons area
@@ -447,6 +459,20 @@ struct MainWindow {
 
     // Animation framework (Phase 1)
     struct AnimationManager* animMgr = nullptr;
+
+    // Phase 3: sidebar slide-in/out animation. sidebarAnimDx is the animated
+    // width driven by animMgr's per-window timer (see Canvas WM_TIMER handling);
+    // RelayoutFrame is called with it every tick while sidebarAnim is active.
+    struct AnimProp* sidebarAnim = nullptr;
+    float sidebarAnimDx = 0;
+
+    // Phase 3: page fade-in animation after page navigation. pageFade goes
+    // 0 -> 1 over ~200ms; the canvas overlays its background at (1 - pageFade)
+    // opacity each frame so the freshly shown page fades in. lastPaintPageNo
+    // detects a page change and (re)starts the transition.
+    struct AnimProp* pageFadeAnim = nullptr;
+    float pageFade = 1.0f;
+    int lastPaintPageNo = 0;
 
     // Damage-tracking for incremental repaint (Phase 5)
     RECT dirtyRect{};

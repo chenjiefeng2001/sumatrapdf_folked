@@ -95,6 +95,8 @@ MainWindow::MainWindow(HWND hwnd) {
     linkHandler = new LinkHandler(this);
     cbHandler = CreateControllerCallbackHandler(this);
     animMgr = new AnimationManager(hwndFrame);
+    sidebarAnim = new AnimProp();
+    pageFadeAnim = new AnimProp();
     inertiaScroll = new InertiaScrollState();
     overscroll = new OverscrollState();
     pointerVelocity = new PointerVelocityTracker();
@@ -199,6 +201,10 @@ MainWindow::~MainWindow() {
     // cbHandler is passed into DocController and must be deleted afterwards
     // (all controllers should have been deleted prior to MainWindow, though)
     delete cbHandler;
+
+    delete sidebarAnim;
+    delete pageFadeAnim;
+    delete animMgr;
 
     delete frameRateWnd;
     ReadAloudPlaybackBarDestroy(this);

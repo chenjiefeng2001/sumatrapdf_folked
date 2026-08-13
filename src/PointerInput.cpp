@@ -96,6 +96,29 @@ bool GetPointerWheelDelta(UINT32 pointerId, INT32* deltaOut) {
     return true;
 }
 
+int GetPointerFramePoints(UINT32 pointerId, POINT* ptsOut, int maxCount) {
+    if (!ptsOut || maxCount <= 0) {
+        return 0;
+    }
+    EnsurePointerFrameInfoLoaded();
+    if (!gFnGetPointerFrameInfo) {
+        return 0;
+    }
+    PointerInfoMin info[2] = {};
+    UINT32 count = (UINT32)std::min(maxCount, 2);
+    if (!gFnGetPointerFrameInfo(pointerId, &count, info)) {
+        return 0;
+    }
+    int n = (int)count;
+    if (n > maxCount) {
+        n = maxCount;
+    }
+    for (int i = 0; i < n; i++) {
+        ptsOut[i] = info[i].ptPixelLocation;
+    }
+    return n;
+}
+
 void PointerVelocityTracker::Init() {
     velocityX = 0;
     velocityY = 0;

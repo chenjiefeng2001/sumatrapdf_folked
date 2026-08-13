@@ -68,6 +68,7 @@
 #include "CrashHandler.h"
 #include "ExternalViewers.h"
 #include "Favorites.h"
+#include "wingui/Animation.h"
 #include "FileThumbnails.h"
 #include "Menu.h"
 #include "Print.h"
@@ -4832,17 +4833,23 @@ static void RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
     bool tocVisible = win->tocVisible;
     if (tocVisible || favVisible) {
         Size toc = ClientRect(win->hwndTocBox).Size();
-        if (sidebarDx > 0) {
+        if (sidebarDx >= 0) {
+            // animated (slide-in/out) width, possibly 0
             toc = Size(sidebarDx, rc.y);
         }
-        if (0 == toc.dx) {
+        if (0 == toc.dx && sidebarDx < 0) {
             // TODO: use saved sidebarDx from saved preferences?
             toc.dx = rc.dx / 4;
         }
         // make sure that the sidebar is never too wide or too narrow
         // note: requires that the main frame is at least 2 * kSidebarMinDx
         //       wide (cf. OnFrameGetMinMaxInfo)
-        toc.dx = limitValue(toc.dx, kSidebarMinDx, rc.dx / 2);
+        if (sidebarDx >= 0) {
+            // during animation the width may be below kSidebarMinDx; only clamp the max
+            toc.dx = limitValue(toc.dx, 0, rc.dx / 2);
+        } else {
+            toc.dx = limitValue(toc.dx, kSidebarMinDx, rc.dx / 2);
+        }
 
         toc.dy = 0;
         if (tocVisible) {
@@ -6182,6 +6189,11 @@ static void OnSidebarSplitterMove(Splitter::MoveEvent* ev) {
     HWND hwnd = splitter->hwnd;
     MainWindow* win = FindMainWindowByHwnd(hwnd);
 
+    // user drag overrides any in-flight slide animation
+    if (win->sidebarAnim) {
+        win->sidebarAnim->active = false;
+    }
+
     Point pcur = HwndGetCursorPos(win->hwndFrame);
     int sidebarDx = pcur.x; // without splitter
 
@@ -6264,6 +6276,7 @@ void SetSidebarVisibility(MainWindow* win, bool tocVisible, bool showFavorites, 
     } else if (PM_ENABLED == win->presentation) {
         win->CurrentTab()->showTocPresentation = tocVisible;
     }
+    bool sidebarWasVisible = win->tocVisible || gGlobalPrefs->showFavorites; // capture before overwrite
     win->tocVisible = tocVisible;
 
     // TODO: make this a per-window setting as well?
@@ -6274,6 +6287,47 @@ void SetSidebarVisibility(MainWindow* win, bool tocVisible, bool showFavorites, 
     }
     if (win->favTreeView && win->favTreeView->hwnd && !showFavorites && HwndIsFocused(win->favTreeView->hwnd)) {
         HwndSetFocus(win->hwndFrame);
+    }
+
+    // Phase 3: sidebar slide-in/out animation. Only for interactive toggles
+    // (visibility actually changes); startup/restore calls take the instant path.
+    bool wantVisible = tocVisible || showFavorites;
+    if (relayout && win->animMgr && win->sidebarAnim && AnimationsEnabled() && win->CurrentTab() &&
+        (wantVisible != sidebarWasVisible)) {
+        // keep the sidebar windows visible while the width animates; a closing
+        // animation hides them from the Canvas WM_TIMER tick when it finishes
+        if (win->sidebarSplitter) {
+            HwndSetVisibility(win->sidebarSplitter->hwnd, true);
+            win->sidebarSplitter->isLive = true;
+        }
+        HwndSetVisibility(win->hwndTocBox, true);
+        if (win->favSplitter) {
+            HwndSetVisibility(win->favSplitter->hwnd, true);
+            win->favSplitter->isLive = true;
+        }
+        HwndSetVisibility(win->hwndFavBox, true);
+
+        // start the width transition. Reopening starts from 0; a repeated toggle
+        // during an in-flight animation continues from the current animated value.
+        float fromDx = win->sidebarAnim->active ? win->sidebarAnimDx : (float)ClientRect(win->hwndTocBox).dx;
+        if (!sidebarWasVisible) {
+            fromDx = 0;
+        }
+        float targetDx = wantVisible ? (float)std::max(kSidebarMinDx, ClientRect(win->hwndTocBox).dx) : 0;
+        win->sidebarAnimDx = fromDx;
+        win->sidebarAnim->Animate(&win->sidebarAnimDx, targetDx, 180);
+        // The animation timer is (re)started from Tick(); pump one tick now so a
+        // freshly started animation doesn't wait for a WM_TIMER that never fires.
+        win->animMgr->Tick();
+        // lay out immediately at the starting width so the canvas doesn't jump
+        RelayoutFrame(win, false, (int)win->sidebarAnimDx);
+        if (tocVisible) {
+            RedrawWindow(win->hwndTocBox, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN);
+        }
+        if (showFavorites) {
+            RedrawWindow(win->hwndFavBox, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN);
+        }
+        return;
     }
 
     if (win->sidebarSplitter && win->sidebarSplitter->hwnd) {
@@ -6303,6 +6357,12 @@ void SetSidebarVisibility(MainWindow* win, bool tocVisible, bool showFavorites, 
             InvalidateRect(win->favSplitter->hwnd, nullptr, TRUE);
         }
     }
+}
+
+// Relayout helper for the sidebar slide animation: driven by the Canvas
+// WM_TIMER tick every frame while win->sidebarAnim is active.
+void RelayoutSidebarAnimated(MainWindow* win, int sidebarDx) {
+    RelayoutFrame(win, false, sidebarDx);
 }
 
 // if url-encoded s is bigger than a reasonable URL path,

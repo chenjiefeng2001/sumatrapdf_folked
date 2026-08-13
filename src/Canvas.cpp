@@ -40,6 +40,7 @@
 #include "GpuBackend.h"
 #endif
 #include "Theme.h"
+#include "HardwareProfile.h"
 #include "GlobalPrefs.h"
 #include "RenderCache.h"
 #include "ProgressUpdateUI.h"
@@ -2272,6 +2273,23 @@ static bool DrawDocument(MainWindow* win, HDC hdc, RECT* rcArea) {
     if (!rendering) {
         DebugShowLinks(dm, hdc);
     }
+
+    // Phase 3: page fade-in after navigation — overlay the canvas background at
+    // (1 - pageFade) opacity so a freshly shown page fades in from the background.
+    // GDI+ alpha-blends onto the memory DC; in GDI-only builds the overlay is
+    // skipped when pageFade is already 1.0 (i.e. no animation in flight).
+    if (win->pageFadeAnim && win->pageFadeAnim->active && win->pageFade < 1.0f) {
+        COLORREF fadeCol = colDocBg;
+        if (fadeCol == kColorUnset) {
+            ThemeDocumentColors(fadeCol); // fills in the default canvas background
+        }
+        BYTE alpha = (BYTE)((1.0f - win->pageFade) * 255.0f);
+        Gdiplus::Color gcol(alpha, GetRValue(fadeCol), GetGValue(fadeCol), GetBValue(fadeCol));
+        Gdiplus::Graphics gfx(hdc);
+        Gdiplus::SolidBrush br(gcol);
+        gfx.FillRectangle(&br, (Gdiplus::REAL)rcArea->left, (Gdiplus::REAL)rcArea->top,
+                          (Gdiplus::REAL)(rcArea->right - rcArea->left), (Gdiplus::REAL)(rcArea->bottom - rcArea->top));
+    }
     return shouldPaint;
 }
 
@@ -2294,6 +2312,19 @@ static void OnPaintDocument(MainWindow* win) {
             FillRect(hdc, &ps.rcPaint, GetStockBrush(WHITE_BRUSH));
             break;
         default:
+            // Phase 3: page fade-in — start the transition when the displayed
+            // page changes (page navigation). Scroll / zoom repaints keep the
+            // same page and don't restart it. The animation timer is pumped once
+            // here so WM_TIMER starts delivering frames for the fade.
+            int curPageNo = win->AsFixed() ? win->AsFixed()->CurrentPageNo() : 0;
+            if (win->pageFadeAnim && curPageNo > 0 && curPageNo != win->lastPaintPageNo && AnimationsEnabled()) {
+                win->lastPaintPageNo = curPageNo;
+                win->pageFade = 0;
+                win->pageFadeAnim->Animate(&win->pageFade, 1.0f, 200, Easing::EaseOutQuad);
+                if (win->animMgr) {
+                    win->animMgr->Tick(); // (re)start the per-window animation timer
+                }
+            }
             bool shouldPaint = DrawDocument(win, win->buffer->GetDC(), &ps.rcPaint);
             if (!gNoFlickerRender || shouldPaint) {
                 // Use dirty-rect clipped Blt to avoid full-screen copy on low-end HW
@@ -3070,10 +3101,62 @@ static bool OnPointerMessage(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LP
             goto penEmulation;
         }
 
+        // Multi-touch pinch-to-zoom (touch only): when two contacts are present
+        // in the same pointer frame, scale the zoom around their midpoint
+        // instead of panning. A single contact (or no contact) falls through to
+        // the pan/inertia path below.
+        if (pointerType == SUMATRA_PT_TOUCH) {
+            POINT pinchPts[2];
+            int nPinch = GetPointerFramePoints(pointerId, pinchPts, 2);
+            if (nPinch >= 2) {
+                if (msg == WM_POINTERUP) {
+                    win->pinchActive = false;
+                    return true;
+                }
+                float dx = (float)(pinchPts[1].x - pinchPts[0].x);
+                float dy = (float)(pinchPts[1].y - pinchPts[0].y);
+                float dist = sqrtf(dx * dx + dy * dy);
+                if (msg == WM_POINTERDOWN || !win->pinchActive) {
+                    // first frame of the pinch: remember the baseline
+                    win->pinchActive = true;
+                    win->pinchLastDist = dist;
+                    win->pinchStartZoom = dm->GetZoomVirtual(true);
+                } else if (dist > 0 && win->pinchLastDist > 0 && fabsf(dist - win->pinchLastDist) >= 0.5f) {
+                    // incremental ratio against the previous frame keeps the
+                    // sensitivity independent of the absolute finger distance
+                    float newZoom = win->pinchStartZoom * (dist / win->pinchLastDist);
+                    newZoom = limitValue(newZoom, kZoomMin, kZoomMax);
+                    POINT mid = {(pinchPts[0].x + pinchPts[1].x) / 2, (pinchPts[0].y + pinchPts[1].y) / 2};
+                    ScreenToClient(hwnd, &mid);
+                    Point fixPt(mid.x, mid.y);
+                    dm->SetZoomVirtual(newZoom, &fixPt);
+                    win->pinchLastDist = dist;
+                }
+                // don't pan while pinching; keep the pan origin in sync so a
+                // single-finger pan right afterwards doesn't jump
+                win->panLastX = x;
+                win->panLastY = y;
+                return true;
+            }
+            // back to a single contact (or none): end the pinch and drop any
+            // stale velocity so the pan/inertia path starts clean
+            if (win->pinchActive) {
+                win->pinchActive = false;
+                win->pointerVelocity->Init();
+                win->panLastX = x;
+                win->panLastY = y;
+            }
+        }
+
         if (msg == WM_POINTERDOWN) {
             win->inertiaScroll->Stop();
             KillTimer(hwnd, kInertiaScrollTimerID);
             win->pointerVelocity->Init();
+            // reset the pan origin for this window/gesture so the first
+            // WM_POINTERUPDATE computes a correct delta (per-window, see
+            // panLastX/panLastY on MainWindow)
+            win->panLastX = x;
+            win->panLastY = y;
             return true;
         }
 
@@ -3090,16 +3173,13 @@ static bool OnPointerMessage(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LP
             QueryPerformanceCounter(&now);
             win->pointerVelocity->AddSample(x, y, now);
 
-            static double lastPanX = 0, lastPanY = 0;
-            if (win->pointerVelocity->lastTime.QuadPart != 0) {
-                double dx = x - lastPanX;
-                double dy = y - lastPanY;
-                if (fabs(dx) >= 0.5 || fabs(dy) >= 0.5) {
-                    win->MoveDocBy((int)round(dx), (int)round(dy));
-                }
+            double dx = x - win->panLastX;
+            double dy = y - win->panLastY;
+            if (fabs(dx) >= 0.5 || fabs(dy) >= 0.5) {
+                win->MoveDocBy((int)round(dx), (int)round(dy));
             }
-            lastPanX = (double)x;
-            lastPanY = (double)y;
+            win->panLastX = (double)x;
+            win->panLastY = (double)y;
             return true;
         }
 
@@ -3473,7 +3553,30 @@ static void OnTimer(MainWindow* win, HWND hwnd, WPARAM timerId) {
 
         case AnimationManager::kAnimTimerID: {
             if (win->animMgr) {
+                bool sidebarWasActive = win->sidebarAnim ? win->sidebarAnim->active : false;
                 int stillActive = win->animMgr->Tick();
+                // Phase 3: sidebar slide-in/out animation. Relayout the frame with
+                // the animated width every tick; when the animation ends, hide the
+                // sidebar windows if it closed all the way down.
+                if (win->sidebarAnim && sidebarWasActive) {
+                    RelayoutSidebarAnimated(win, (int)win->sidebarAnimDx);
+                    if (!win->sidebarAnim->active) {
+                        bool wantVisible = win->tocVisible || gGlobalPrefs->showFavorites;
+                        if (!wantVisible) {
+                            if (win->sidebarSplitter) {
+                                HwndSetVisibility(win->sidebarSplitter->hwnd, false);
+                            }
+                            HwndSetVisibility(win->hwndTocBox, false);
+                            HwndSetVisibility(win->hwndFavBox, false);
+                            if (win->favSplitter) {
+                                HwndSetVisibility(win->favSplitter->hwnd, false);
+                            }
+                        }
+                        // final layout pass (tocVisible is already false, so a
+                        // closed sidebar stays hidden)
+                        RelayoutSidebarAnimated(win, -1);
+                    }
+                }
                 if (stillActive > 0) {
                     // Schedule repaint to reflect animated values
                     ScheduleRepaint(win, 0);

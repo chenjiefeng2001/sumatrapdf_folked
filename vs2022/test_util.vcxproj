@@ -878,6 +878,7 @@
     </ProjectReference>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="..\src\CommandPaletteScoring.h" />
     <ClInclude Include="..\src\Commands.h" />
     <ClInclude Include="..\src\DisplayMode.h" />
     <ClInclude Include="..\src\Flags.h" />
@@ -886,6 +887,7 @@
     <ClInclude Include="..\src\RefHoverTextDetect.h" />
     <ClInclude Include="..\src\SumatraConfig.h" />
     <ClInclude Include="..\src\WindowLifecycle.h" />
+    <ClInclude Include="..\src\base\AnnotHitTest.h" />
     <ClInclude Include="..\src\base\Arena.h" />
     <ClInclude Include="..\src\base\Base.h" />
     <ClInclude Include="..\src\base\BitManip.h" />
@@ -927,6 +929,7 @@
     <ClCompile Include="..\src\RefHoverTextDetect.cpp" />
     <ClCompile Include="..\src\SumatraConfig.cpp" />
     <ClCompile Include="..\src\SumatraUnitTests.cpp" />
+    <ClCompile Include="..\src\base\AnnotHitTest.cpp" />
     <ClCompile Include="..\src\base\Arena.cpp" />
     <ClCompile Include="..\src\base\Base.cpp" />
     <ClCompile Include="..\src\base\ByteOrderDecoder.cpp" />
@@ -954,11 +957,14 @@
     <ClCompile Include="..\src\base\UtAssert.cpp" />
     <ClCompile Include="..\src\base\Win.cpp" />
     <ClCompile Include="..\src\base\WinDynCalls.cpp" />
+    <ClCompile Include="..\src\base\tests\AnnotHitTest_ut.cpp" />
     <ClCompile Include="..\src\base\tests\Base_ut.cpp" />
     <ClCompile Include="..\src\base\tests\ByteOrderDecoder_ut.cpp" />
+    <ClCompile Include="..\src\base\tests\CommandPaletteScoring_ut.cpp" />
     <ClCompile Include="..\src\base\tests\Crypto_ut.cpp" />
     <ClCompile Include="..\src\base\tests\CssParser_ut.cpp" />
     <ClCompile Include="..\src\base\tests\Dict_ut.cpp" />
+    <ClCompile Include="..\src\base\tests\ElasticLayout_ut.cpp" />
     <ClCompile Include="..\src\base\tests\File_ut.cpp" />
     <ClCompile Include="..\src\base\tests\GpuBackend_ut.cpp" />
     <ClCompile Include="..\src\base\tests\HardwareProfile_ut.cpp" />
@@ -981,6 +987,7 @@
     </ClCompile>
     <ClCompile Include="..\src\tools\test_util.cpp" />
     <ClCompile Include="..\src\wingui\DWriteText.cpp" />
+    <ClCompile Include="..\src\wingui\Layout.cpp" />
     <ClCompile Include="..\src\wingui\Renderer.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

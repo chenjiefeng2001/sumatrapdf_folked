@@ -970,6 +970,7 @@ end
 
 function base_files()
   files_in_dir("src/base", {
+    "AnnotHitTest.*",
     "ApiHook.*",
     "Archive.*",
     "Arena.*",
@@ -982,6 +983,7 @@ function base_files()
     "ByteWriter.*",
     "CmdLineArgsIter.*",
     "Color.*",
+    "ComSafe.h",
     "Crypto.*",
     "CssParser.*",
     "DbgHelpDyn.*",
@@ -1416,6 +1418,7 @@ function test_util_files()
     "log.cpp",
   })
   files_in_dir("src/base", {
+    "AnnotHitTest.*",
     "Arena.*",
     "Base.*",
     "BitManip.*",
@@ -1457,6 +1460,7 @@ function test_util_files()
     "Flags.*",
     "RefHoverDetect.*",
     "RefHoverTextDetect.*",
+    "CommandPaletteScoring.h",
     "HardwareProfile.h",
     "WindowLifecycle.h",
     "SettingsStructs.*",
@@ -1465,6 +1469,7 @@ function test_util_files()
     "SumatraUnitTests.cpp",
     "tools/test_util.cpp",
     "wingui/DWriteText.cpp",
+    "wingui/Layout.cpp",
     "wingui/Renderer.cpp",
   })
 end

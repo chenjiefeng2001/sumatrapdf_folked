@@ -846,6 +846,7 @@
     </ProjectReference>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="..\src\base\AnnotHitTest.h" />
     <ClInclude Include="..\src\base\Archive.h" />
     <ClInclude Include="..\src\base\Arena.h" />
     <ClInclude Include="..\src\base\AvifReader.h" />
@@ -857,6 +858,7 @@
     <ClInclude Include="..\src\base\ByteWriter.h" />
     <ClInclude Include="..\src\base\CmdLineArgsIter.h" />
     <ClInclude Include="..\src\base\Color.h" />
+    <ClInclude Include="..\src\base\ComSafe.h" />
     <ClInclude Include="..\src\base\Crypto.h" />
     <ClInclude Include="..\src\base\CssParser.h" />
     <ClInclude Include="..\src\base\DbgHelpDyn.h" />
@@ -897,6 +899,7 @@
     <ClInclude Include="..\src\base\windrawlib.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="..\src\base\AnnotHitTest.cpp" />
     <ClCompile Include="..\src\base\Archive.cpp" />
     <ClCompile Include="..\src\base\Arena.cpp" />
     <ClCompile Include="..\src\base\AvifReader.cpp" />

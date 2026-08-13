@@ -18,6 +18,7 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="..\src\CommandPaletteScoring.h" />
     <ClInclude Include="..\src\Commands.h" />
     <ClInclude Include="..\src\DisplayMode.h" />
     <ClInclude Include="..\src\Flags.h" />
@@ -26,6 +27,9 @@
     <ClInclude Include="..\src\RefHoverTextDetect.h" />
     <ClInclude Include="..\src\SumatraConfig.h" />
     <ClInclude Include="..\src\WindowLifecycle.h" />
+    <ClInclude Include="..\src\base\AnnotHitTest.h">
+      <Filter>base</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\base\Arena.h">
       <Filter>base</Filter>
     </ClInclude>
@@ -129,6 +133,9 @@
     <ClCompile Include="..\src\RefHoverTextDetect.cpp" />
     <ClCompile Include="..\src\SumatraConfig.cpp" />
     <ClCompile Include="..\src\SumatraUnitTests.cpp" />
+    <ClCompile Include="..\src\base\AnnotHitTest.cpp">
+      <Filter>base</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\base\Arena.cpp">
       <Filter>base</Filter>
     </ClCompile>
@@ -210,10 +217,16 @@
     <ClCompile Include="..\src\base\WinDynCalls.cpp">
       <Filter>base</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\base\tests\AnnotHitTest_ut.cpp">
+      <Filter>base\tests</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\base\tests\Base_ut.cpp">
       <Filter>base\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\tests\ByteOrderDecoder_ut.cpp">
+      <Filter>base\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\tests\CommandPaletteScoring_ut.cpp">
       <Filter>base\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\tests\Crypto_ut.cpp">
@@ -223,6 +236,9 @@
       <Filter>base\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\tests\Dict_ut.cpp">
+      <Filter>base\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\tests\ElasticLayout_ut.cpp">
       <Filter>base\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\tests\File_ut.cpp">
@@ -283,6 +299,9 @@
       <Filter>tools</Filter>
     </ClCompile>
     <ClCompile Include="..\src\wingui\DWriteText.cpp">
+      <Filter>wingui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\wingui\Layout.cpp">
       <Filter>wingui</Filter>
     </ClCompile>
     <ClCompile Include="..\src\wingui\Renderer.cpp">

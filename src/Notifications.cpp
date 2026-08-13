@@ -18,6 +18,8 @@
 #include "Notifications.h"
 #include "TipText.h"
 #include "Theme.h"
+#include "HardwareProfile.h"
+#include "wingui/Renderer.h"
 
 #include "base/Log.h"
 
@@ -46,6 +48,7 @@ constexpr int kTopLeftMargin = 8;
 
 constexpr UINT_PTR kNotifTimerTimeoutId = 1;
 constexpr UINT_PTR kNotifTimerDelayId = 2;
+constexpr UINT_PTR kNotifTimerSlideInId = 3;
 
 struct NotificationWnd : Wnd {
     NotificationWnd() = default;
@@ -60,7 +63,12 @@ struct NotificationWnd : Wnd {
     void UpdateMessage(Str msg, int timeoutMs = 0, bool highlight = false);
 
     bool HasProgress() const { return progressPerc >= 0; }
-    void Layout(Str message);
+    // keepWidth=true (default): called from UpdateMessage when the content
+    // changed; the window keeps its previous width/height so progress-style
+    // updates don't flicker. keepWidth=false: called from RelayoutNotifications
+    // when the parent window was resized; the notification re-wraps against the
+    // new canvas width in both directions (wider expands, narrower re-wraps).
+    void Layout(Str message, bool keepWidth = true);
 
     int timeoutMs = kNotifDefaultTimeOut; // 0 means no timeout
 
@@ -89,6 +97,16 @@ struct NotificationWnd : Wnd {
     int delayInMs = 0;
     UINT_PTR delayTimerId = 0;
 
+    // Phase 3: slide-in animation state. When a notification first becomes
+    // visible it slides from an offset position to its final spot over ~150ms,
+    // driven by kNotifTimerSlideInId. slideFrom/slideTo are in parent
+    // (canvas) coordinates.
+    bool isSlidingIn = false;
+    float slideT = 0; // 0..1 eased progress
+    Rect slideFrom;
+    Rect slideTo;
+    UINT_PTR slideTimerId = 0;
+
     // message parsed for the extended tip syntax (links, Key/ shortcuts);
     // drawRich is true when it contains clickable links
     ParsedTip parsedMsg;
@@ -99,6 +117,11 @@ struct NotificationWnd : Wnd {
     Rect rProgress;
     // DT_* format for drawing the message, set in Layout()
     uint txtFmt = DT_SINGLELINE | DT_NOPREFIX;
+
+    // width of the parent (canvas) client area at the last Layout(); -1 until
+    // first layout. RelayoutNotifications uses it to detect a parent resize and
+    // re-lay-out the notification against the new width (elastic width).
+    int lastParentDx = -1;
 };
 
 constexpr int kMaxNotifs = 128;
@@ -131,6 +154,38 @@ static int GetForSameHwnd(NotificationWnd* wnd, NotificationWnd* wnds[kMaxNotifs
     return GetForHwnd(parent, wnds);
 }
 
+// Phase 3: slide-in animation for a notification that just became visible.
+// The window has already been positioned at its final spot by RelayoutNotifications;
+// we record that spot, offset the window back, and animate it forward via a timer.
+static void StartSlideIn(NotificationWnd* wnd) {
+    if (!AnimationsEnabled()) {
+        return;
+    }
+    HWND parent = GetParent(wnd->hwnd);
+    Rect to = MapRectToWindow(WindowRect(wnd->hwnd), HWND_DESKTOP, parent);
+    Rect from = to;
+    bool atBottom = (wnd->corner == NotifCorner::BottomLeft) || (wnd->corner == NotifCorner::BottomRight);
+    bool atRight = (wnd->corner == NotifCorner::TopRight) || (wnd->corner == NotifCorner::BottomRight);
+    int offset = DpiScale(wnd->hwnd, 20);
+    if (atBottom) {
+        from.y += offset;
+    } else {
+        from.y -= offset;
+    }
+    if (atRight) {
+        from.x += offset;
+    } else {
+        from.x -= offset;
+    }
+    wnd->isSlidingIn = true;
+    wnd->slideT = 0;
+    wnd->slideFrom = from;
+    wnd->slideTo = to;
+    uint flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE;
+    SetWindowPos(wnd->hwnd, nullptr, from.x, from.y, 0, 0, flags);
+    wnd->slideTimerId = SetTimer(wnd->hwnd, kNotifTimerSlideInId, 16, nullptr);
+}
+
 // hwndCanvas is the parent of the notification windows
 void RelayoutNotifications(HWND hwndCanvas) {
     NotificationWnd* wnds[kMaxNotifs];
@@ -158,11 +213,13 @@ void RelayoutNotifications(HWND hwndCanvas) {
         int xMargin = DpiScale(hwndCanvas, wnd->xMargin);
         int yMargin = DpiScale(hwndCanvas, wnd->yMargin);
         Rect rect = WindowRect(wnd->hwnd);
-        // re-wrap the message if the notification no longer fits
-        // (e.g. when the window was made smaller, issue #2916)
-        int maxDx = frame.dx - (2 * xMargin);
-        if (maxDx > 0 && rect.dx > maxDx) {
-            wnd->Layout(HwndGetTextTemp(wnd->hwnd));
+        // re-lay-out against the current canvas width so notifications are
+        // elastic in both directions: re-wrap when the window was made narrower
+        // (issue #2916) and re-expand when it was made wider. keepWidth=false so
+        // a stale size kept by the anti-flicker logic doesn't stick. Layout()
+        // clamps the window to the canvas width, so it always fits.
+        if (frame.dx != wnd->lastParentDx) {
+            wnd->Layout(HwndGetTextTemp(wnd->hwnd), false);
             rect = WindowRect(wnd->hwnd);
         }
 
@@ -175,6 +232,12 @@ void RelayoutNotifications(HWND hwndCanvas) {
         int x = atRight ? (frame.dx - rect.dx - xMargin) : xMargin;
         int idx = (int)corner;
         int y = atBottom ? (frame.dy - rect.dy - yMargin - yOffset[idx]) : (yMargin + yOffset[idx]);
+        if (wnd->isSlidingIn) {
+            // position is driven by the slide-in timer; only reserve the space
+            // for stacking below
+            yOffset[idx] += rect.dy + dyPadding;
+            continue;
+        }
         // SWP_NOCOPYBITS: repaint from scratch instead of copying stale bits, so
         // notifications that shift when another is dismissed draw correctly
         // (OnPaint is double-buffered, so no flicker)
@@ -243,6 +306,10 @@ NotificationWnd::~NotificationWnd() {
     if (delayTimerId != 0) {
         KillTimer(hwnd, delayTimerId);
         delayTimerId = 0;
+    }
+    if (slideTimerId != 0) {
+        KillTimer(hwnd, slideTimerId);
+        slideTimerId = 0;
     }
 }
 
@@ -319,7 +386,7 @@ static bool NotificationCloseHitTest(HWND hwnd, const Rect& rClose, Point pt) {
     return rClose.Contains(pt);
 }
 
-void NotificationWnd::Layout(Str message) {
+void NotificationWnd::Layout(Str message, bool keepWidth) {
     if (!message) {
         message = StrL("");
     }
@@ -409,7 +476,11 @@ void NotificationWnd::Layout(Str message) {
 
     Rect rCurr = WindowRect(hwnd);
     // for less flicker we don't want to shrink the window when the text shrinks
-    if (dx < rCurr.dx) {
+    // (e.g. progress percentages changing). Only applies when the *content*
+    // changed (keepWidth=true); when the parent window was resized
+    // (keepWidth=false) we follow the new available width in both directions,
+    // which is what makes the notification width elastic.
+    if (keepWidth && dx < rCurr.dx) {
         int diff = rCurr.dx - dx;
         if (isRtl) {
             rTxt.dx += diff;
@@ -417,6 +488,11 @@ void NotificationWnd::Layout(Str message) {
             rClose.x += diff;
         }
         dx = rCurr.dx;
+    }
+    // same for the height: keep the taller size while content changes so
+    // re-wrapping doesn't jump the window around; resize lets it collapse.
+    if (keepWidth && dy < rCurr.dy) {
+        dy = rCurr.dy;
     }
     // but never wider than the parent window (issue #2916)
     int maxDx = rParent.dx - (2 * topLeftMargin);
@@ -429,23 +505,19 @@ void NotificationWnd::Layout(Str message) {
         }
         dx = maxDx;
     }
-#if 0
-    if (dy < rCurr.dy) {
-        dy = rCurr.dy;
-    }
-#endif
-#if 0
-    if (wnd->shrinkLimit < 1.0f) {
-        Rect rcOrig = ClientRect(wnd->hwnd);
-        if (rMsg.dx < rcOrig.dx && rMsg.dx > rcOrig.dx * wnd->shrinkLimit) {
-            rMsg.dx = rcOrig.dx;
-        }
-    }
-#endif
 
     // y-center close
     if (!noClose) {
         rClose.y = ((dy - rClose.dx) / 2) + 1;
+    }
+
+    // `lastParentDx` is the resize-detection watermark for RelayoutNotifications:
+    // it must only track the parent width at the last *resize-driven* layout.
+    // Update-message layouts (keepWidth=true, e.g. page-info zoom changes) run
+    // during a resize too and would otherwise fool the watermark into thinking
+    // the window already matched the new canvas width (and skip the re-wrap).
+    if (lastParentDx < 0 || !keepWidth) {
+        lastParentDx = rParent.dx;
     }
 
     if (dx == rCurr.dx && dy == rCurr.dy) {
@@ -484,6 +556,49 @@ void NotificationWnd::OnPaint(HDC hdcIn, PAINTSTRUCT* ps) {
     }
     // COLORREF colBg = MkRgb(0xff, 0xff, 0x5c);
     // COLORREF colBg = MkGray(0xff);
+
+    // Phase 2: unified backend path. The rich-text (DrawTipWords) and GDI+ paths
+    // below are kept for when gRenderer is unavailable / incompatible.
+    bool viaRenderer = !drawRich && !!gRenderer;
+    if (viaRenderer) {
+        PAINTSTRUCT rps{};
+        rps.hdc = hdc;
+        rps.rcPaint = ToRECT(rc);
+        viaRenderer = gRenderer->BeginPaint(hwnd, &rps);
+    }
+    if (viaRenderer) {
+        gRenderer->FillRect(ToRECT(rc), RgbaColor(colBg));
+
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, colTxt);
+        TempStr text = HwndGetTextTemp(hwnd);
+        RECT rTmp = ToRECT(rTxt);
+        gRenderer->DrawText(text, rTmp, RgbaColor(colTxt), font, txtFmt);
+
+        if (!noClose) {
+            Point curPos = HwndGetCursorPos(hwnd);
+            DrawCloseButtonArgs args;
+            args.hdc = gRenderer->GetHDC();
+            args.r = rClose;
+            args.isHover = NotificationCloseHitTest(hwnd, rClose, curPos);
+            DrawCloseButtonViaRenderer(args);
+        }
+
+        if (HasProgress()) {
+            COLORREF col = ThemeNotificationsProgressColor();
+            RECT rOuter = ToRECT(rProgress);
+            gRenderer->DrawRect(rOuter, RgbaColor(col), 1.0f);
+            RECT rInner = rOuter;
+            rInner.left += 2;
+            rInner.top += 2;
+            rInner.bottom -= 1;
+            rInner.right = rInner.left + (rOuter.right - rOuter.left - 3) * progressPerc / 100;
+            gRenderer->FillRect(rInner, RgbaColor(col));
+        }
+        gRenderer->EndPaint();
+        buffer.Flush(hdcIn);
+        return;
+    }
 
     Graphics graphics(hdc);
     SolidBrush br(GdiRgbFromCOLORREF(colBg));
@@ -574,6 +689,26 @@ static void NotifDelete(NotificationWnd* wnd) {
 }
 
 void NotificationWnd::OnTimer(UINT_PTR timerId) {
+    if (timerId == kNotifTimerSlideInId) {
+        // Phase 3: slide-in animation — move from slideFrom to slideTo with ease-out
+        slideT += 16.0f / 150.0f;
+        if (slideT >= 1.0f) {
+            KillTimer(hwnd, slideTimerId);
+            slideTimerId = 0;
+            isSlidingIn = false;
+            uint flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE;
+            SetWindowPos(hwnd, nullptr, slideTo.x, slideTo.y, 0, 0, flags);
+            // stack the rest of the notifications below the (final) position
+            RelayoutNotifications(HwndGetParent(hwnd));
+        } else {
+            float e = slideT * (2.0f - slideT); // ease-out quadratic
+            int x = slideFrom.x + (int)((slideTo.x - slideFrom.x) * e);
+            int y = slideFrom.y + (int)((slideTo.y - slideFrom.y) * e);
+            uint flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE;
+            SetWindowPos(hwnd, nullptr, x, y, 0, 0, flags);
+        }
+        return;
+    }
     if (timerId == kNotifTimerDelayId) {
         // delay elapsed, now show the notification
         KillTimer(hwnd, delayTimerId);
@@ -581,6 +716,7 @@ void NotificationWnd::OnTimer(UINT_PTR timerId) {
         BringWindowToTop(hwnd);
         ShowWindow(hwnd, SW_SHOW);
         RelayoutNotifications(HwndGetParent(hwnd));
+        StartSlideIn(this);
         if (timeoutMs != 0) {
             SetTimer(hwnd, kNotifTimerTimeoutId, timeoutMs, nullptr);
         }
@@ -730,6 +866,10 @@ NotificationWnd* ShowNotification(const NotificationCreateArgs& args) {
     if (!ok) {
         delete wnd;
         return nullptr;
+    }
+    if (wnd->delayTimerId == 0) {
+        // Phase 3: slide-in from the corner once positioned by RelayoutNotifications
+        StartSlideIn(wnd);
     }
     return wnd;
 }

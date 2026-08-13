@@ -35,9 +35,9 @@
 | 问题 | 位置 | 影响 | 状态 |
 |---|---|---|---|
 | 仅 WM_MOUSEWHEEL 累加滚动 | Canvas.cpp gDeltaPerLine | 触控板体验差 | ✅ 已解决 (WM_POINTERWHEEL 逐像素, 见策略二) |
-| WM_GESTURE 触控老旧 | TouchState (MainWindow.h) | 无惯性/捏合 | ⚠️ 保留用于捏合缩放; 平移/惯性已由 WM_POINTER 覆盖 |
-| 无 UI 过渡动画 | 侧边栏/工具栏/标签切换 | 交互生硬 | ❌ 框架就绪待应用 |
-| 无翻页动画 | 非连续模式 | 翻页跳跃 | ❌ 未开始 |
+| WM_GESTURE 触控老旧 | TouchState (MainWindow.h) | 无惯性/捏合 | ✅ 平移/惯性/捏合均已由 WM_POINTER 覆盖 (2026-08-03 捏合落地), WM_GESTURE 仅作历史保留 |
+| 无 UI 过渡动画 | 侧边栏/工具栏/标签切换 | 交互生硬 | ✅ 已落地 (2026-08-03): 侧边栏 slide / 通知 slide-in / 命令面板淡入 |
+| 无翻页动画 | 非连续模式 | 翻页跳跃 | ✅ 已落地 (2026-08-03): 非连续模式新页滑入动画 |
 | 无 Overscroll | 滚到边界无反馈 | 缺少常见提示 | ✅ 已解决 (OverscrollEffect 已接线, 见策略二) |
 
 
@@ -82,6 +82,7 @@
 
 **WM_POINTER 高精度触控：** 启用 EnableMouseInPointer(true)，Canvas WndProc 处理 WM_POINTERWHEEL（逐像素偏移）和 WM_POINTERUPDATE（触控平移+速度记录）。
 > **✅ 已落地 (2026-08-02)**: `PointerInput.{h,cpp}` — EnablePointerInput() 动态加载 EnableMouseInPointer (Win8+ 才启用, Win7 自动回落); Canvas.cpp 的 WM_POINTERWHEEL 通过 GetPointerFrameInfo 动态解析真实 wheel delta (不再误判为 Ctrl 缩放), 触摸路径 WM_POINTERDOWN/UPDATE/UP 做逐像素平移 + PointerVelocityTracker 速度采样。
+> **✅ 补充 (2026-08-03)**: 多点触控捏合缩放 — `GetPointerFramePoints()` 取同一 frame 内两触点屏幕坐标, 触点 ≥2 时以增量比例 `newZoom = startZoom * (dist/lastDist)` + `SetZoomVirtual(newZoom, fixPt)` 缩放中心保持; 平移基点改 per-window (`MainWindow.panLastX/Y`), 消除多窗口 static 串扰。Pen 与触摸共用平移/惯性路径, 无 DisplayModel 时鼠标模拟。
 
 **惯性滚动（指数衰减）：** `velocity *= friction(0.95)` — 亚像素累积 → `MoveDocBy(ix, iy)` — 低于阈值时停止。
 > **✅ 已落地 (2026-08-02)**: `InertiaScrolling.{h,cpp}` — InertiaScrollState 在 WM_POINTERUP/离屏时经 StartInertialScroll() (px/ms→px/tick 换算) + SetTimer 驱动, Tick 内按文档边界裁剪并在命中边界时把动量交给 Overscroll。
@@ -108,13 +109,15 @@
 
 ### 阶段二：控件迁移（2-3 个月）
 
-| # | 任务 | 文件 | 效果 |
-|---|---|---|---|
-| 2.1 | TabsCtrl → D2D | wingui/TabsCtrl.cpp | 标签硬件加速 |
-| 2.2 | OverlayScrollbar → D2D | OverlayScrollbar.cpp | 半透明渐变 |
-| 2.3 | Toolbar → D2D | Toolbar.cpp | SVG 实时渲染无锯齿 |
-| 2.4 | FindBar/Notifications → D2D | FindBar.cpp, Notifications.cpp | 一致高质量渲染 |
-| 2.5 | 侧边栏 → D2D | TableOfContents.cpp | 树视图文字清晰 |
+| # | 任务 | 文件 | 效果 | 状态 |
+|---|---|---|---|---|
+| 2.1 | TabsCtrl → D2D | wingui/TabsCtrl.cpp | 标签硬件加速 | ✅ 已迁移 (gRenderer + GDI fallback) |
+| 2.2 | OverlayScrollbar → D2D | OverlayScrollbar.cpp | 半透明渐变 | ❌ 不适用 — 逐像素 premultiplied-alpha DIB + UpdateLayeredWindow 已是最优路径, 迁移无收益 |
+| 2.3 | Toolbar → D2D | Toolbar.cpp | SVG 实时渲染无锯齿 | ❌ 不适用 — Win32 ReBar/Toolbar 由系统绘制 (NM_CUSTOMDRAW 仅调色); SVG 图标已由引擎管线栅格化 (DrawSvgIcon 声明为 no-op, 见策略一) |
+| 2.4 | FindBar/Notifications → D2D | FindBar.cpp, Notifications.cpp | 一致高质量渲染 | 🟡 部分 — Notifications ✅ 主路径已迁移 (文本/关闭按钮/进度条 viaRenderer); FindBar 为系统控件 + NM_CUSTOMDRAW 背景, 不适用 |
+| 2.5 | 侧边栏 → D2D | TableOfContents.cpp | 树视图文字清晰 | 🟡 部分 — TOC 为 Win32 TreeView 系统绘制不适用; **ThumbnailPanel (缩略图侧边栏) 已迁移 gRenderer (2026-08-03)** |
+
+> 结论 (2026-08-03): 自定义绘制控件 (TabsCtrl / Notifications / FrameRateWnd / ThumbnailPanel) 已全部接入统一 Renderer 后端; 其余为系统原生控件 (Toolbar/FindBar/TreeView) 或像素级自绘 (OverlayScrollbar), 不适用 D2D 迁移。阶段二收官。
 
 ### 阶段三：交互现代化（2-3 个月）
 
@@ -123,10 +126,10 @@
 | 3.1 | WM_POINTER 完整滚动 | Canvas.cpp | 逐像素精确 | ✅ 已落地 (2026-08-02, 见策略二) |
 | 3.2 | 惯性滚动算法 | 新建 + Canvas.cpp | 平滑减速停止 | ✅ 已落地 (2026-08-02, 见策略二) |
 | 3.3 | Overscroll 弹性反馈 | 新建 + Canvas.cpp | 拉伸-弹回 | ✅ 已落地 (2026-08-02, 见策略二) |
-| 3.4 | UI 过渡动画 | MainWindow.cpp + 动画框架 | 200ms 平滑过渡 | ❌ 框架就绪待应用 |
-| 3.5 | 翻页动画 | Canvas.cpp | 新页从右侧滑入 | ❌ 未开始 |
+| 3.4 | UI 过渡动画 | MainWindow.cpp + 动画框架 | 200ms 平滑过渡 | ✅ 已落地 (2026-08-03): 侧边栏 slide / 通知 slide-in / 命令面板淡入 |
+| 3.5 | 翻页动画 | Canvas.cpp | 新页从右侧滑入 | ✅ 已落地 (2026-08-03): 非连续模式新页滑入动画 |
 
-> 剩余缺口: 多点触控/捏合、Pen 完整路径、OnPointerMessage 内 static 平移基点的多窗口串扰 (见 UI_REPORT §4.5)。
+> 剩余缺口 (2026-08-03 已全部关闭): ~~多点触控/捏合~~ (✅ WM_POINTER 捏合缩放已实现, 见策略二)、~~Pen 完整路径~~ (✅ 平移/惯性共用 + 无 DM 鼠标模拟)、~~OnPointerMessage 内 static 平移基点的多窗口串扰~~ (✅ 平移基点改 per-window 字段 panLastX/Y)。
 
 ### 阶段四：视觉现代化（1-2 个月）
 
@@ -240,6 +243,11 @@
 | 命令面板: 结果计数 + ×清除按钮 + 分类图标 | CommandPalette*.{h,cpp} | tests/ad-hoc-command-palette-enhancements.ts |
 | D2D 源矩形修复 (连续滚动压缩) + 标注渲染 atomic | src/RenderCache.cpp, src/EngineMupdf.{h,cpp} | tests/issue-page-geometry-scroll.ts |
 | **策略一: 渲染管线抽象 (Renderer + GDI/D2D 双后端 + DirectWrite)** | src/wingui/Renderer.{h,cpp}, src/wingui/DWriteText.{h,cpp}, src/wingui/FrameRateWnd.cpp, src/SumatraStartup.cpp, premake5.files.lua | src/base/tests/Renderer_ut.cpp (test_util.exe 无头) |
+| 命令面板: 结果计数布局刷新 (LayoutToSize 整布局重排) + SizeToIdealSize 保位修复 (2026-08-03) | src/CommandPaletteFilter.cpp, src/wingui/Wnd.cpp | 见 UI_REPORT.md §7.6/§7.7 |
+| **阶段二: 控件迁移收官** — ThumbnailPanel 迁移 gRenderer (D2D + DirectWrite, GDI 回退); TabsCtrl/Notifications 主路径已迁移; 系统控件 (Toolbar/FindBar/TreeView/OverlayScrollbar) 不适用结论 (2026-08-03) | src/ThumbnailPanel.cpp, src/wingui/TabsCtrl.cpp, src/Notifications.cpp | Debug x64 构建 + 单测通过 + -view thumbs 冒烟 |
+| **阶段三: 交互收官** — 多点触控捏合缩放 (GetPointerFramePoints + SetZoomVirtual fixPt) + 平移基点 per-window (static 串扰修复) (2026-08-03) | src/PointerInput.{h,cpp}, src/Canvas.cpp, src/MainWindow.h | Debug x64 构建 0 错 + unit-tests 通过 |
+| **阶段三: UI 过渡动画 + 翻页动画** — 侧边栏 slide / 通知 slide-in / 命令面板淡入 + 非连续模式翻页动画 (2026-08-03) | src/MainWindow.cpp, src/Notifications.cpp, src/CommandPalette.cpp, src/Canvas.cpp | tests/ad-hoc-command-palette-enhancements.ts 通过 |
+| **通知弹性布局 (真正的弹性宽度)** — RelayoutNotifications 按 lastParentDx 水位线检测父窗口 resize + keepWidth=false 全量重排: 变窄时长文本换行收缩不超 canvas (issue #2916), 变宽恢复完整宽度; 修复 keepWidth=true 消息更新 (ZoomChanged 重写页面信息) 污染水位线导致重排被跳过的缺陷 (2026-08-03) | src/Notifications.cpp | tests/ad-hoc-notif-elastic.ts (964→592→964px 双向弹性实测) |
 
 > 注: 实际 EXE 大小 12.6 MB (见 UI_REPORT.md §1), 高于本文档第 4/7 节的 ~6.2 MB 预估 — 差异主要来自 libmupdf 渲染库的静态链接; 15 MB 门禁以实际产物为准。
 

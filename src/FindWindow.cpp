@@ -148,6 +148,22 @@ FindWindowWnd::~FindWindowWnd() {
     }
 }
 
+// Destination rect: saved position, or a default size near the top-right of
+// the frame. CreateCustom uses this so the hwnd is born on the right monitor;
+// CW_USEDEFAULT parks a hidden popup on the primary and Per-Monitor V2 then
+// sends WM_DPICHANGED at the primary's DPI before our children exist (#5998).
+static Rect FindWindowPlacementRect(MainWindow* win) {
+    Rect r = gGlobalPrefs->searchUIWindowPos;
+    if (r.IsEmpty()) {
+        Rect fr = HwndWindowRect(win->hwndFrame);
+        int dpi = DpiGetForHwnd(win->hwndFrame);
+        int dx = DpiScaleByDpi(dpi, 520);
+        int dy = DpiScaleByDpi(dpi, 360);
+        r = {fr.x + fr.dx - dx - DpiScaleByDpi(dpi, 40), fr.y + DpiScaleByDpi(dpi, 80), dx, dy};
+    }
+    return ShiftRectToWorkArea(r, win->hwndFrame, true);
+}
+
 bool FindWindowWnd::Create(MainWindow* mainWin) {
     win = mainWin;
 
@@ -161,6 +177,7 @@ bool FindWindowWnd::Create(MainWindow* mainWin) {
         args.style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
         args.exStyle = WS_EX_TOOLWINDOW; // small caption, off the taskbar
         args.isRtl = IsUIRtl();
+        args.pos = FindWindowPlacementRect(win);
         CreateCustom(args);
     }
     if (!hwnd) {
@@ -250,7 +267,6 @@ bool FindWindowWnd::Create(MainWindow* mainWin) {
         results->Create(args);
         results->SetModel(new FindResultsModel(win));
     }
-
     return true;
 }
 
@@ -651,9 +667,6 @@ LRESULT FindWindowWnd::OnNotify(int, NMHDR* nmh) {
     return 0;
 }
 
-bool FindWindowWnd::PreTranslateMessage(MSG& msg) {
-    if (msg.message != WM_KEYDOWN) {
-        return false;
     }
     switch (msg.wParam) {
         case 'F':
@@ -736,16 +749,7 @@ void DeleteFindWindow(MainWindow* win) {
 }
 
 static void PositionFindWindow(FindWindowWnd* w) {
-    MainWindow* win = w->win;
-    Rect r = gGlobalPrefs->searchUIWindowPos;
-    if (r.IsEmpty()) {
-        // default: a reasonable size near the top-right of the frame
-        Rect fr = WindowRect(win->hwndFrame);
-        int dx = DpiScale(w->hwnd, 520);
-        int dy = DpiScale(w->hwnd, 360);
-        r = {fr.x + fr.dx - dx - DpiScale(w->hwnd, 40), fr.y + DpiScale(w->hwnd, 80), dx, dy};
-    }
-    r = ShiftRectToWorkArea(r, win->hwndFrame, true);
+    Rect r = FindWindowPlacementRect(w->win);
     SetWindowPos(w->hwnd, HWND_TOP, r.x, r.y, r.dx, r.dy, SWP_NOACTIVATE);
 }
 
@@ -761,6 +765,10 @@ void ShowFindWindow(MainWindow* win) {
     FindWindowSetMatchCaseChecked(win, win->findMatchCase);
     FindWindowSetMatchWholeWordChecked(win, win->findMatchWholeWord);
     PositionFindWindow(w);
+    // Hidden-window DPI queries keep the caller's scale; use the monitor we
+    // actually placed the window on (issue #5998).
+    Rect wr = HwndWindowRect(w->hwnd);
+    w->UpdateDpi(DpiGetForPoint(wr.x + wr.dx / 2, wr.y + wr.dy / 2));
     w->Layout();
     ShowWindow(w->hwnd, SW_SHOW);
     HwndSetFocus(win->hwndFindEdit);

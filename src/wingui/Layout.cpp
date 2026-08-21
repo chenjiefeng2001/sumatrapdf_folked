@@ -61,6 +61,11 @@ bool IsCollapsed(ILayout* l) {
 // still tweak "the element" without crashing.
 static boxElementInfo gRefusedBoxElement;
 
+// defined further down, next to their boxes
+extern Kind paddingKind;
+extern Kind kindVBox;
+extern Kind kindHBox;
+
 static bool LayoutTreeContains(ILayout* l, ILayout* needle) {
     if (!l || !needle) {
         return false;

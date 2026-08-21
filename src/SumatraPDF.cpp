@@ -6348,6 +6348,10 @@ void SetSidebarVisibility(MainWindow* win, bool tocVisible, bool showFavorites, 
         float targetDx = wantVisible ? (float)std::max(kSidebarMinDx, ClientRect(win->hwndTocBox).dx) : 0;
         win->sidebarAnimDx = fromDx;
         win->sidebarAnim->Animate(&win->sidebarAnimDx, targetDx, 180);
+        // Pre-size the double buffer for the largest canvas during the slide
+        // (sidebar fully closed) so UpdateCanvasSize doesn't re-create a
+        // full-canvas bitmap on every animation tick.
+        win->ReserveCanvasBuffer(Rect(Point(), Size(ClientRect(win->hwndFrame).dx, ClientRect(win->hwndCanvas).dy)));
         // The animation timer is (re)started from Tick(); pump one tick now so a
         // freshly started animation doesn't wait for a WM_TIMER that never fires.
         win->animMgr->Tick();

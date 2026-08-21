@@ -98,13 +98,17 @@ bool Eq(Str s1, Str s2) {
     if (s1.s == s2.s) {
         return true;
     }
+    // effective length = distance to the first NUL within len; same semantics
+    // as the previous byte-at-a-time scan but vectorized via memchr
     int len1 = 0;
-    while (!str::IsNull(s1) && len1 < s1.len && s1.s[len1]) {
-        len1++;
+    if (!str::IsNull(s1) && s1.len > 0) {
+        const char* nul = (const char*)memchr(s1.s, 0, (size_t)s1.len);
+        len1 = nul ? (int)(nul - s1.s) : s1.len;
     }
     int len2 = 0;
-    while (!str::IsNull(s2) && len2 < s2.len && s2.s[len2]) {
-        len2++;
+    if (!str::IsNull(s2) && s2.len > 0) {
+        const char* nul = (const char*)memchr(s2.s, 0, (size_t)s2.len);
+        len2 = nul ? (int)(nul - s2.s) : s2.len;
     }
     if (len1 != len2) {
         return false;

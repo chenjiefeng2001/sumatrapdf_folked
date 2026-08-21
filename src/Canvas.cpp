@@ -2151,6 +2151,11 @@ static bool DrawDocument(MainWindow* win, HDC hdc, RECT* rcArea) {
 
     bool rendering = false;
     Rect screen(Point(), dm->GetViewPort().Size());
+    // Only paint pages intersecting the dirty rectangle: partial invalidations
+    // then skip re-blitting every visible tile of every visible page. The
+    // final buffer Flush clips to rcArea anyway, so drawing outside it was
+    // always wasted work.
+    Rect dirty(*rcArea);
 
     bool isRtl = IsUIRtl();
     for (int pageNo = 1; pageNo <= dm->PageCount(); ++pageNo) {
@@ -2163,7 +2168,10 @@ static bool DrawDocument(MainWindow* win, HDC hdc, RECT* rcArea) {
             continue;
         }
 
-        Rect bounds = pi->pageOnScreen.Intersect(screen);
+        Rect bounds = pi->pageOnScreen.Intersect(screen).Intersect(dirty);
+        if (bounds.IsEmpty()) {
+            continue;
+        }
         // don't paint the frame background for images
         if (!dm->GetEngine()->IsImageCollection()) {
             Rect r = pi->pageOnScreen;
@@ -3578,8 +3586,12 @@ static void OnTimer(MainWindow* win, HWND hwnd, WPARAM timerId) {
                     }
                 }
                 if (stillActive > 0) {
-                    // Schedule repaint to reflect animated values
-                    ScheduleRepaint(win, 0);
+                    // Repaint to reflect animated values. Client-area-only
+                    // invalidation: animations only change canvas content, and
+                    // this fires every tick (~60/s), so avoid the uitask hop,
+                    // the per-tick task allocation and the RDW_FRAME
+                    // non-client redraw that ScheduleRepaint funnels into.
+                    InvalidateRect(win->hwndCanvas, nullptr, FALSE);
                 }
             }
             break;

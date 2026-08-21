@@ -30,9 +30,15 @@ const user32 = dlopen("user32.dll", {
   GetWindowTextW: { args: [FFIType.ptr, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
   GetWindowRect: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.bool },
   SetForegroundWindow: { args: [FFIType.ptr], returns: FFIType.bool },
+  SetWindowPos: {
+    args: [FFIType.ptr, FFIType.ptr, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.u32],
+    returns: FFIType.bool,
+  },
+  GetDC: { args: [FFIType.ptr], returns: FFIType.u64 },
   GetWindowDC: { args: [FFIType.ptr], returns: FFIType.u64 },
   ReleaseDC: { args: [FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
   PrintWindow: { args: [FFIType.ptr, FFIType.u64, FFIType.u32], returns: FFIType.bool },
+  GetUpdateRect: { args: [FFIType.ptr, FFIType.ptr, FFIType.bool], returns: FFIType.bool },
 });
 
 // GDI + GDI+ for capturing a window to a PNG (see captureWindowToPng). Capturing
@@ -48,7 +54,23 @@ const gdi32 = dlopen("gdi32.dll", {
   SelectObject: { args: [FFIType.u64, FFIType.u64], returns: FFIType.u64 },
   DeleteObject: { args: [FFIType.u64], returns: FFIType.bool },
   DeleteDC: { args: [FFIType.u64], returns: FFIType.bool },
+  BitBlt: {
+    args: [
+      FFIType.u64,
+      FFIType.i32,
+      FFIType.i32,
+      FFIType.i32,
+      FFIType.i32,
+      FFIType.u64,
+      FFIType.i32,
+      FFIType.i32,
+      FFIType.u32,
+    ],
+    returns: FFIType.bool,
+  },
 });
+
+const SRCCOPY = 0x00cc0020;
 
 const gdiplus = dlopen("gdiplus.dll", {
   GdiplusStartup: { args: [FFIType.ptr, FFIType.ptr, FFIType.ptr], returns: FFIType.u32 },
@@ -56,6 +78,46 @@ const gdiplus = dlopen("gdiplus.dll", {
   GdipSaveImageToFile: { args: [FFIType.u64, FFIType.ptr, FFIType.ptr, FFIType.ptr], returns: FFIType.u32 },
   GdipDisposeImage: { args: [FFIType.u64], returns: FFIType.u32 },
 });
+
+// process CPU time + pending-paint queries for perf benchmarks
+const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+const kernel32 = dlopen("kernel32.dll", {
+  GetProcessTimes: {
+    args: [FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr],
+    returns: FFIType.bool,
+  },
+  OpenProcess: { args: [FFIType.u32, FFIType.bool, FFIType.u32], returns: FFIType.ptr },
+  CloseHandle: { args: [FFIType.ptr], returns: FFIType.bool },
+});
+
+// Samples the CPU time (kernel+user, ms) of a process by pid.
+export function makeCpuSampler(pid: number): { sample: () => number; close: () => void } {
+  const h = kernel32.symbols.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+  const u64 = new BigUint64Array(4);
+  const pCreation = ptr(u64.buffer, 0);
+  const pExit = ptr(u64.buffer, 8);
+  const pKernel = ptr(u64.buffer, 16);
+  const pUser = ptr(u64.buffer, 24);
+  return {
+    sample: () => {
+      if (!h || !kernel32.symbols.GetProcessTimes(h, pCreation, pExit, pKernel, pUser)) {
+        return -1;
+      }
+      // FILETIME is 100ns units
+      return Number(u64[2] + u64[3]) / 10000;
+    },
+    close: () => {
+      if (h) {
+        kernel32.symbols.CloseHandle(h);
+      }
+    },
+  };
+}
+
+// True when the window has no pending WM_PAINT (update region empty).
+export function hasNoPendingPaint(hwnd: number): boolean {
+  return !user32.symbols.GetUpdateRect(hwnd, 0, false);
+}
 
 // window messages
 export const WM_SETTEXT = 0x000c;
@@ -293,6 +355,26 @@ export function moveWindow(hwnd: number, x: number, y: number, w: number, h: num
   return user32.symbols.MoveWindow(hwnd, x, y, w, h, repaint);
 }
 
+const HWND_TOPMOST = -1;
+const HWND_NOTOPMOST = -2;
+const SWP_NOSIZE = 0x0001;
+const SWP_NOMOVE = 0x0002;
+
+// Force a window above everything without needing foreground permission.
+// SetWindowPos with HWND_TOPMOST works from background processes; unlike
+// SetForegroundWindow (denied unless the caller owns the foreground).
+export function setTopmost(hwnd: number, topmost = true): boolean {
+  return user32.symbols.SetWindowPos(
+    hwnd,
+    topmost ? HWND_TOPMOST : HWND_NOTOPMOST,
+    0,
+    0,
+    0,
+    0,
+    SWP_NOSIZE | SWP_NOMOVE,
+  );
+}
+
 export function showWindow(hwnd: number, cmd: number): boolean {
   return user32.symbols.ShowWindow(hwnd, cmd);
 }
@@ -404,5 +486,30 @@ export function captureWindowToPng(hwnd: number, outPath: string): boolean {
   gdi32.symbols.DeleteObject(bmp);
   gdi32.symbols.DeleteDC(memDC);
   user32.symbols.ReleaseDC(hwnd, winDC);
+  return status === 0;
+}
+
+// Capture a region of the actual screen (screen DC + BitBlt). Requires the
+// region to be visible on screen (not covered by other windows).
+export function captureScreenRegionToPng(x: number, y: number, w: number, h: number, outPath: string): boolean {
+  ensureGdiplus();
+  if (w <= 0 || h <= 0) {
+    return false;
+  }
+  const screenDC = user32.symbols.GetDC(0);
+  const memDC = gdi32.symbols.CreateCompatibleDC(screenDC);
+  const bmp = gdi32.symbols.CreateCompatibleBitmap(screenDC, w, h);
+  const oldObj = gdi32.symbols.SelectObject(memDC, bmp);
+  gdi32.symbols.BitBlt(memDC, 0, 0, w, h, screenDC, x, y, SRCCOPY);
+  gdi32.symbols.SelectObject(memDC, oldObj);
+
+  const gpBmp = new BigUint64Array(1);
+  gdiplus.symbols.GdipCreateBitmapFromHBITMAP(bmp, 0n, ptr(gpBmp));
+  const status = gdiplus.symbols.GdipSaveImageToFile(gpBmp[0], ptr(wideZ(outPath)), ptr(PNG_ENCODER_CLSID), 0);
+  gdiplus.symbols.GdipDisposeImage(gpBmp[0]);
+
+  gdi32.symbols.DeleteObject(bmp);
+  gdi32.symbols.DeleteDC(memDC);
+  user32.symbols.ReleaseDC(0, screenDC);
   return status === 0;
 }

@@ -1381,6 +1381,12 @@ int RenderCache::Paint(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, PageI
     int renderDelayMin = RENDER_DELAY_UNDEFINED;
     bool neededScaling = false;
 
+    // NOTE: Do NOT batch D2D BeginDraw/EndDraw across tiles here. A DC render
+    // target must not have GDI drawing interleave with an open session on the
+    // same HDC: DrawDocument paints page frames/shadows/stale-tile text with
+    // GDI between tile blits, and a batched session discards everything when
+    // that happens (observed as an all-black canvas during scrolling).
+
     while (len(queue) > 0) {
         TilePosition tile = queue.PopAt(0);
         Rect tileOnScreen = GetTileOnScreen(dm->GetEngine(), pageNo, rotation, zoom, tile, pi->pageOnScreen);

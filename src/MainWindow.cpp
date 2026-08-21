@@ -338,12 +338,23 @@ void MainWindow::UpdateCanvasSize() {
     if (buffer && canvasRc == rc) {
         return;
     }
-    canvasRc = rc;
 
-    // create a new output buffer and notify the model
-    // about the change of the canvas size
-    delete buffer;
-    buffer = new DoubleBuffer(hwndCanvas, canvasRc);
+    bool animatingSidebar = sidebarAnim && sidebarAnim->active;
+    if (animatingSidebar && buffer && buffer->rect.dx >= rc.dx && buffer->rect.dy >= rc.dy) {
+        // Sidebar slide animation: the canvas resizes every tick (~11x per
+        // 180ms slide). Keep the buffer pre-allocated by ReserveCanvasBuffer()
+        // at animation start instead of deleting/re-creating a full-canvas
+        // bitmap per tick; the final layout pass after the animation sizes it
+        // exactly.
+        canvasRc = rc;
+    } else {
+        canvasRc = rc;
+
+        // create a new output buffer and notify the model
+        // about the change of the canvas size
+        delete buffer;
+        buffer = new DoubleBuffer(hwndCanvas, canvasRc);
+    }
 
     if (IsDocLoaded()) {
         // the display model needs to know the full size (including scroll bars)
@@ -355,6 +366,16 @@ void MainWindow::UpdateCanvasSize() {
 
     RelayoutNotifications(hwndCanvas);
     ReadAloudPlaybackBarRelayout(hwndCanvas);
+}
+
+// See declaration. Re-allocates the double buffer only when the existing one
+// is smaller than `rc`.
+void MainWindow::ReserveCanvasBuffer(Rect rc) {
+    if (buffer && buffer->rect.dx >= rc.dx && buffer->rect.dy >= rc.dy) {
+        return;
+    }
+    delete buffer;
+    buffer = new DoubleBuffer(hwndCanvas, rc);
 }
 
 Size MainWindow::GetViewPortSize() const {

@@ -67,6 +67,63 @@ static COLORREF ToColorref(RgbaColor c) {
     return RGB(c.r, c.g, c.b);
 }
 
+// GDI brushes and pens are DC-independent, so a small process-lifetime cache
+// removes the CreateSolidBrush/CreatePen + DeleteObject churn per primitive
+// (theme colors repeat heavily). Direct-mapped, 64 entries; on a hash
+// collision the previous entry is replaced. UI-thread only, like all painting.
+constexpr int kGdiObjCacheSize = 64;
+
+static HBRUSH gCachedBrushes[kGdiObjCacheSize];
+static COLORREF gCachedBrushCols[kGdiObjCacheSize];
+
+// Returns a cached solid brush for `col`. The caller must NOT DeleteObject it.
+static HBRUSH GetCachedBrush(COLORREF col) {
+    uint idx = ((uint)col * 0x9E3779B1u) >> 26; // top 6 bits of a multiplied hash
+    if (gCachedBrushCols[idx] == col && gCachedBrushes[idx]) {
+        return gCachedBrushes[idx];
+    }
+    HBRUSH br = CreateSolidBrush(col);
+    if (!br) {
+        return nullptr;
+    }
+    if (gCachedBrushes[idx]) {
+        DeleteObject(gCachedBrushes[idx]);
+    }
+    gCachedBrushes[idx] = br;
+    gCachedBrushCols[idx] = col;
+    return br;
+}
+
+struct GdiPenKey {
+    COLORREF col;
+    int width;
+};
+
+static HPEN gCachedPens[kGdiObjCacheSize];
+static GdiPenKey gCachedPenKeys[kGdiObjCacheSize];
+
+// Returns a cached solid pen for (col, width). The caller must NOT
+// DeleteObject it.
+static HPEN GetCachedPen(COLORREF col, int width) {
+    uint h = ((uint)col * 0x9E3779B1u) ^ ((uint)width * 0x85EBCA6Bu);
+    uint idx = h >> 26;
+    GdiPenKey key = {col, width};
+    GdiPenKey& cached = gCachedPenKeys[idx];
+    if (cached.col == key.col && cached.width == key.width && gCachedPens[idx]) {
+        return gCachedPens[idx];
+    }
+    HPEN pen = CreatePen(PS_SOLID, std::max(1, width), col);
+    if (!pen) {
+        return nullptr;
+    }
+    if (gCachedPens[idx]) {
+        DeleteObject(gCachedPens[idx]);
+    }
+    gCachedPens[idx] = pen;
+    cached = key;
+    return pen;
+}
+
 RendererBackendKind GDIRenderer::GetKind() {
     return RendererBackendKind::GDI;
 }
@@ -93,10 +150,9 @@ void GDIRenderer::FillRect(RECT rc, RgbaColor color) {
     if (!hdc) {
         return;
     }
-    HBRUSH br = CreateSolidBrush(ToColorref(color));
+    HBRUSH br = GetCachedBrush(ToColorref(color));
     if (br) {
         ::FillRect(hdc, &rc, br);
-        DeleteObject(br);
     }
 }
 
@@ -109,7 +165,7 @@ void GDIRenderer::DrawRect(RECT rc, RgbaColor color, float strokeWidth) {
     if (!hdc) {
         return;
     }
-    HPEN pen = CreatePen(PS_SOLID, (int)std::max(1.0f, strokeWidth), ToColorref(color));
+    HPEN pen = GetCachedPen(ToColorref(color), (int)std::max(1.0f, strokeWidth));
     if (!pen) {
         return;
     }
@@ -118,14 +174,13 @@ void GDIRenderer::DrawRect(RECT rc, RgbaColor color, float strokeWidth) {
     Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
     SelectObject(hdc, oldBrush);
     SelectObject(hdc, oldPen);
-    DeleteObject(pen);
 }
 
 void GDIRenderer::DrawLine(int x1, int y1, int x2, int y2, RgbaColor color, float strokeWidth) {
     if (!hdc) {
         return;
     }
-    HPEN pen = CreatePen(PS_SOLID, (int)std::max(1.0f, strokeWidth), ToColorref(color));
+    HPEN pen = GetCachedPen(ToColorref(color), (int)std::max(1.0f, strokeWidth));
     if (!pen) {
         return;
     }
@@ -133,7 +188,6 @@ void GDIRenderer::DrawLine(int x1, int y1, int x2, int y2, RgbaColor color, floa
     MoveToEx(hdc, x1, y1, nullptr);
     LineTo(hdc, x2, y2);
     SelectObject(hdc, oldPen);
-    DeleteObject(pen);
 }
 
 void GDIRenderer::FillRoundRect(RECT rc, RgbaColor color, float radius) {
@@ -144,7 +198,7 @@ void GDIRenderer::FillRoundRect(RECT rc, RgbaColor color, float radius) {
         FillRect(rc, color);
         return;
     }
-    HBRUSH br = CreateSolidBrush(ToColorref(color));
+    HBRUSH br = GetCachedBrush(ToColorref(color));
     if (!br) {
         return;
     }
@@ -154,14 +208,13 @@ void GDIRenderer::FillRoundRect(RECT rc, RgbaColor color, float radius) {
     RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, rad, rad);
     SelectObject(hdc, oldPen);
     SelectObject(hdc, oldBr);
-    DeleteObject(br);
 }
 
 void GDIRenderer::DrawRoundRect(RECT rc, RgbaColor color, float radius, float strokeWidth) {
     if (!hdc) {
         return;
     }
-    HPEN pen = CreatePen(PS_SOLID, (int)std::max(1.0f, strokeWidth), ToColorref(color));
+    HPEN pen = GetCachedPen(ToColorref(color), (int)std::max(1.0f, strokeWidth));
     if (!pen) {
         return;
     }
@@ -171,14 +224,13 @@ void GDIRenderer::DrawRoundRect(RECT rc, RgbaColor color, float radius, float st
     RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, rad, rad);
     SelectObject(hdc, oldBr);
     SelectObject(hdc, oldPen);
-    DeleteObject(pen);
 }
 
 void GDIRenderer::FillTriangle(int x1, int y1, int x2, int y2, int x3, int y3, RgbaColor color) {
     if (!hdc) {
         return;
     }
-    HBRUSH br = CreateSolidBrush(ToColorref(color));
+    HBRUSH br = GetCachedBrush(ToColorref(color));
     if (!br) {
         return;
     }
@@ -188,7 +240,6 @@ void GDIRenderer::FillTriangle(int x1, int y1, int x2, int y2, int x3, int y3, R
     Polygon(hdc, pts, 3);
     SelectObject(hdc, oldPen);
     SelectObject(hdc, oldBr);
-    DeleteObject(br);
 }
 
 void GDIRenderer::DrawText(Str text, RECT rc, RgbaColor color, HFONT font, UINT format) {
@@ -285,6 +336,7 @@ D2DRenderer::~D2DRenderer() {
     // Release in reverse creation order (render target before factory).
     // SEH-wrapped: MacType's hooked Release() can raise STATUS_HEAP_CORRUPTION
     // while unwinding its own allocations (see base/ComSafe.h).
+    SafeReleaseSeh(&cachedBrush);
     SafeReleaseSeh(&rt);
     SafeReleaseSeh(&factory);
 }
@@ -356,17 +408,23 @@ HDC D2DRenderer::GetHDC() {
     return hdc;
 }
 
+// Returns the shared, cached solid brush re-colored for `color`. The caller
+// must NOT Release() it — it lives and dies with the render target.
 ID2D1SolidColorBrush* D2DRenderer::CreateBrush(RgbaColor color) {
     if (!rt) {
         return nullptr;
     }
-    ID2D1SolidColorBrush* brush = nullptr;
     D2D1_COLOR_F c = D2D1::ColorF(color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f);
-    HRESULT hr = rt->CreateSolidColorBrush(c, &brush);
-    if (FAILED(hr) || !brush) {
-        return nullptr;
+    if (!cachedBrush) {
+        HRESULT hr = rt->CreateSolidColorBrush(c, &cachedBrush);
+        if (FAILED(hr) || !cachedBrush) {
+            cachedBrush = nullptr;
+            return nullptr;
+        }
+        return cachedBrush;
     }
-    return brush;
+    cachedBrush->SetColor(&c);
+    return cachedBrush;
 }
 
 void D2DRenderer::FillRect(RECT rc, RgbaColor color) {
@@ -378,7 +436,6 @@ void D2DRenderer::FillRect(RECT rc, RgbaColor color) {
         return;
     }
     rt->FillRectangle(D2D1::RectF((float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom), brush);
-    brush->Release();
 }
 
 void D2DRenderer::FillRectF(const RectF& rc, RgbaColor color) {
@@ -390,7 +447,6 @@ void D2DRenderer::FillRectF(const RectF& rc, RgbaColor color) {
         return;
     }
     rt->FillRectangle(D2D1::RectF(rc.x, rc.y, rc.x + rc.dx, rc.y + rc.dy), brush);
-    brush->Release();
 }
 
 void D2DRenderer::DrawRect(RECT rc, RgbaColor color, float strokeWidth) {
@@ -403,7 +459,6 @@ void D2DRenderer::DrawRect(RECT rc, RgbaColor color, float strokeWidth) {
     }
     rt->DrawRectangle(D2D1::RectF((float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom), brush,
                       strokeWidth);
-    brush->Release();
 }
 
 void D2DRenderer::DrawLine(int x1, int y1, int x2, int y2, RgbaColor color, float strokeWidth) {
@@ -415,7 +470,6 @@ void D2DRenderer::DrawLine(int x1, int y1, int x2, int y2, RgbaColor color, floa
         return;
     }
     rt->DrawLine(D2D1::Point2F((float)x1, (float)y1), D2D1::Point2F((float)x2, (float)y2), brush, strokeWidth);
-    brush->Release();
 }
 
 void D2DRenderer::FillRoundRect(RECT rc, RgbaColor color, float radius) {
@@ -433,7 +487,6 @@ void D2DRenderer::FillRoundRect(RECT rc, RgbaColor color, float radius) {
     D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(
         D2D1::RectF((float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom), radius, radius);
     rt->FillRoundedRectangle(rr, brush);
-    brush->Release();
 }
 
 void D2DRenderer::DrawRoundRect(RECT rc, RgbaColor color, float radius, float strokeWidth) {
@@ -448,7 +501,6 @@ void D2DRenderer::DrawRoundRect(RECT rc, RgbaColor color, float radius, float st
         D2D1::RoundedRect(D2D1::RectF((float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom),
                           std::max(1.0f, radius), std::max(1.0f, radius));
     rt->DrawRoundedRectangle(rr, brush, strokeWidth);
-    brush->Release();
 }
 
 void D2DRenderer::FillTriangle(int x1, int y1, int x2, int y2, int x3, int y3, RgbaColor color) {
@@ -461,13 +513,11 @@ void D2DRenderer::FillTriangle(int x1, int y1, int x2, int y2, int x3, int y3, R
     }
     ID2D1PathGeometry* geo = nullptr;
     if (FAILED(factory->CreatePathGeometry(&geo))) {
-        brush->Release();
         return;
     }
     ID2D1GeometrySink* sink = nullptr;
     if (FAILED(geo->Open(&sink))) {
         geo->Release();
-        brush->Release();
         return;
     }
     sink->BeginFigure(D2D1::Point2F((float)x1, (float)y1), D2D1_FIGURE_BEGIN_FILLED);
@@ -478,7 +528,6 @@ void D2DRenderer::FillTriangle(int x1, int y1, int x2, int y2, int x3, int y3, R
     sink->Release();
     rt->FillGeometry(geo, brush);
     geo->Release();
-    brush->Release();
 }
 
 void D2DRenderer::DrawText(Str text, RECT rc, RgbaColor color, HFONT font, UINT format) {

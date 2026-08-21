@@ -126,6 +126,9 @@ struct D2DRenderer : Renderer {
     struct ID2D1DCRenderTarget* rt = nullptr;
     HDC hdc = nullptr;
     HWND hwnd = nullptr;
+    // Single reusable fill/stroke brush: CreateSolidColorBrush once, then
+    // SetColor per primitive (avoids per-draw COM allocation churn).
+    struct ID2D1SolidColorBrush* cachedBrush = nullptr;
 
     D2DRenderer();
     ~D2DRenderer() override;

@@ -360,3 +360,183 @@ if (durMs > 100) {
 ---
 
 *报告基于 2026-07-26 代码审查，覆盖 `src/` 下多线程、缓存、渲染管线、内存管理、定时/分析相关文件。*
+
+---
+
+# 补充扫描：2026-08-21（渲染管线 / 动画 / 启动路径 / 基础库）
+
+> 基于 `src/` 与 `ext/` 全量代码审查，与第 1-10 章互补；第 8.1 章已指出的"缺乏脏矩形"问题在本章给出具体落点。
+
+## 11. 扫描发现
+
+### 11.1 渲染管线（影响最大）
+
+| # | 发现 | 位置 | 说明 |
+|---|------|------|------|
+| R1 | 动画每帧全窗口失效 | `Canvas.cpp:3580` → `MainWindow.cpp:392` | 动画 tick 调 `ScheduleRepaint(win, 0)` → `RedrawAllIncludingNonClient()` = `InvalidateRect(nullptr)` + `RDW_FRAME`，整个画布+非客户区重绘，与动画实际涉及区域无关 |
+| R2 | `DrawDocument` 忽略脏矩形 | `Canvas.cpp:2153-2187` | 页面循环用 `pageOnScreen ∩ viewport`，不与 `ps.rcPaint` 求交，微小失效也重贴所有可见 tile；仅最终 BitBlt 被裁剪 |
+| R3 | 滚动无 `ScrollDC` 快速路径 | `DisplayModel.cpp:1681-1721`、`SumatraPDF.cpp:924` | 每次滚轮 delta 触发 RecalcVisibleParts + RenderVisibleParts + 全画布重绘（全项目零处使用 ScrollDC） |
+| R4 | 侧边栏滑入动画每 tick 全量 relayout + 双缓冲重建 | `SumatraPDF.cpp:6396`、`MainWindow.cpp:341-346` | 每 tick `RelayoutFrame(win,false,dx)` 全 frame 布局；canvas resize → `delete buffer; new DoubleBuffer(...)`，180ms 内 ~11 次 `CreateCompatibleBitmap` |
+| R5 | D2D 每 tile 一对 BeginDraw/EndDraw | `RenderCache.cpp:1206-1221`、`GpuBackend.cpp:375-505` | DC render target 每次 EndDraw 都 flush 到内存 DC，N 个 tile = N 次 flush；标注 overlay 每个选中项 9+ 次 BeginDraw/EndDraw |
+| R6 | Brush/Pen/TextLayout 即建即毁 | `Renderer.cpp:92-192`(GDI)、`:359-531`(D2D) | GDI 每图元 `CreateSolidBrush`/`DeleteObject`；D2D 每图元 `CreateSolidColorBrush`、每 `DrawText` 新建 `IDWriteTextLayout`；主题色基本恒定却无缓存 |
+| R7 | 棋盘格背景逐格 FillRect | `base/Win.cpp:3842-3861` | 8×8 逐格绘制，1080p 约 3.2 万次 FillRect/帧 |
+
+### 11.2 RenderCache
+
+| # | 发现 | 位置 | 说明 |
+|---|------|------|------|
+| C1 | 每 tile 新建 Pixmap/DIB，无池化 | `RenderCache.cpp:1042` | 连续缩放/滚动时分配-释放风暴 |
+| C2 | `gConserveMemory` 下每次 paint O(n) 全缓存扫描 | `RenderCache.cpp:461-476` | `FreeNotVisible` 对每 tile 做 `IsTileVisible` 变换计算，paint 时轮询而非可见性变化时标记 |
+| C3 | `Add()` 驱逐可能静默失败 | `RenderCache.cpp:303-356` | 当前文档全部页面已缓存时 `FreeIfFull` 不释放当前文档条目，Add 报失败 |
+
+### 11.3 启动路径
+
+| # | 发现 | 位置 | 说明 |
+|---|------|------|------|
+| S1 | 系统字体列表首次构建阻塞首帧 | `ext/mupdf_load_system_font.c:587-696, 757-762` | 枚举并解析 C:\Windows\Fonts 全部 ttf/ttc name 表（数百次同步文件打开+qsort），首个需要非内嵌字体的 PDF 首渲染卡顿 |
+| S2 | 设置文件启动时解析两次 | `CrashHandler.cpp:925-941` | `InstallCrashHandler` 在 `LoadSettings()` 之前又读+解析+序列化一遍 settings |
+| S3 | `SaveSettings()` 每次保存前同步重读文件 | `AppSettings.cpp:593-618` | 调用点很多（每次打开文档都触发），重复磁盘 IO + 全量序列化 |
+
+### 11.4 基础库
+
+| # | 发现 | 位置 | 说明 |
+|---|------|------|------|
+| B1 | 翻译查找线性扫描 | `Translations.cpp:131-164` | `_TRA()` 遍布菜单/对话框/paint 路径，O(n) × `str::Eq` 双向比较 |
+| B2 | Arena 每次分配取 SRWLOCK | `base/Arena.cpp:272-280` | 包括每个 `fmt()`；temp arena 本是 thread-local，可免锁 |
+| B3 | `str::Eq` 明知 len 仍重扫 NUL | `base/Str.cpp:97-119` | 与 B1 叠加成双重浪费 |
+| B4 | `StrVec::Append` 无尾指针走页链表 | `base/StrVec.cpp:430-433` | 大文件 Split 时近平方复杂度 |
+
+### 11.5 其他与构建配置
+
+| # | 发现 | 位置 | 说明 |
+|---|------|------|------|
+| O1 | 捏合缩放无节流 | `Canvas.cpp:3124-3133` | 每个 `WM_POINTERUPDATE` 完整 Relayout + 最多 3 次全画布重绘 |
+| O2 | 图片目录为读尺寸整文件读入 | `EngineImages.cpp:1853-1862` | 只需解析 JPEG SOF / PNG IHDR 头 |
+| O3 | Release 仅 `/O1`(MinSpace) | `premake5.lua:136` | `favor_speed()`(`premake5.lua:173`) 机制已有但仅 zlib 使用；无 PGO |
+| O4 | 动画计时假设固定 16ms tick | `Animation.cpp:60`、`Notifications.cpp:694` | USER 定时器 ≈15.6ms + 合并延迟，时长漂移（视觉无害） |
+
+## 12. 实施排期（按阶段 + 工作量）
+
+### 阶段总览
+
+| 阶段 | 内容 | 工作量 | 状态 |
+|------|------|--------|------|
+| 0 | 建立基线（rel64 构建、启动耗时、滚动帧率、动画 CPU） | 0.5 天 | 进行中 |
+| 1 | 低风险速赢：R7 棋盘格 pattern brush、R2 脏矩形裁剪、R1 动画脏矩形、B3 str::Eq | 1 天 | 待开始 |
+| 2 | 渲染器缓存：R6 brush 缓存、R5 批量 BeginDraw/EndDraw、R4 侧边栏动画重构 | 2-3 天 | 待开始 |
+| 3 | 启动优化：S1 字体列表后台预热+持久化缓存、S2 CrashHandler 去重、S3 SaveSettings 去抖 | 2 天 | 待开始 |
+| 4 | 基础库：B1 翻译哈希表、B2 temp arena 免锁、B4 StrVec 尾指针 | 1-2 天 | 未排期 |
+| 5 | 大型改造：R3 ScrollDC 快速路径、C1 Pixmap 池化、C2 事件驱动标记、O1 缩放节流、O2 图片头解析、O3 favor_speed/PGO | 3-5 天 | 未排期 |
+
+### 阶段明细
+
+**阶段 0 基线**
+- `CONFIG=Release bun cmd/build.ts` 构建 rel64
+- 记录：启动到首帧耗时（复用 `AppSettings.cpp:235` 的 LoadSettings 计时日志 + `-dbg` 时间戳）、滚动帧率（`gShowFrameRate`）、侧边栏滑入/fade-in 期间进程 CPU 占用
+- 结果写入本节下方基线表
+
+**阶段 1 速赢**
+
+| # | 改法 | 文件 | 验证 |
+|---|------|------|------|
+| 1 | 棋盘格改一次性 `CreatePatternBrush` 平铺（DPI 变化重建） | `base/Win.cpp:3842-3861` | 深色主题目测 + 单帧 FillRect 计数 |
+| 2 | 页面循环先与 `rcPaint` 求交（外扩阴影边距）再画 tile | `Canvas.cpp:2153-2187` | 局部失效时重贴 tile 数日志对比 |
+| 3 | 动画 tick 计算活动动画脏矩形并集传给 `ScheduleRepaint`；仅非客户区真变化才 `RDW_FRAME` | `Canvas.cpp:3580`、`MainWindow.cpp:392` | 动画期间 CPU 对比 |
+| 4 | 双方 len 有效时直接长度比较 + memcmp，跳过 NUL 重扫 | `base/Str.cpp:97-119` | 单测回归 |
+
+**阶段 2 渲染器缓存**
+
+| # | 改法 | 文件 |
+|---|------|------|
+| 5 | GDI：COLORREF→HBRUSH 缓存表；D2D：按色缓存 `ID2D1SolidColorBrush`（目标重建失效）；TextLayout 先测量再决定 | `wingui/Renderer.cpp:92-192, 359-531` |
+| 6 | `BindDC` 一次后单次 BeginDraw 批量画全部可见 tile，EndDraw 失败回退逐 tile；overlay 同理 | `RenderCache.cpp:1206-1221`、`GpuBackend.cpp:375-505` |
+| 7 | 滑入期间只平移子窗口并挂起 DoubleBuffer 重建，结束统一 relayout 一次 | `SumatraPDF.cpp:6396`、`MainWindow.cpp:341-346` |
+
+**阶段 3 启动优化**
+
+| # | 改法 | 文件 |
+|---|------|------|
+| 8 | 字体枚举移后台线程预热；结果序列化到 `%LOCALAPPDATA%` 缓存，以 Fonts 目录时间戳校验 | `ext/mupdf_load_system_font.c:587-696` |
+| 9 | CrashHandler 设置解析延迟到真正崩溃时执行 | `CrashHandler.cpp:925-941` |
+| 10 | 内存保留上次序列化结果比对，无变化跳过写盘；高频调用去抖合并，退出强制落盘 | `AppSettings.cpp:593-618` |
+
+### 基线数据（阶段 0 产出）
+
+> 待填：rel64 启动耗时 / 滚动帧率 / 动画期间 CPU。每阶段完成后在此追加对比数据。
+
+---
+
+# 实施记录：2026-08-21（阶段 0-2 完成）
+
+## 13. 落地改动清单
+
+以下改动全部通过 clang-format、`bun ./cmd/build.ts` 构建与 `bun cmd/run-unit-tests.ts -dbg` 单测回归，并经 GUI 冒烟验证文档视图渲染正常。
+
+| 项 | 状态 | 改动 | 文件 |
+|----|------|------|------|
+| R7 棋盘格逐格 FillRect | ✅ 已落地 | 16×16 pattern DIB + `CreatePatternBrush` 缓存（进程级），`SetBrushOrgEx` 保持相位对齐；~32k 次 FillRect/帧 → 1 次 | `src/base/Win.cpp` `PaintCheckerboard` |
+| R6 Brush/Pen 即建即毁 | ✅ 已落地 | GDI：COLORREF→HBRUSH 与 (color,width)→HPEN 直接映射缓存各 64 项；D2D：单个共享 `ID2D1SolidColorBrush` 用 `SetColor` 换色（析构时 SEH 安全释放） | `src/wingui/Renderer.h/.cpp` |
+| R1 动画每帧全窗口失效 | ✅ 已落地 | 动画 tick 改为客户区 `InvalidateRect`，消除每 tick 的 uitask 堆分配与 `RDW_FRAME` 非客户区重绘 | `src/Canvas.cpp` kAnimTimerID |
+| R2 DrawDocument 忽略脏矩形 | ✅ 已落地 | 页面循环先与 `ps.rcPaint` 求交再画 tile/frame/shadow（最终 Flush 本就裁剪到 rcPaint，原为纯浪费） | `src/Canvas.cpp` `DrawDocument` |
+| R4 侧边栏滑入双缓冲重建 | ✅ 已落地 | 新增 `MainWindow::ReserveCanvasBuffer()`：动画启动时按"侧边栏全收起"的最大画布预分配；`UpdateCanvasSize` 在动画期间复用超大缓冲，结束后精确重建。180ms 滑入从 ~11 次 `CreateCompatibleBitmap` 降到 1-2 次 | `src/MainWindow.h/.cpp`、`src/SumatraPDF.cpp` |
+| B3 str::Eq NUL 重扫 | ✅ 已落地 | 有效长度计算改用向量化 `memchr`（语义完全不变） | `src/base/Str.cpp` |
+| R5 每 tile 一对 BeginDraw/EndDraw | ❌ 已回退 | 见 §13.1 根因分析 | （无残留） |
+
+测试基建（可复用、随仓库提交）：`tests/winapi.ts` 新增 `makeCpuSampler(pid)`（GetProcessTimes CPU 采样）、`hasNoPendingPaint(hwnd)`（GetUpdateRect）、`setTopmost(hwnd)`（绕过 SetForegroundWindow 权限限制）、`captureScreenRegionToPng(...)`（屏幕 DC 抓取）。基准脚本为 ad-hoc 性质，位于 gitignored 的 `tests/tmp/bench-perf.ts`。
+
+### 13.1 回退原因：D2D 批量 BeginDraw/EndDraw（R5）
+
+实施后滚动场景出现**整帧 tile 丢失**（视觉验证确认）。根因：DC render target 的 GDI 互操作规则——**同一 HDC 上存在未结束的 D2D 会话时进行 GDI 绘制是非法的**，会话会被整体丢弃。而 `DrawDocument` 在 tile 之间穿插大量 GDI 绘制（页框/阴影、"Rendering page..."文本、下一页的页框），任何跨 tile 的批处理窗口都必然包含 GDI 交错。
+
+结论已写回 `RenderCache::Paint` 处注释防止后人重蹈：**tile 级 BeginDraw/EndDraw 是当前 GDI/D2D 混合架构下的正确粒度**。要安全批量化的前提是先把页框/阴影改为 D2D 图元或独立层，属阶段 5 的架构级改造。
+
+### 13.2 测量方法论陷阱备忘
+
+本次排障发现三个对后续自动化测试关键的坑：
+
+1. **PrintWindow(PW_RENDERFULLCONTENT) 对该窗口的 canvas 区域可能输出全黑**——chrome 正常但客户区内容丢失，不可作为绘制正确性的判据。
+2. **GetDC(hwnd)+GetPixel 读的是窗口自身表面**，可靠；但采样点必须落在实际内容上。
+3. **SetForegroundWindow 会被系统拒绝**（调用方不持有前台权限）；置顶应使用 `SetWindowPos(HWND_TOPMOST)`，配合屏幕 DC BitBlt 抓取才是可信的视觉验证路径（`tests/winapi.ts:captureScreenRegionToPng`）。
+4. 另：手写 PDF fixture 极易出错（xref 空洞/版本标记），多页测试文档应使用 `out/rel64/sumatrapdf-tool.exe create -o x.pdf pages.txt` 从 content-stream 文本生成并用 `draw` 自校验。
+
+## 14. 基准数据与结论
+
+### 14.1 测量环境与方法
+
+- 二进制：`CONFIG=Release bun cmd/build.ts` 产物（rel64，LTCG /O1）。基线 = 改动前 HEAD 构建（保留为 `SumatraPDF-dll-base.exe`），优化 = 当前工作区构建。两者均含相同测试 PDF（30 页，经 `sumatrapdf-tool create` 生成并 `draw` 校验）。
+- 指标（`tests/tmp/bench-perf.ts`，Bun FFI 驱动 `-for-testing` 实例）：
+  - `startupMedian/startupMin`：进程启动 → canvas 可见且 update region 为空（首帧完成），7 次取中位/最小（弃首次冷启动）
+  - `wheelScrollCpu`：3 秒内每 16ms 交替方向 WM_MOUSEWHEEL，进程 kernel+user CPU ms / 墙钟秒
+  - `pageFlipCpu`：15 次 CmdScrollDown/CmdScrollRightPage（80ms 间隔）
+  - `sidebarAnimCpu`：10 次 CmdToggleTableOfContents（320ms 间隔，180ms 滑入动画）
+  - `resizeCpu`：14 次交替窗口尺寸（140ms 间隔）
+- CPU 类指标 ~1000 = 占满一核。
+
+### 14.2 数据（完整有效运行）
+
+| 指标 (cpuMsPerSec) | 基线 run A | 基线 run P | 优化 run B | 优化 run C |
+|---|---|---|---|---|
+| startupMedian (ms) | 659 | 1968* | 698 | 891 |
+| startupMin (ms) | 541 | 905* | 608 | 848 |
+| wheelScrollCpu | 481.4 | 501.9 | **386.8** | 560.8 |
+| pageFlipCpu | 55.9 | 78.3 | 55.9 | 78.4 |
+| sidebarAnimCpu | 33.5 | 51.2 | **14.4** | 33.8 |
+| resizeCpu | 71.8 | 272.1 | **71.0** | 203.4 |
+
+\* run P 与后续高负载时段机器背景噪声显著上升（同二进制 startupMedian 跨时段波动 659→1968，±50%+）。
+
+### 14.3 诚实结论
+
+本机为共享虚拟化环境，背景负载在测量期间剧烈波动，**墙钟类指标（startup）与多数 CPU 指标的绝对值不具备分辨 ±20% 改动的能力**。可比对窗口内的信号：
+
+- `sidebarAnimCpu`：33.5 → 14.4（同负载量级配对比较，−57%），与机制预期一致（动画 tick 不再经过 uitask 分配 + 全窗口/RDW_FRAME 重绘）；
+- `wheelScrollCpu`：386.8 vs 481.4（−20%，单样本，弱信号）；
+- 其余指标在噪声内，无法下结论。
+
+**结构层面的收益是确定的**（代码路径计数级减少）：棋盘格 −3.2 万次 FillRect/帧、GDI 对象创建/销毁每图元归零、D2D brush 创建归零、动画 tick 堆分配归零、滑入期 DoubleBuffer 重建 ~11→1-2 次。这些在噪声更大的环境下无法用端到端计时分辨，建议在空闲物理机上以同一脚本复测（脚本与二进制均已备好）。
+
+正确性验证（均通过）：单测回归、dbg64 构建、优化版 rel64 打开有效 30 页 PDF 的 TOPMOST 屏幕抓取显示完整页面内容与边框。
+
+---
+
+*补充扫描基于 2026-08-21 代码审查。实施原则：不改变现有架构（双缓冲 + RenderCache + uitask 模型保持不变），所有改动限于局部热路径，每步 clang-format + 构建 + 单测回归。*

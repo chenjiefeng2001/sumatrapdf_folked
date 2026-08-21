@@ -490,6 +490,11 @@ struct MainWindow {
     SumatraUIAutomationProvider* uiaProvider = nullptr;
 
     void UpdateCanvasSize();
+    // Pre-allocate the double buffer so it covers at least `rc`: used by the
+    // sidebar slide animation to avoid re-creating a full-canvas bitmap on
+    // every animation tick (UpdateCanvasSize reuses an oversized buffer while
+    // the animation is active).
+    void ReserveCanvasBuffer(Rect rc);
     Size GetViewPortSize() const;
     void RedrawAll(bool update = false) const;
     void RedrawAllIncludingNonClient() const;

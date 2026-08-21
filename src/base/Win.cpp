@@ -3839,25 +3839,55 @@ TempStr GetExecutableSignerTemp(Str exePath) {
     return res;
 }
 
+// Checkerboard pattern (8px cells, white/light-gray) as a cached 16x16
+// pattern brush: one FillRect per paint instead of one FillRect per 8x8 cell
+// (~32k calls per 1080p frame). Created lazily on the UI thread and kept for
+// the process lifetime (colors and cell size are constants).
 void PaintCheckerboard(HDC hdc, int x, int y, int w, int h) {
     constexpr int kCheckerSize = 8;
+    constexpr int kPatternSize = kCheckerSize * 2;
     COLORREF lightColor = RGB(255, 255, 255);
     COLORREF darkColor = RGB(204, 204, 204);
-    HBRUSH lightBrush = CreateSolidBrush(lightColor);
-    HBRUSH darkBrush = CreateSolidBrush(darkColor);
 
-    for (int cy = 0; cy < h; cy += kCheckerSize) {
-        for (int cx = 0; cx < w; cx += kCheckerSize) {
-            int cellW = std::min(kCheckerSize, w - cx);
-            int cellH = std::min(kCheckerSize, h - cy);
-            RECT rc = {x + cx, y + cy, x + cx + cellW, y + cy + cellH};
-            bool isDark = ((cx / kCheckerSize) + (cy / kCheckerSize)) % 2 != 0;
-            FillRect(hdc, &rc, isDark ? darkBrush : lightBrush);
+    static HBRUSH gPatternBrush = nullptr;
+    if (!gPatternBrush) {
+        BITMAPINFO bi = {};
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = kPatternSize;
+        bi.bmiHeader.biHeight = -kPatternSize; // top-down
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        u32* pixels = nullptr;
+        HBITMAP hbmp = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, (void**)&pixels, nullptr, 0);
+        if (hbmp && pixels) {
+            u32 light = ((u32)lightColor) | 0xff000000;
+            u32 dark = ((u32)darkColor) | 0xff000000;
+            for (int row = 0; row < kPatternSize; row++) {
+                bool darkRow = (row / kCheckerSize) != 0;
+                for (int col = 0; col < kPatternSize; col++) {
+                    bool darkCol = (col / kCheckerSize) != 0;
+                    pixels[row * kPatternSize + col] = (darkRow != darkCol) ? dark : light;
+                }
+            }
+            gPatternBrush = CreatePatternBrush(hbmp);
+        }
+        if (hbmp) {
+            DeleteObject(hbmp);
+        }
+        if (!gPatternBrush) {
+            // fall back to solid light fill if pattern creation failed
+            gPatternBrush = CreateSolidBrush(lightColor);
         }
     }
 
-    DeleteObject(lightBrush);
-    DeleteObject(darkBrush);
+    RECT rc = {x, y, x + w, y + h};
+    // keep the pattern phase aligned to (x, y) like the per-cell drawing did
+    POINT oldOrg = {};
+    SetBrushOrgEx(hdc, ((x % kPatternSize) + kPatternSize) % kPatternSize,
+                  ((y % kPatternSize) + kPatternSize) % kPatternSize, &oldOrg);
+    FillRect(hdc, &rc, gPatternBrush);
+    SetBrushOrgEx(hdc, oldOrg.x, oldOrg.y, nullptr);
 }
 
 // --- begin: merged from former src/common/win_util.cpp ---

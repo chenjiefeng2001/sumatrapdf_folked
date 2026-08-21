@@ -1018,7 +1018,6 @@ static void EnsureHomeSearchCreated(MainWindow* win) {
 }
 
 void HomePageDestroySearch(MainWindow* win) {
-void HomePageDestroySearch(MainWindow* win) {
     if (!win->hwndHomeSearch) {
         return;
     }

@@ -185,10 +185,8 @@ static IPageDestination* SnapshotDestForDeferredNav(IPageDestination* dest, int 
     }
     if (k == kindDestinationLaunchFile) {
         auto* f = (PageDestinationFile*)dest;
-        auto* copy = new PageDestinationFile(f->path, f->dest);
-        copy->openInNewWindow = f->openInNewWindow;
-        copy->rect = f->rect;
-        return copy;
+        // our PageDestinationFile has just path+dest; snapshot those
+        return new PageDestinationFile(f->path, f->dest);
     }
     if (k == kindDestinationLaunchEmbedded || k == kindDestinationAttachment) {
         auto* p = (PageDestination*)dest;
@@ -202,7 +200,7 @@ static IPageDestination* SnapshotDestForDeferredNav(IPageDestination* dest, int 
         copy->embedObjNum = p->embedObjNum;
         return copy;
     }
-    // scrollTo, mupdf, djvu, none â†?page navigation snapshot
+    // scrollTo, mupdf, djvu, none ï¿½?page navigation snapshot
     int pageNo = PageDestGetPageNo(dest);
     if (pageNo <= 0) {
         pageNo = tocPageNo;
@@ -286,7 +284,7 @@ static void GoToTocLink(GoToTocLinkData* d) {
     auto tab = d->tab;
     auto ctrl = d->ctrl;
 
-    // validate tab before dereferencing â€?it may have been freed
+    // validate tab before dereferencing ï¿½?it may have been freed
     // while this task was queued (e.g. user closed the tab/window)
     if (!IsWindowTabValid(tab)) {
         return;

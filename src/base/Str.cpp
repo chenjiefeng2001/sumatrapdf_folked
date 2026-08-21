@@ -492,6 +492,15 @@ bool ContainsChar(Str s, char c) {
     return IndexOfChar(s, c) >= 0;
 }
 
+bool ContainsCharAny(Str s, Str chars) {
+    for (int i = 0; i < s.len; i++) {
+        if (IndexOfChar(chars, s.s[i]) >= 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 Str SliceFromChar(Str str, char c) {
     int idx = IndexOfChar(str, c);
     if (idx < 0) {

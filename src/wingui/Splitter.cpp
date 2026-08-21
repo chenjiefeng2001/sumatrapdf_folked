@@ -186,8 +186,17 @@ LRESULT Splitter::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     }
 
     if (WM_CAPTURECHANGED == msg) {
-        if ((HWND)lparam != hwnd && !isLive) {
-            HideResizeOverlay(this);
+        if ((HWND)lparam != hwnd) {
+            if (!isLive) {
+                HideResizeOverlay(this);
+            }
+            // lost the capture mid-drag (e.g. the custom caption frame took
+            // it): end the drag too, or we keep resizing panes while the
+            // mouse merely hovers over the splitter
+            Splitter::MoveEvent arg;
+            arg.w = this;
+            arg.finishedDragging = true;
+            onMove.Call(&arg);
         }
         return 0;
     }

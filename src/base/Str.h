@@ -97,6 +97,7 @@ bool NextLine(Str s, Str& line, Str& rest);
 bool Contains(Str s, Str txt);
 bool ContainsI(Str s, Str txt);
 bool ContainsChar(Str s, char c);
+bool ContainsCharAny(Str s, Str chars);
 
 Str TrimSuffix(Str s, Str suffix);
 int LastIndexOfChar(Str s, char c);

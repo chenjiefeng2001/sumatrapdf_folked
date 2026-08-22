@@ -1,23 +1,19 @@
 /* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
-using Gdiplus::ARGB;
-using Gdiplus::Bitmap;
-using Gdiplus::Color;
-using Gdiplus::FontFamily;
-using Gdiplus::FontStyleBold;
-using Gdiplus::FontStyleItalic;
-using Gdiplus::FontStyleRegular;
-using Gdiplus::FontStyleStrikeout;
-using Gdiplus::FontStyleUnderline;
-using Gdiplus::Matrix;
-using Gdiplus::MatrixOrderAppend;
-using Gdiplus::Ok;
-using Gdiplus::Pen;
-using Gdiplus::SolidBrush;
-using Gdiplus::Status;
-using Gdiplus::UnitPixel;
-using Gdiplus::Win32Error;
+namespace dict {
+class MapStrToInt;
+}
+
+#if OS_WIN
+namespace Gdiplus {
+class Color;
+class Graphics;
+} // namespace Gdiplus
+#endif
+
+// PlatformFont / PlatformFontStyle live in gui/PlatformFont.h and the text
+// measuring API in gui/PlatformText.h; include them before this header
 
 // Layout information for a given page is a list of
 // draw instructions that define what to draw and where.
@@ -55,8 +51,8 @@ struct DrawInstr {
     // info specific to a given instruction
     // InstrString, InstrLinkStart, InstrAnchor, InstrRtlString, InstrImage
     ::Str str;
-    mui::CachedFont* font = nullptr; // InstrSetFont
-    RectF bbox{};                    // common to most instructions
+    PlatformFont* font = nullptr; // InstrSetFont
+    RectF bbox{};                 // common to most instructions
 
     DrawInstr() = default;
 
@@ -66,10 +62,9 @@ struct DrawInstr {
         return Str((char*)str.s, (int)str.len);
     }
 
-    // helper constructors for instructions that need additional arguments
     static DrawInstr Text(::Str s, RectF bbox, bool rtl = false);
     static DrawInstr Image(Str, RectF bbox);
-    static DrawInstr SetFont(mui::CachedFont* font);
+    static DrawInstr SetFont(PlatformFont* font);
     static DrawInstr FixedSpace(float dx);
     static DrawInstr LinkStart(::Str s);
     static DrawInstr Anchor(::Str s, RectF bbox);
@@ -102,7 +97,7 @@ struct StyleRule {
 };
 
 struct DrawStyle {
-    mui::CachedFont* font = nullptr;
+    PlatformFont* font = nullptr;
     AlignAttr align{AlignAttr::NotFound};
     bool dirRtl = false;
 };
@@ -140,6 +135,7 @@ struct HtmlFormatterArgs {
     WStr GetFontName() const { return fontName; }
 
     float fontSize = 0;
+    bool overrideFontName = false;
 
     /* Strings stored in DrawInstr must outlive the formatter (they are
        used for the lifetime of the engine). Strings that don't point into
@@ -148,7 +144,7 @@ struct HtmlFormatterArgs {
        formatter) are copied into this allocator. */
     Arena* textAllocator = nullptr;
 
-    mui::TextRenderMethod textRenderMethod = mui::TextRenderMethod::Gdiplus;
+    PlatformTextMeasureMethod textRenderMethod = PlatformTextMeasureMethod::Gdiplus;
 
     Str htmlStr;
 
@@ -198,7 +194,6 @@ struct HtmlFormatter {
     bool EmitImage(Str img);
     void EmitHr();
     void EmitTextRun(::Str s);
-    // emits a synthetic, persistent string (e.g. a list bullet/number)
     void EmitTextMarker(::Str s);
     void EmitElasticSpace();
     void EmitParagraph(float indent);
@@ -208,10 +203,10 @@ struct HtmlFormatter {
     bool EnsureDx(float dx);
 
     DrawStyle* CurrStyle() { return &styleStack.Last(); }
-    mui::CachedFont* CurrFont() { return CurrStyle()->font; }
-    void SetFont(WStr fontName, FontStyle fs, float fontSize = -1);
-    void SetFontBasedOn(mui::CachedFont* origFont, FontStyle fs, float fontSize = -1);
-    void ChangeFontStyle(FontStyle fs, bool addStyle);
+    PlatformFont* CurrFont() { return CurrStyle()->font; }
+    void SetFont(Str fontName, PlatformFontStyle fs, float fontSize = -1);
+    void SetFontBasedOn(PlatformFont* origFont, PlatformFontStyle fs, float fontSize = -1);
+    void ChangeFontStyle(PlatformFontStyle fs, bool addStyle);
     void SetAlignment(AlignAttr align);
     void RevertStyleChange();
 
@@ -223,6 +218,8 @@ struct HtmlFormatter {
     bool IsCurrLineEmpty();
     virtual bool IgnoreText();
 
+    RectF MeasureTextCached(Str s);
+
     void DumpLineDebugInfo();
 
     // constant during layout process
@@ -230,11 +227,29 @@ struct HtmlFormatter {
     float pageDy = 0;
     float lineSpacing = 0;
     float spaceDx = 0;
-    Graphics* gfx = nullptr; // for measuring text
-    WStr defaultFontName;
+    Str defaultFontName;
     float defaultFontSize = 0;
+    bool overrideFontName = false;
     Arena* textAllocator = nullptr;
-    mui::ITextRender* textMeasure = nullptr;
+    PlatformTextRender* textMeasure = nullptr;
+
+    // Cache of measured text. We assume few distinct fonts, so each font gets
+    // its own hash table (keyed by text only). If we ever see more than
+    // kMaxMeasureCacheFonts fonts, further fonts measure uncached. Because
+    // measurements come in runs of the same font, we remember the last font
+    // to skip the per-font table lookup.
+    static constexpr int kMaxMeasureCacheFonts = 6;
+    struct MeasureCache {
+        PlatformFont* font = nullptr;
+        dict::MapStrToInt* keys = nullptr; // text -> index into vals
+        Vec<RectF> vals;
+    };
+    MeasureCache measureCaches[kMaxMeasureCacheFonts];
+    int nMeasureCaches = 0;
+    int measureCacheInitialSize = 1024;
+    MeasureCache* lastMeasureCache = nullptr;
+
+    MeasureCache* GetMeasureCacheForCurrFont();
 
     // style stack of the current line
     Vec<DrawStyle> styleStack;
@@ -297,9 +312,11 @@ struct HtmlFormatter {
     Vec<HtmlPage*>* FormatAllPages(bool skipEmptyPages = true);
 };
 
-void DrawHtmlPage(Graphics* g, mui::ITextRender* textDraw, Vec<DrawInstr>* drawInstructions, float offX, float offY,
-                  bool showBbox, Color textColor, bool* abortCookie = nullptr);
+#if OS_WIN
+void DrawHtmlPage(Gdiplus::Graphics* g, PlatformTextRender* textDraw, Vec<DrawInstr>* drawInstructions, float offX,
+                  float offY, bool showBbox, Color textColor, bool* abortCookie = nullptr);
+#endif
 
-mui::TextRenderMethod GetTextRenderMethod();
-void SetTextRenderMethod(mui::TextRenderMethod method);
+PlatformTextMeasureMethod GetTextRenderMethod();
+void SetTextRenderMethod(PlatformTextMeasureMethod method);
 HtmlFormatterArgs* CreateFormatterDefaultArgs(int dx, int dy, Arena* textAllocator = nullptr);

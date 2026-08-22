@@ -2,17 +2,17 @@
    License: GPLv3 */
 
 #include "base/Base.h"
-#include "base/Thread.h"
 #include "base/UITask.h"
 #include "base/SquareTreeParser.h"
 #include "base/Http.h"
 #include "base/Win.h"
 #include "base/File.h"
+#include "base/Crypto.h"
 
-#include "wingui/Layout.h"
-#include "wingui/UIModels.h"
-#include "wingui/WinGui.h"
-#include "wingui/WebView.h"
+#include "gui/Layout.h"
+#include "gui/UIModels.h"
+#include "gui/win/WinGui.h"
+#include "gui/win/WebView.h"
 
 #include "Settings.h"
 #include "GlobalPrefs.h"
@@ -29,22 +29,22 @@
 #include "Installer.h"
 #include "UpdateCheck.h"
 
-#include "base/Log.h"
-
 static Kind kNotifUpdateCheckInProgress = StrL("notifUpdateCheckInProgress").s;
 
 // certificate on www.sumatrapdfreader.org is not supported by win7 and win8.1
 // (doesn't have the ciphers they understand) so we have a backup on backblaze
 
 // clang-format off
+// tried in order; later entries are backups if earlier HTTP gets fail
 #if defined(PRE_RELEASE_VER) || defined(DEBUG)
-static const Str kUpdateInfoURL = StrL("https://www.sumatrapdfreader.org/updatecheck-pre-release.txt");
-static const Str kUpdateInfoURL2 =
-    StrL("https://kjk-files.s3.us-west-001.backblazeb2.com/software/sumatrapdf/sumpdf-prerelease-update.txt");
+static const Str updateInfoURLs[] = {
+    StrL("https://www.sumatrapdfreader.org/updatecheck-pre-release.txt"),
+    StrL("https://kjk-files.s3.us-west-001.backblazeb2.com/software/sumatrapdf/sumpdf-prerelease-update.txt"),
+};
 #else
-static const Str kUpdateInfoURL = StrL("https://www.sumatrapdfreader.org/update-check-rel.txt");
-// Note: I don't have backup for this
-static const Str kUpdateInfoURL2 = StrL("https://www.sumatrapdfreader.org/update-check-rel.txt");
+static const Str updateInfoURLs[] = {
+    StrL("https://www.sumatrapdfreader.org/update-check-rel.txt"),
+};
 #endif
 
 #ifndef kWebisteDownloadPageURL
@@ -58,7 +58,7 @@ static const Str kUpdateInfoURL2 = StrL("https://www.sumatrapdfreader.org/update
 
 // prevent multiple update tasks from happening simultaneously
 // (this might e.g. happen if a user checks manually very quickly after startup)
-bool gUpdateCheckInProgress = false;
+static bool gUpdateCheckInProgress = false;
 
 // when true, NotifyUserOfUpdate skips the install-confirmation dialog and just
 // installs (set when the user clicks "Download and update" in the pre-release
@@ -83,6 +83,7 @@ struct UpdateInfo {
 
     Str dlURL;
     Str installerPath;
+    Str builtOn; // optional "yyyy-mm-dd" from the update-check file
 
     UpdateInfo() = default;
     ~UpdateInfo() {
@@ -95,6 +96,7 @@ struct UpdateInfo {
         str::Free(portableArm64);
         str::Free(dlURL);
         str::Free(installerPath);
+        str::Free(builtOn);
     }
 };
 
@@ -107,6 +109,7 @@ The format of update information downloaded from the server:
 
 [SumatraPDF]
 Latest: 14276
+BuiltOn: 2026-08-21
 Installer64: https://www.sumatrapdfreader.org/dl/prerel/14276/SumatraPDF-prerel-64-install.exe
 Installer32: https://www.sumatrapdfreader.org/dl/prerel/14276/SumatraPDF-prerel-install.exe
 PortableExe64: https://www.sumatrapdfreader.org/dl/prerel/14276/SumatraPDF-prerel-64.exe
@@ -148,8 +151,12 @@ static UpdateInfo* ParseUpdateInfo(Str d) {
     if (!IsValidProgramVersion(latestVer)) {
         return nullptr;
     }
-    auto res = new UpdateInfo();
+    auto* res = new UpdateInfo();
     res->latestVer = str::Dup(latestVer);
+    Str onDate = node->GetValue(StrL("BuiltOn"));
+    if (onDate) {
+        res->builtOn = str::Dup(onDate);
+    }
 
     // those are optional. if missing, we'll just tell the user to go to website to download
     res->installer64 = str::Dup(node->GetValue(StrL("Installer64")));
@@ -185,8 +192,10 @@ static bool ShouldCheckForUpdate(UpdateCheck updateCheckType) {
 
 #if defined(FORCE_AUTO_UPDATE)
     if (updateCheckType == UpdateCheck::UserInitiated) {
+        logf("CheckForUpdate: checking, user initiated (FORCE_AUTO_UPDATE)\n");
         return true;
     } else {
+        logf("CheckForUpdate: skipping auto check, FORCE_AUTO_UPDATE downloads pre-release\n");
         return false;
     }
 #endif
@@ -197,6 +206,7 @@ static bool ShouldCheckForUpdate(UpdateCheck updateCheckType) {
     }
 
     if (updateCheckType == UpdateCheck::UserInitiated) {
+        logf("CheckForUpdate: checking, user initiated\n");
         return true;
     }
 
@@ -209,6 +219,7 @@ static bool ShouldCheckForUpdate(UpdateCheck updateCheckType) {
 
     // only applies to automatic update check
     if (!gGlobalPrefs->checkForUpdates) {
+        logf("CheckForUpdate: skipping auto check because CheckForUpdates is false\n");
         return false;
     }
 
@@ -216,12 +227,14 @@ static bool ShouldCheckForUpdate(UpdateCheck updateCheckType) {
     // sensitive users can disable the update check in time
     FILETIME never{};
     if (FileTimeEq(gGlobalPrefs->timeOfLastUpdateCheck, never)) {
+        logf("CheckForUpdate: skipping auto check, first start (TimeOfLastUpdateCheck not set)\n");
         return false;
     }
 
     // pre-release builds check on every startup (testers want the newest build);
     // skip the daily/weekly throttle below
     if (gIsPreReleaseBuild) {
+        logf("CheckForUpdate: checking, pre-release build checks on every startup\n");
         return true;
     }
 
@@ -235,14 +248,19 @@ static bool ShouldCheckForUpdate(UpdateCheck updateCheckType) {
 
     int secsBetweenChecks = gIsPreReleaseBuild ? kSecondsInWeek : kSecondsInDay;
     bool checkUpdate = secsSinceLastUpdate > secsBetweenChecks;
-#if 0
-    logf("CheckForUpdate: secsBetweenChecks: %d, secsSinceLastUpdate: %d, checkUpdate: %d\n", secsBetweenChecks,
-         secsSinceLastUpdate, (int)checkUpdate);
-#endif
+    logf("CheckForUpdate: %s auto check, %d secs since the last one, %d secs between checks\n",
+         checkUpdate ? StrL("doing") : StrL("skipping"), secsSinceLastUpdate, secsBetweenChecks);
     return checkUpdate;
 }
 
 void StartInstallerAutoUpgrade(Str installerPath) {
+    TempStr expectedSigner = GetExecutableSignerTemp(GetSelfExePathTemp());
+    TempStr installerSigner = GetExecutableSignerTemp(installerPath);
+    if (!expectedSigner || !installerSigner || !str::Eq(expectedSigner, installerSigner) ||
+        !IsPEFileSigned(installerPath)) {
+        logf("StartInstallerAutoUpgrade: refusing an update with an untrusted signature\n");
+        return;
+    }
     str::Builder cmd;
     if (IsOurExeInstalled()) {
         // no need for sleep because it shows the installer dialog anyway
@@ -254,10 +272,20 @@ void StartInstallerAutoUpgrade(Str installerPath) {
     } else {
         // we're asking to over-write over ourselves, so also wait 2 secs to allow
         // our process to exit
-        cmd.Append(fmt(R"( -sleep-ms 500 -exit-when-done -update-self-to "%s")", GetSelfExePathTemp()));
+        cmd.Append(fmt(R"( -sleep-ms 2000 -exit-when-done -update-self-to "%s")", GetSelfExePathTemp()));
     }
     logf("StartInstallerAutoUpgrade: installer cmd: '%s'\n", ToStr(cmd));
     CreateProcessHelper(installerPath, ToStr(cmd));
+}
+
+static void ExitAfterStartingUpdater() {
+    // Exit immediately so the updater can overwrite our exe. PostQuitMessage(0)
+    // is unreliable when the dialog was shown from a uitask during startup.
+    if (gPluginMode) {
+        PostQuitMessage(0);
+        return;
+    }
+    ::ExitProcess(0);
 }
 
 static void NotifyUserOfUpdate(UpdateInfo* updateInfo) {
@@ -270,7 +298,7 @@ static void NotifyUserOfUpdate(UpdateInfo* updateInfo) {
         SaveSettings(); // persist timeOfLastUpdateCheck
         if (installerPathAuto && file::Exists(installerPathAuto)) {
             StartInstallerAutoUpgrade(installerPathAuto);
-            PostQuitMessage(0);
+            ExitAfterStartingUpdater();
         } else {
             logf("NotifyUserOfUpdate: auto-install requested but installer not downloaded\n");
         }
@@ -279,8 +307,8 @@ static void NotifyUserOfUpdate(UpdateInfo* updateInfo) {
 
     auto mainInstr = _TRA("New version available");
     auto ver = updateInfo->latestVer;
-    auto fmtStr = _TRA("You have version '%s' and version '%s' is available.\nDo you want to install new version?");
-    auto content = str::Dup(fmt(fmtStr.s, StrL(CURR_VERSION_STRA), ver));
+    auto fmtStr = _TRA("You have version '%s' and version '%s' is available.\nDo you want to install the new version?");
+    TempStr content = fmt(fmtStr.s, StrL(CURR_VERSION_STRA), ver);
 
     auto installerPath = updateInfo->installerPath;
     bool didDownloadInstaller = file::Exists(installerPath);
@@ -312,7 +340,7 @@ static void NotifyUserOfUpdate(UpdateInfo* updateInfo) {
     dialogConfig.pszMainInstruction = CWStrTemp(mainInstr);
     dialogConfig.pszContent = CWStrTemp(content);
     dialogConfig.nDefaultButton = kBtnIdInstall;
-    dialogConfig.dwFlags = flags;
+    dialogConfig.dwFlags = (TASKDIALOG_FLAGS)flags;
     dialogConfig.cxWidth = 0;
     dialogConfig.pfCallback = nullptr;
     dialogConfig.dwCommonButtons = 0;
@@ -341,7 +369,7 @@ static void NotifyUserOfUpdate(UpdateInfo* updateInfo) {
     }
 
     StartInstallerAutoUpgrade(installerPath);
-    PostQuitMessage(0);
+    ExitAfterStartingUpdater();
 }
 
 struct UpdateProgressData {
@@ -359,18 +387,20 @@ struct DownloadUpdateAsyncData {
 };
 
 static void DownloadUpdateFinish(DownloadUpdateAsyncData* data) {
-    auto hwndForNotif = data->hwndForNotif;
-    auto updateInfo = data->updateInfo;
+    auto* hwndForNotif = data->hwndForNotif;
+    auto* updateInfo = data->updateInfo;
+    data->updateInfo = nullptr;
     RemoveNotificationsForGroup(hwndForNotif, kNotifUpdateCheckInProgress);
     NotifyUserOfUpdate(updateInfo);
+    delete updateInfo;
     gUpdateCheckInProgress = false;
     delete data;
 }
 
 static void UpdateDownloadProgressNotif(UpdateProgressData* data) {
-    TempStr size = FormatFileSizeTransTemp(data->nDownloaded);
+    TempStr size = FormatFileSizeShortTransTemp(data->nDownloaded);
     logf("UpdateDownloadProgressNotif: %s\n", size);
-    auto wnd = GetNotificationForGroup(data->hwndForNotif, kNotifUpdateCheckInProgress);
+    auto* wnd = GetNotificationForGroup(data->hwndForNotif, kNotifUpdateCheckInProgress);
     if (wnd) {
         TempStr msg = fmt("Downloading update: %s\n", size);
         NotificationUpdateMessage(wnd, msg, 0, true);
@@ -382,7 +412,7 @@ static void UpdateDownloadProgressNotif(UpdateProgressData* data) {
 
 static void UpdateProgressCb(UpdateProgressData* data, HttpProgress* progress) {
     logf("UpdateProgressCb: n: %d\n", (int)progress->nDownloaded);
-    auto fnData = new UpdateProgressData;
+    auto* fnData = new UpdateProgressData;
     fnData->hwndForNotif = data->hwndForNotif;
     fnData->nDownloaded = progress->nDownloaded;
     auto fn = MkFunc0<UpdateProgressData>(UpdateDownloadProgressNotif, fnData);
@@ -390,8 +420,8 @@ static void UpdateProgressCb(UpdateProgressData* data, HttpProgress* progress) {
 }
 
 static void DownloadUpdateAsync(DownloadUpdateAsyncData* data) {
-    auto hwndForNotif = data->hwndForNotif;
-    auto updateInfo = data->updateInfo;
+    auto* hwndForNotif = data->hwndForNotif;
+    auto* updateInfo = data->updateInfo;
 
     TempStr installerPath = GetTempFilePathTemp("sumatra-installer");
     // the installer must be named .exe or it won't be able to self-elevate
@@ -400,8 +430,13 @@ static void DownloadUpdateAsync(DownloadUpdateAsyncData* data) {
     UpdateProgressData pd;
     pd.hwndForNotif = hwndForNotif;
     auto cb = MkFunc1<UpdateProgressData, HttpProgress*>(UpdateProgressCb, &pd);
-    bool ok = HttpGetToFile(updateInfo->dlURL, installerPath, cb);
+    constexpr i64 kMaxUpdateDownloadSize = 256LL * 1024 * 1024;
+    bool ok = HttpGetToFile(updateInfo->dlURL, installerPath, cb, kMaxUpdateDownloadSize);
     logf("ShowAutoUpdateDialog: HttpGetToFile(): ok=%d, downloaded to '%s'\n", (int)ok, installerPath);
+    TempStr expectedSigner = GetExecutableSignerTemp(GetSelfExePathTemp());
+    TempStr installerSigner = ok ? GetExecutableSignerTemp(installerPath) : TempStr{};
+    ok = ok && expectedSigner && installerSigner && str::Eq(expectedSigner, installerSigner) &&
+         IsPEFileSigned(installerPath);
     if (ok) {
         updateInfo->installerPath = str::Dup(installerPath);
     } else {
@@ -419,9 +454,18 @@ static void ShowUpdateAvailableNotification(MainWindow* win, UpdateInfo* updateI
     if (!win || !updateInfo) {
         return;
     }
-    TempStr link = fmt("[%s](CmdInstallPrereleaseUpdate)", _TRA("Download and update"));
-    TempStr msg = fmt(_TRA("Update %s available (you have %s) available. %s").s, updateInfo->latestVer,
-                      StrL(CURR_VERSION_STRA), link);
+    TempStr link = fmt("[%s](CmdInstallPrereleaseUpdate)", _TRA("Update"));
+    // pre-release "Latest" is a build number (e.g. 17616); show as 3.7.17616
+    TempStr displayVer = updateInfo->latestVer;
+    if (!str::ContainsChar(displayVer, '.')) {
+        displayVer = fmt("%s.%s", StrL(CURR_VERSION_MAJOR_STRA), displayVer);
+    }
+    TempStr msg;
+    if (updateInfo->builtOn) {
+        msg = fmt(_TRA("Version %s available (built on %s). %s").s, displayVer, updateInfo->builtOn, link);
+    } else {
+        msg = fmt(_TRA("Version %s available. %s").s, displayVer, link);
+    }
     NotificationCreateArgs args;
     args.hwndParent = win->hwndCanvas;
     args.msg = msg;
@@ -437,6 +481,7 @@ static void ShowUpdateAvailableNotification(MainWindow* win, UpdateInfo* updateI
 // called when the user clicks "Download and update" in the pre-release update
 // notification: download the pending update and (via gUpdateAutoInstall) install
 // it without the confirmation dialog
+// download + install the update surfaced by the pre-release update notification
 void DownloadAndInstallPendingUpdate(MainWindow* win) {
     if (!win || !gPendingUpdate) {
         return;
@@ -462,14 +507,14 @@ void DownloadAndInstallPendingUpdate(MainWindow* win) {
     ShowNotification(nargs);
 
     gUpdateCheckInProgress = true;
-    auto fnData = new DownloadUpdateAsyncData;
+    auto* fnData = new DownloadUpdateAsyncData;
     fnData->hwndForNotif = hwndForNotif;
     fnData->updateInfo = updateInfo;
     auto fn = MkFunc0<DownloadUpdateAsyncData>(DownloadUpdateAsync, fnData);
     RunAsync(fn, "DownloadUpdateAsync");
 }
 
-static bool ShouldDownloadUpdate(UpdateInfo* updateInfo, UpdateCheck updateCheckType) {
+static bool ShouldDownloadUpdate(UpdateInfo* updateInfo) {
     if (gIsStoreBuild) {
         // I assume store will take care of updates
         return false;
@@ -485,8 +530,8 @@ static bool ShouldDownloadUpdate(UpdateInfo* updateInfo, UpdateCheck updateCheck
     return hasUpdate;
 }
 
-static HRESULT CALLBACK TaskDialogHyperlinkCallback(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
-                                                    LONG_PTR lpRefData) {
+static HRESULT CALLBACK TaskDialogHyperlinkCallback(HWND /*hwnd*/, UINT msg, WPARAM /*wParam*/, LPARAM lParam,
+                                                    LONG_PTR /*lpRefData*/) {
     if (msg == TDN_HYPERLINK_CLICKED) {
         WCHAR* url = (WCHAR*)lParam;
         SumatraLaunchBrowser(ToUtf8Temp(url));
@@ -522,7 +567,7 @@ Visit <a href="%s">%s</a> to download the latest version.)",
     dialogConfig.cbSize = sizeof(TASKDIALOGCONFIG);
     dialogConfig.pszWindowTitle = CWStrTemp(title);
     dialogConfig.pszContent = CWStrTemp(content);
-    dialogConfig.dwFlags = flags;
+    dialogConfig.dwFlags = (TASKDIALOG_FLAGS)flags;
     dialogConfig.dwCommonButtons = TDCBF_CLOSE_BUTTON;
     dialogConfig.cButtons = dimof(buttons);
     dialogConfig.pButtons = buttons;
@@ -534,6 +579,50 @@ Visit <a href="%s">%s</a> to download the latest version.)",
     TaskDialogIndirect(&dialogConfig, &buttonPressedId, nullptr, nullptr);
     if (buttonPressedId == kBtnIdVisitWebsite) {
         SumatraLaunchBrowser(kExpectedDlHost);
+    }
+}
+
+// Shown only for a user-initiated update check that couldn't download/parse the
+// update info. Tells the user and points them at the download page so they can
+// update manually (e.g. if TLS validation or the network failed).
+static void NotifyUpdateCheckFailed(HWND hwndParent, DWORD err) {
+    logf("NotifyUpdateCheckFailed: err=%#x\n", (unsigned)err);
+    auto title = _TRA("SumatraPDF Update");
+    auto mainInstr = _TRA("Couldn't check for updates");
+    TempStr msg = fmt(_TRA("Couldn't download update information (error %#x).").s, err);
+    TempStr content = fmt(R"(%s
+
+Visit <a href="%s">%s</a> to download the latest version.)",
+                          msg, StrL(kWebisteDownloadPageURL), StrL(kWebisteDownloadPageURL));
+
+    TASKDIALOGCONFIG dialogConfig{};
+    DWORD flags =
+        TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT | TDF_ENABLE_HYPERLINKS | TDF_POSITION_RELATIVE_TO_WINDOW;
+    if (trans::IsCurrLangRtl()) {
+        flags |= TDF_RTL_LAYOUT;
+    }
+
+    constexpr int kBtnIdVisitWebsite = 100;
+    TASKDIALOG_BUTTON buttons[1];
+    buttons[0].nButtonID = kBtnIdVisitWebsite;
+    buttons[0].pszButtonText = CWStrTemp(_TRA("Visit &Website"));
+
+    dialogConfig.cbSize = sizeof(TASKDIALOGCONFIG);
+    dialogConfig.pszWindowTitle = CWStrTemp(title);
+    dialogConfig.pszMainInstruction = CWStrTemp(mainInstr);
+    dialogConfig.pszContent = CWStrTemp(content);
+    dialogConfig.dwFlags = (TASKDIALOG_FLAGS)flags;
+    dialogConfig.dwCommonButtons = TDCBF_CLOSE_BUTTON;
+    dialogConfig.cButtons = dimof(buttons);
+    dialogConfig.pButtons = buttons;
+    dialogConfig.nDefaultButton = kBtnIdVisitWebsite;
+    dialogConfig.pszMainIcon = TD_WARNING_ICON;
+    dialogConfig.hwndParent = hwndParent;
+    dialogConfig.pfCallback = TaskDialogHyperlinkCallback;
+    int buttonPressedId = 0;
+    TaskDialogIndirect(&dialogConfig, &buttonPressedId, nullptr, nullptr);
+    if (buttonPressedId == kBtnIdVisitWebsite) {
+        SumatraLaunchBrowser(kWebisteDownloadPageURL);
     }
 }
 
@@ -556,7 +645,13 @@ static DWORD MaybeStartUpdateDownload(HWND hwndParent, HttpRsp* rsp, UpdateCheck
         return ERROR_INTERNET_INVALID_URL;
     }
 
-    bool isValidURL = str::StartsWith(url, kUpdateInfoURL) || str::StartsWith(url, kUpdateInfoURL2);
+    bool isValidURL = false;
+    for (auto updateInfoURL : updateInfoURLs) {
+        if (str::StartsWith(url, updateInfoURL)) {
+            isValidURL = true;
+            break;
+        }
+    }
     if (!isValidURL) {
         logf("ShowAutoUpdateDialog: '%s' is not a valid url\n", url);
         return ERROR_INTERNET_INVALID_URL;
@@ -581,12 +676,12 @@ static DWORD MaybeStartUpdateDownload(HWND hwndParent, HttpRsp* rsp, UpdateCheck
         return 0;
     }
     HWND hwndForNotif = win->hwndCanvas;
-    if (!ShouldDownloadUpdate(updateInfo, updateCheckType)) {
+    if (!ShouldDownloadUpdate(updateInfo)) {
         Str myVer = StrL(UPDATE_CHECK_VERA);
         logf("ShowAutoUpdateDialog: myVer >= latestVer ('%s' >= '%s')\n", myVer, updateInfo->latestVer);
         /* if automated => don't notify that there is no new version */
         if (updateCheckType == UpdateCheck::UserInitiated) {
-            auto wnd = GetNotificationForGroup(hwndForNotif, kNotifUpdateCheckInProgress);
+            auto* wnd = GetNotificationForGroup(hwndForNotif, kNotifUpdateCheckInProgress);
             if (wnd) {
                 NotificationUpdateMessage(wnd, _TRA("You have the latest version."), 5 * 1000, true);
             }
@@ -625,7 +720,7 @@ static DWORD MaybeStartUpdateDownload(HWND hwndParent, HttpRsp* rsp, UpdateCheck
     logf("ShowAutoUpdateDialog: starting to download '%s'\n", updateInfo->dlURL);
     gUpdateCheckInProgress = true;
 
-    auto fnData = new DownloadUpdateAsyncData;
+    auto* fnData = new DownloadUpdateAsyncData;
     fnData->hwndForNotif = hwndForNotif;
     fnData->updateInfo = updateInfo;
     auto fn = MkFunc0<DownloadUpdateAsyncData>(DownloadUpdateAsync, fnData);
@@ -634,7 +729,7 @@ static DWORD MaybeStartUpdateDownload(HWND hwndParent, HttpRsp* rsp, UpdateCheck
 }
 
 static void BuildUpdateURL(str::Builder& url, Str baseURL, UpdateCheck updateCheckType) {
-    url = baseURL;
+    url.Reset(baseURL);
     url.Append("?v=");
     url.Append(UPDATE_CHECK_VERA);
     TempStr osVerTemp = GetWindowsVerTemp();
@@ -678,13 +773,13 @@ static void UpdateCheckFinish(UpdateCheckAsyncData* data) {
     AutoDelete delData(data);
 
     auto updateCheckType = data->updateCheckType;
-    auto rsp = data->rsp;
+    auto* rsp = data->rsp;
     MainWindow* win = nullptr;
-    if (IsMainWindowValid(data->win)) {
+    if (IsMainWindowValidAndNotClosing(data->win)) {
         win = data->win;
     } else {
         if (len(gWindows) > 0) {
-            win = gWindows.At(0);
+            win = gWindows[0];
         }
     }
     if (!win) {
@@ -694,27 +789,30 @@ static void UpdateCheckFinish(UpdateCheckAsyncData* data) {
     DWORD err = MaybeStartUpdateDownload(hwnd, rsp, updateCheckType);
     if ((err != 0) && (updateCheckType == UpdateCheck::UserInitiated)) {
         RemoveNotificationsForGroup(win->hwndCanvas, kNotifUpdateCheckInProgress);
-        // notify the user about network error during a manual update check
-        TempStr msg = fmt(_TRA("Can't connect to the Internet (error %#x).").s, err);
-        MessageBoxWarning(hwnd, msg, _TRA("SumatraPDF Update"));
+        // a manual check that couldn't fetch update info: tell the user and point
+        // them at the website so they can update manually
+        NotifyUpdateCheckFailed(hwnd, err);
     }
 }
 
 static void UpdateCheckAsync(UpdateCheckAsyncData* data) {
     auto updateCheckType = data->updateCheckType;
-    str::Builder url;
-    BuildUpdateURL(url, kUpdateInfoURL, updateCheckType);
-    Str uri = ToStr(url);
-    HttpRsp* rsp = new HttpRsp;
-    str::ReplaceWithCopy(&rsp->url, uri);
-    bool ok = HttpGet(uri, rsp);
-    if (!ok) {
-        delete rsp;
-        BuildUpdateURL(url, kUpdateInfoURL2, updateCheckType);
-        uri = ToStr(url);
+    HttpRsp* rsp = nullptr;
+    for (auto updateInfoURL : updateInfoURLs) {
+        if (rsp) {
+            delete rsp;
+        }
+        str::Builder url;
+        BuildUpdateURL(url, updateInfoURL, updateCheckType);
+        Str uri = ToStr(url);
         rsp = new HttpRsp;
         str::ReplaceWithCopy(&rsp->url, uri);
-        HttpGet(uri, rsp);
+        bool ok = HttpGet(uri, rsp);
+        logf("UpdateCheckAsync: response from '%s': error=%d, status=%d, %d bytes\n%s\n", rsp->url, (int)rsp->error,
+             (int)rsp->httpStatusCode, (int)len(rsp->data), ToStr(rsp->data));
+        if (ok) {
+            break;
+        }
     }
     data->rsp = rsp;
     auto fn = MkFunc0<UpdateCheckAsyncData>(UpdateCheckFinish, data);
@@ -730,6 +828,7 @@ void StartAsyncUpdateCheck(MainWindow* win, UpdateCheck updateCheckType) {
         return;
     }
 
+    logf("StartAsyncUpdateCheck: updateCheckType=%d\n", (int)updateCheckType);
     if (UpdateCheck::UserInitiated == updateCheckType) {
         NotificationCreateArgs args;
         args.hwndParent = win->hwndCanvas;
@@ -743,7 +842,7 @@ void StartAsyncUpdateCheck(MainWindow* win, UpdateCheck updateCheckType) {
     gUpdateCheckInProgress = true;
 
     // data freed in UpdateCheckFinish()
-    auto data = new UpdateCheckAsyncData();
+    auto* data = new UpdateCheckAsyncData();
     data->win = win;
     data->updateCheckType = updateCheckType;
     auto fn = MkFunc0<UpdateCheckAsyncData>(UpdateCheckAsync, data);
@@ -753,29 +852,28 @@ void StartAsyncUpdateCheck(MainWindow* win, UpdateCheck updateCheckType) {
 // the assumption is that this is a portable version downloaded to temp directory
 // we should copy ourselves over the existing file, launch ourselves and
 // tell our new copy to delete ourselves
-void UpdateSelfTo(Str path) {
-    ReportIf(!path);
-    if (!file::Exists(path)) {
+void UpdateSelfTo(Str dstPath) {
+    ReportIf(!dstPath);
+    if (!file::Exists(dstPath)) {
         logf("UpdateSelfTo: failed because destination doesn't exist\n");
         return;
     }
 
     auto sleepMs = gCli->sleepMs;
-    logf("UpdateSelfTo: '%s', sleep for %d ms\n", path, sleepMs);
+    logf("UpdateSelfTo: '%s', sleep for %d ms\n", dstPath, sleepMs);
     // sleeping for a bit to make sure that the program that launched us
     // had time to exit so that we can overwrite it
     ::Sleep(gCli->sleepMs);
 
+    // OverwriteAtomicRetry(dst, src): copy this process (new build) onto dstPath
     TempStr srcPath = GetSelfExePathTemp();
-    bool ok = file::Copy(path, srcPath, false);
-    // TODO: maybe retry if copy fails under the theory that the file
-    // might be temporarily locked
+    bool ok = file::OverwriteAtomicRetry(dstPath, srcPath, 20, 250);
     if (!ok) {
-        logf("UpdateSelfTo: failed to copy self to file\n");
+        logf("UpdateSelfTo: failed to overwrite '%s' with '%s'\n", dstPath, srcPath);
         return;
     }
-    logf("UpdateSelfTo: copied self to file\n");
+    logf("UpdateSelfTo: copied self to '%s'\n", dstPath);
 
     TempStr args = fmt(R"(-sleep-ms 500 -delete-file "%s")", srcPath);
-    CreateProcessHelper(path, args);
+    CreateProcessHelper(dstPath, args);
 }

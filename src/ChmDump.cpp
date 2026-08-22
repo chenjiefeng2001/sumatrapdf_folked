@@ -2,13 +2,11 @@
    License: GPLv3 */
 
 #include "base/Base.h"
-#include <chm_lib.h>
-#include <wincrypt.h>
+#include <chm.h>
 
 #include "base/Crypto.h"
 #include "base/File.h"
 #include "base/GuessFileType.h"
-#include "base/Win.h"
 
 #include "Settings.h"
 #include "DisplayMode.h"
@@ -16,12 +14,12 @@
 #include "EbookBase.h"
 #include "ChmFile.h"
 
-static void CliWrite(Str s, size_t n = 0) {
+static void CliWrite(Str s, int n = 0) {
     if (!s) {
         return;
     }
     if (n == 0) {
-        n = (size_t)s.len;
+        n = s.len;
     }
     HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
     if (h && h != INVALID_HANDLE_VALUE) {
@@ -29,7 +27,7 @@ static void CliWrite(Str s, size_t n = 0) {
         WriteFile(h, s.s, (DWORD)n, &written, nullptr);
         return;
     }
-    fwrite(s.s, 1, n, stdout);
+    fwrite(s.s, 1, (size_t)n, stdout);
 }
 
 static void CliPrint(Str s) {
@@ -37,34 +35,28 @@ static void CliPrint(Str s) {
     CliWrite("\n", 1);
 }
 
-static Str ChmSpaceName(int space) {
-    switch (space) {
-        case CHM_UNCOMPRESSED:
-            return "uncompressed";
-        case CHM_COMPRESSED:
-            return "compressed";
-    }
-    return "unknown";
+static Str ChmCompressionName(bool isCompressed) {
+    return isCompressed ? "compressed" : "uncompressed";
 }
 
-static Str ChmEntryKind(const chmUnitInfo* ui) {
-    if (ui->flags & CHM_ENUMERATE_DIRS) {
+static Str ChmEntryKind(const chm_entry* e) {
+    if (e->is_dir) {
         return "dir";
     }
-    if (ui->flags & CHM_ENUMERATE_FILES) {
+    if (e->is_file) {
         return "file";
     }
     return "entry";
 }
 
-static Str ChmEntryClass(const chmUnitInfo* ui) {
-    if (ui->flags & CHM_ENUMERATE_SPECIAL) {
+static Str ChmEntryClass(const chm_entry* e) {
+    if (e->is_special) {
         return "special";
     }
-    if (ui->flags & CHM_ENUMERATE_META) {
+    if (e->is_meta) {
         return "meta";
     }
-    if (ui->flags & CHM_ENUMERATE_NORMAL) {
+    if (e->is_normal) {
         return "normal";
     }
     return "unknown";
@@ -72,7 +64,7 @@ static Str ChmEntryClass(const chmUnitInfo* ui) {
 
 static void FormatSha1Hex(const u8 digest[20], char out[41]) {
     for (int i = 0; i < 20; i++) {
-        sprintf_s(&out[i * 2], 3, "%02x", digest[i]);
+        sprintf_s(&out[(size_t)i * 2], 3, "%02x", digest[i]);
     }
     out[40] = '\0';
 }
@@ -83,56 +75,33 @@ struct ChmObjectReadResult {
     bool sha1Valid = false;
 };
 
-static bool ReadChmObject(struct chmFile* h, chmUnitInfo* ui, ChmObjectReadResult* result) {
-    if (ui->length == 0) {
+static bool ReadChmObject(chm_ctx* ctx, chm_entry* e, ChmObjectReadResult* result) {
+    if (e->length == 0) {
         CalcSHA1Digest({}, result->sha1);
         result->bytesRead = 0;
         result->sha1Valid = true;
         return true;
     }
+    if (e->length > 512ULL * 1024 * 1024) {
+        return false; // sanity cap for the dump tool
+    }
 
-    const int64_t kBufSize = 64 * 1024;
-    uint8_t* buf = (uint8_t*)malloc(kBufSize);
+    size_t n = (size_t)e->length;
+    uint8_t* buf = (uint8_t*)malloc(n);
     if (!buf) {
         return false;
     }
-
-    HCRYPTPROV hProv = 0;
-    HCRYPTHASH hHash = 0;
-    bool hashOk = CryptAcquireContextW(&hProv, nullptr, MS_DEF_PROV, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT) &&
-                  CryptCreateHash(hProv, CALG_SHA1, 0, 0, &hHash);
-
-    uint64_t pos = 0;
-    while (pos < ui->length) {
-        uint64_t remain = ui->length - pos;
-        int64_t toRead = remain > (uint64_t)kBufSize ? kBufSize : (int64_t)remain;
-        int64_t got = chm_retrieve_object(h, ui, buf, pos, toRead);
-        if (got != toRead) {
-            if (hashOk) {
-                CryptDestroyHash(hHash);
-                CryptReleaseContext(hProv, 0);
-            }
-            free(buf);
-            result->bytesRead = pos + (got > 0 ? (uint64_t)got : 0);
-            result->sha1Valid = false;
-            return false;
-        }
-        if (hashOk) {
-            CryptHashData(hHash, buf, (DWORD)got, 0);
-        }
-        pos += (uint64_t)got;
+    int64_t got = chm_read_entry(ctx, e, buf);
+    if (got != (int64_t)e->length) {
+        free(buf);
+        result->bytesRead = got > 0 ? (uint64_t)got : 0;
+        result->sha1Valid = false;
+        return false;
     }
-
-    if (hashOk) {
-        DWORD hashLen = 20;
-        CryptGetHashParam(hHash, HP_HASHVAL, result->sha1, &hashLen, 0);
-        result->sha1Valid = true;
-        CryptDestroyHash(hHash);
-        CryptReleaseContext(hProv, 0);
-    }
-
+    CalcSHA1Digest(Str((char*)buf, (int)n), result->sha1);
+    result->sha1Valid = true;
+    result->bytesRead = (uint64_t)got;
     free(buf);
-    result->bytesRead = pos;
     return true;
 }
 
@@ -144,25 +113,24 @@ struct ChmDumpCtx {
     uint64_t totalSize = 0;
 };
 
-static int ChmDumpEntry(struct chmFile* h, struct chmUnitInfo* ui, void* data) {
-    ChmDumpCtx* ctx = (ChmDumpCtx*)data;
-    if (str::IsEmpty(ui->path)) {
-        return CHM_ENUMERATOR_CONTINUE;
+static void ChmDumpEntry(chm_ctx* h, chm_entry* e, ChmDumpCtx* ctx) {
+    if (!e->path || e->path[0] == 0) {
+        return;
     }
 
     ctx->entries++;
-    if (ui->flags & CHM_ENUMERATE_FILES) {
+    if (e->is_file) {
         ctx->files++;
-        ctx->totalSize += ui->length;
+        ctx->totalSize += e->length;
     }
-    if (ui->flags & CHM_ENUMERATE_DIRS) {
+    if (e->is_dir) {
         ctx->dirs++;
     }
 
     ChmObjectReadResult readResult;
     bool unpacked = true;
-    if (ui->flags & CHM_ENUMERATE_FILES) {
-        unpacked = ReadChmObject(h, ui, &readResult);
+    if (e->is_file) {
+        unpacked = ReadChmObject(h, e, &readResult);
         if (!unpacked) {
             ctx->unpackFailures++;
         }
@@ -175,10 +143,9 @@ static int ChmDumpEntry(struct chmFile* h, struct chmUnitInfo* ui, void* data) {
         sha1Str = Str(sha1Hex, 40);
     }
 
-    CliPrint(fmt("%s class=%s space=%s size=%llu read=%llu sha1=%s status=%s path=%s", Str(ChmEntryKind(ui)),
-                 Str(ChmEntryClass(ui)), Str(ChmSpaceName(ui->space)), (unsigned long long)ui->length,
-                 (unsigned long long)readResult.bytesRead, sha1Str, Str(unpacked ? "ok" : "failed"), Str(ui->path)));
-    return CHM_ENUMERATOR_CONTINUE;
+    CliPrint(fmt("%s class=%s space=%s size=%llu read=%llu sha1=%s status=%s path=%s", Str(ChmEntryKind(e)),
+                 Str(ChmEntryClass(e)), Str(ChmCompressionName(e->is_compressed)), (unsigned long long)e->length,
+                 (unsigned long long)readResult.bytesRead, sha1Str, Str(unpacked ? "ok" : "failed"), Str(e->path)));
 }
 
 struct ChmDumpTocVisitor : EbookTocVisitor {
@@ -203,24 +170,31 @@ struct ChmDumpIndexVisitor : EbookTocVisitor {
 
 static bool DumpChmFileRaw(Str path) {
     Str data = file::ReadFile(path);
-    if (str::IsEmpty(data)) {
+    if (len(data) == 0) {
         CliPrint("error: couldn't read file");
         return false;
     }
-    struct chmFile* h = chm_open(data.s, (size_t)data.len);
-    if (!h) {
+    chm_ctx* h = chm_ctx_new(nullptr, nullptr, nullptr, nullptr);
+    if (!h || !chm_open(h, (const uint8_t*)data.s, (size_t)data.len)) {
+        chm_ctx_free(h);
         str::Free(data);
         CliPrint("error: couldn't open CHM");
         return false;
     }
 
+    chm_entry** entries = nullptr;
+    int nEntries = chm_get_entries(h, &entries);
+
     ChmDumpCtx ctx;
-    bool ok = chm_enumerate(h, CHM_ENUMERATE_ALL, ChmDumpEntry, &ctx) != 0;
+    for (int i = 0; i < nEntries; i++) {
+        ChmDumpEntry(h, entries[i], &ctx);
+    }
+    bool ok = nEntries > 0;
     CliPrint(fmt("summary entries=%d files=%d dirs=%d total-size=%llu unpack-failures=%d enumerate=%s", ctx.entries,
                  ctx.files, ctx.dirs, (unsigned long long)ctx.totalSize, ctx.unpackFailures,
                  Str(ok ? "ok" : "failed")));
 
-    chm_close(h);
+    chm_ctx_free(h);
     str::Free(data);
     return ok && ctx.unpackFailures == 0;
 }
@@ -231,11 +205,11 @@ static void DumpChmFileMetadata(Str path) {
         CliPrint("metadata: unavailable");
         return;
     }
-    CliPrint(fmt("metadata title=%s", Str(!str::IsEmpty(doc->title) ? doc->title.s : "")));
-    CliPrint(fmt("metadata creator=%s", Str(!str::IsEmpty(doc->creator) ? doc->creator.s : "")));
-    CliPrint(fmt("metadata home=%s", Str(!str::IsEmpty(doc->homePath) ? doc->homePath.s : "")));
-    CliPrint(fmt("metadata toc=%s", Str(!str::IsEmpty(doc->tocPath) ? doc->tocPath.s : "")));
-    CliPrint(fmt("metadata index=%s", Str(!str::IsEmpty(doc->indexPath) ? doc->indexPath.s : "")));
+    CliPrint(fmt("metadata title=%s", Str(len(doc->title) > 0 ? doc->title.s : "")));
+    CliPrint(fmt("metadata creator=%s", Str(len(doc->creator) > 0 ? doc->creator.s : "")));
+    CliPrint(fmt("metadata home=%s", Str(len(doc->homePath) > 0 ? doc->homePath.s : "")));
+    CliPrint(fmt("metadata toc=%s", Str(len(doc->tocPath) > 0 ? doc->tocPath.s : "")));
+    CliPrint(fmt("metadata index=%s", Str(len(doc->indexPath) > 0 ? doc->indexPath.s : "")));
     CliPrint(fmt("metadata codepage=%u", doc->codepage));
 
     ChmDumpTocVisitor toc;
@@ -258,6 +232,8 @@ static bool DumpChmFile(Str path) {
     return ok;
 }
 
+// Dump CHM metadata, file table, and TOC/index information to stdout.
+// Returns 0 if every requested CHM opened, enumerated, and unpacked successfully.
 int DumpChm(const Flags& flags) {
     if (len(flags.fileNames) == 0) {
         CliPrint("No file specified for -dump-chm");

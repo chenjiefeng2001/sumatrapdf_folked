@@ -2,17 +2,18 @@
    License: GPLv3 */
 
 #include "base/Base.h"
-#include "base/Win.h"
 
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
 
 #include "Settings.h"
 #include "AppSettings.h"
 #include "DisplayMode.h"
 #include "DocController.h"
 #include "EngineBase.h"
+#include "base/GuessFileType.h"
 #include "EngineAll.h"
 #include "DisplayModel.h"
+#include "TextSelection.h"
 #include "GlobalPrefs.h"
 #include "Annotation.h"
 #include "SumatraConfig.h"
@@ -23,9 +24,8 @@
 #include "ExternalViewers.h"
 #include "FileHistory.h"
 #include "Installer.h"
-#include "ClaudeCode.h"
-#include "GrokBuild.h"
-#include "CodexBuild.h"
+#include "AIChatCommon.h"
+#include "AIChatPanel.h"
 #include "TextToSpeech.h"
 #include "CommandAvailability.h"
 
@@ -33,6 +33,10 @@
 
 static UINT_PTR gNoDocWhitelist[] = {
     CmdOpenFile,
+    CmdOpenFileWithOSFilePicker,
+    CmdToggleFilePicker,
+    CmdToggleBoolSetting,
+    CmdNavigateFilesInFolder,
     CmdExit,
     CmdNewWindow,
     CmdContributeTranslation,
@@ -41,10 +45,12 @@ static UINT_PTR gNoDocWhitelist[] = {
     CmdAdvancedOptions,
     CmdAdvancedSettings,
     CmdChangeLanguage,
+    CmdChangeTheme,
     CmdCheckUpdate,
     CmdHelpOpenManual,
     CmdHelpOpenManualOnWebsite,
     CmdHelpOpenKeyboardShortcuts,
+    CmdToggleKeyboardHelp,
     CmdHelpVisitWebsite,
     CmdHelpAbout,
     CmdDebugDownloadSymbols,
@@ -53,35 +59,29 @@ static UINT_PTR gNoDocWhitelist[] = {
     CmdDebugTestApp,
     CmdDebugTogglePredictiveRender,
     CmdDebugToggleRenderInfo,
+    CmdDebugToggleCacheInfo,
     CmdDebugToggleRtl,
+    CmdDebugToggleDpiOverride,
     CmdChangeScrollbar,
-    CmdToggleAntiAlias,
-    CmdToggleSmoothScroll,
-    CmdToggleScrollbarInSinglePage,
-    CmdToggleLazyLoading,
-    CmdToggleEscToExit,
     CmdToggleFullscreen,
     CmdToggleMenuBar,
     CmdToggleToolbar,
-    CmdToggleToolbarPosition,
-    CmdToggleDjvuEngine,
-    CmdToggleUseTabs,
-    CmdToggleTabsMru,
-    CmdToggleFrequentlyRead,
-    CmdToggleChmUI,
-    CmdToggleReuseInstance,
-    CmdToggleHoverPreview,
     CmdToggleInverseSearch,
     CmdToggleLinks,
+    CmdToggleHighlightFormFields,
+    CmdToggleDisableLinks,
+    CmdToggleImages,
+    CmdToggleHoverPreview,
     CmdToggleWindowsPreviewer,
     CmdToggleWindowsSearchFilter,
     CmdInvertColors,
     CmdFavoriteToggle,
+    CmdFavoriteShowInTab,
     CmdShowLog,
     CmdClearHistory,
     CmdRemoveDeletedFilesFromHistory,
+    CmdDeleteCachedFiles,
     CmdReopenLastClosedFile,
-    CmdSelectNextTheme,
     CmdListPrinters,
     CmdDebugCrashMe,
     CmdDebugCorruptMemory,
@@ -94,17 +94,26 @@ static UINT_PTR gNoDocWhitelist[] = {
 
 UINT_PTR disableIfNoSelection[] = {
     CmdCopySelection,
+    CmdZoomToSelection,
     CmdFindNextSel,
     CmdFindPrevSel,
+    CmdTranslateSelection,
     CmdTranslateSelectionWithDeepL,
     CmdTranslateSelectionWithGoogle,
     CmdTranslateSelectionWithGrokBuild,
     CmdTranslateSelectionWithClaudeCode,
     CmdTranslateSelectionWithOpenAICodex,
+    CmdTranslateSelectionWithAntiGravity,
     CmdSearchSelectionWithWikipedia,
     CmdSearchSelectionWithGoogleScholar,
     CmdSearchSelectionWithBing,
     CmdSearchSelectionWithGoogle,
+    0,
+};
+
+// annotations created from a text selection; a rectangular selection has no
+// text to mark up. checked after !supportsAnnots already hid them for non-PDF
+static UINT_PTR createAnnotFromSelection[] = {
     CmdCreateAnnotHighlight,
     CmdCreateAnnotSquiggly,
     CmdCreateAnnotStrikeOut,
@@ -142,12 +151,15 @@ static UINT_PTR removeIfNoPrefsPerms[] = {
     CmdFavoriteAdd,
     CmdFavoriteDel,
     CmdFavoriteToggle,
+    CmdFavoriteShowInTab,
+    CmdToggleFavoritesSort,
     CmdGoToNextFavorite,
     CmdGoToPrevFavorite,
     0,
 };
 
 static UINT_PTR removeIfNoCopyPerms[] = {
+    CmdTranslateSelection,
     CmdTranslateSelectionWithGoogle,
     CmdTranslateSelectionWithDeepL,
     CmdSearchSelectionWithGoogle,
@@ -165,13 +177,17 @@ static UINT_PTR removeIfNoCopyPerms[] = {
 static UINT_PTR removeIfNoDiskAccessPerm[] = {
     CmdNewWindow,
     CmdOpenFile,
+    CmdOpenFileWithOSFilePicker,
+    CmdToggleFilePicker,
     CmdOpenNextFileInFolder,
     CmdOpenPrevFileInFolder,
+    CmdNavigateFilesInFolder,
     CmdClose,
     CmdShowInFolder,
     CmdSaveAs,
     CmdRenameFile,
     CmdDeleteFile,
+    CmdDeleteFileAndOpenNext,
     CmdSendByEmail,
     CmdContributeTranslation,
     CmdAdvancedOptions,
@@ -179,6 +195,8 @@ static UINT_PTR removeIfNoDiskAccessPerm[] = {
     CmdFavoriteAdd,
     CmdFavoriteDel,
     CmdFavoriteToggle,
+    CmdFavoriteShowInTab,
+    CmdToggleFavoritesSort,
     CmdOpenSelectedDocument,
     CmdPinSelectedDocument,
     CmdForgetSelectedDocument,
@@ -188,17 +206,25 @@ static UINT_PTR removeIfNoDiskAccessPerm[] = {
     CmdCreateShortcutToFile,
     CmdSaveEmbeddedFile,
     CmdShowLog,
+    CmdShowGeneratedHTML,
     0,
 };
 
 static UINT_PTR removeIfAnnotsNotSupported[] = {
     CmdSaveAnnotations,
     CmdSaveAnnotationsNewFile,
+    // signing writes a signature widget into the PDF, so it needs the same
+    // "this engine can be edited and re-saved" support annotations do
+    CmdSignDocument,
     CmdEditAnnotations,
     CmdDeleteAnnotation,
     CmdShowAnnotations,
     CmdHideAnnotations,
     CmdToggleShowAnnotations,
+    // added past the CmdCreateAnnotFirst..CmdCreateAnnotLast range, so the
+    // range check doesn't catch it
+    CmdCreateAnnotImageFromClipboard,
+    CmdInsertImage,
     0,
 };
 
@@ -213,7 +239,9 @@ static UINT_PTR removeIfChm[] = {
     CmdZoomFitPage,
     CmdZoomActualSize,
     CmdZoomFitWidth,
+    CmdZoomFitHeight,
     CmdZoomFitContent,
+    CmdDebugShowFitContentArea,
     CmdZoomShrinkToFit,
     CmdZoom6400,
     CmdZoom3200,
@@ -231,6 +259,7 @@ static i32 gBlacklistCommandsFromPalette[] = {
     CmdOpenWithKnownExternalViewerLast,
     CmdCommandPalette,
     CmdCommandPaletteTOC,
+    CmdCommandPaletteFavorites,
     CmdNextTabSmart,
     CmdPrevTabSmart,
     CmdSetTheme,
@@ -239,6 +268,10 @@ static i32 gBlacklistCommandsFromPalette[] = {
     CmdForgetSelectedDocument,
     CmdExpandAll,
     CmdCollapseAll,
+    CmdTocExpandToLevel1,
+    CmdTocExpandToLevel2,
+    CmdTocExpandToLevel3,
+    CmdTocCollapseSameLevel,
     CmdMoveFrameFocus,
     CmdFavoriteDel,
     CmdPresentationWhiteBackground,
@@ -248,6 +281,12 @@ static i32 gBlacklistCommandsFromPalette[] = {
     CmdSaveAttachment,
     CmdOpenAttachment,
     CmdCreateShortcutToFile,
+    CmdSetDocumentColorsFollowTheme,
+    // needs the name of the setting to toggle, e.g.
+    // [CmdToggleBoolSetting Fullscreen.ShowMenubar]; picking the bare command out
+    // of the palette can only warn that the argument is missing. A custom command
+    // that supplies one has its own id and name and still shows up
+    CmdToggleBoolSetting,
     0,
 };
 
@@ -258,6 +297,7 @@ static i32 gCommandsDebugOnly[] = {
     CmdDebugTestApp,
     CmdDebugShowNotif,
     CmdDebugStartStressTest,
+    CmdDebugToggleDpiOverride,
     0,
 };
 
@@ -335,7 +375,9 @@ AppCommandCtx NewAppCommandCtx(MainWindow* win, Point cursorPos) {
     ctx.allowToggleMenuBar = true;
 
     if (ctx.tab) {
-        ctx.isChm = ctx.tab->AsChm();
+        ctx.isChm = ctx.tab->AsChm() || ctx.tab->AsMarkdown();
+        Str currentPath = win->ctrl ? win->ctrl->GetFilePath() : ctx.filePath;
+        ctx.isMarkdown = str::EndsWithI(currentPath, StrL(".md")) || str::EndsWithI(currentPath, StrL(".markdown"));
         EngineBase* engine = ctx.tab->GetEngine();
         if (engine && engine->kind == kindEngineComicBooks) {
             ctx.isCbx = true;
@@ -343,9 +385,10 @@ AppCommandCtx NewAppCommandCtx(MainWindow* win, Point cursorPos) {
         if (engine && engine->IsImageCollection()) {
             ctx.isImageCollection = true;
         }
+        ctx.isReflowable = engine && engine->isReflowable;
         ctx.engineKind = ctx.tab->GetEngineType();
         ctx.canSendEmail = CanSendAsEmailAttachment(ctx.tab);
-        ctx.isPdf = CouldBePDFDoc(ctx.tab);
+        ctx.isPdf = IsPdfDoc(ctx.tab);
         if (ctx.isPdf && engine) {
             ctx.isPdfEncrypted = EngineMupdfIsEncrypted(engine);
         }
@@ -362,7 +405,9 @@ AppCommandCtx NewAppCommandCtx(MainWindow* win, Point cursorPos) {
 
     DisplayModel* dm = win->AsFixed();
     if (dm) {
-        auto engine = dm->GetEngine();
+        ctx.isFixedPage = true;
+        auto* engine = dm->GetEngine();
+        ctx.hasTextSelection = ctx.hasSelection && dm->textSelection->result.len > 0;
         ctx.supportsAnnots = EngineSupportsAnnotations(engine) && !win->isFullScreen;
         ctx.hasUnsavedAnnotations = EngineHasUnsavedAnnotations(engine);
         int pageNoUnderCursor = dm->GetPageNoByPoint(cursorPos);
@@ -373,9 +418,12 @@ AppCommandCtx NewAppCommandCtx(MainWindow* win, Point cursorPos) {
         IPageElement* pageEl = dm->GetElementAtPos(cursorPos, nullptr);
         if (pageEl) {
             Str value = pageEl->GetValue();
-            ctx.cursorOnLinkTarget = value && pageEl->Is(kindPageElementDest);
+            ctx.cursorOnLinkTarget = pageEl->Is(kindPageElementDest) && PageDestHasAddress(pageEl->AsLink());
             ctx.cursorOnComment = value && pageEl->Is(kindPageElementComment);
             ctx.cursorOnImage = pageEl->Is(kindPageElementImage);
+        }
+        if (ctx.annotationUnderCursor) {
+            ctx.cursorOnComment = !str::IsEmptyOrWhiteSpace(Contents(ctx.annotationUnderCursor));
         }
     }
 
@@ -411,31 +459,21 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
     CustomCommand* cmd = FindCustomCommand(cmdId);
     int origCmdId = cmd ? cmd->origId : 0;
     if (origCmdId == CmdSetTheme) {
+        if (surface == CommandSurface::Palette) {
+            return CommandVisibility::Hide;
+        }
         return CommandVisibility::Show;
     }
 
-    if (cmdId == CmdAIChatWithClaudeCode) {
-        if (!IsClaudeCodeAvailable()) {
+    if (cmdId == CmdAIChatWithClaudeCode || cmdId == CmdAIChatWithGrokBuild || cmdId == CmdAIChatWithOpenAICodex ||
+        cmdId == CmdAIChatWithAntiGravity) {
+        if (!IsAIChatAvailable()) {
             return CommandVisibility::Hide;
         }
-        if (!IsClaudeCodeSupportedForTab(ctx.tab)) {
-            return MapForSurface(CommandVisibility::Disable, surface);
-        }
-    }
-    if (cmdId == CmdAIChatWithGrokBuild) {
-        if (!IsGrokBuildAvailable()) {
+        // Hide (not disable) so the "AI chat with document" context submenu is
+        // empty and dropped for unsupported types (images, comics, DjVu, …).
+        if (!IsAIChatSupportedForTab(ctx.tab)) {
             return CommandVisibility::Hide;
-        }
-        if (!IsGrokBuildSupportedForTab(ctx.tab)) {
-            return MapForSurface(CommandVisibility::Disable, surface);
-        }
-    }
-    if (cmdId == CmdAIChatWithOpenAICodex) {
-        if (!IsCodexBuildAvailable()) {
-            return CommandVisibility::Hide;
-        }
-        if (!IsCodexBuildSupportedForTab(ctx.tab)) {
-            return MapForSurface(CommandVisibility::Disable, surface);
         }
     }
     if (cmdId == CmdTranslateSelectionWithGrokBuild && !IsGrokBuildInstalled()) {
@@ -447,6 +485,9 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
     if (cmdId == CmdTranslateSelectionWithOpenAICodex && !IsCodexBuildInstalled()) {
         return CommandVisibility::Hide;
     }
+    if (cmdId == CmdTranslateSelectionWithAntiGravity && !IsAntiGravityInstalled()) {
+        return CommandVisibility::Hide;
+    }
 
     if (surface == CommandSurface::Palette) {
         if (CmdIdInI32List(cmdId, gCommandsDebugOnly)) {
@@ -455,6 +496,11 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
             }
         }
         if (CmdIdInI32List(cmdId, gBlacklistCommandsFromPalette)) {
+            return CommandVisibility::Hide;
+        }
+        // Copy Image is handled by the canvas context menu, which retains the
+        // page element under the cursor. Palette dispatch has no image element.
+        if (cmdId == CmdCopyImage) {
             return CommandVisibility::Hide;
         }
     }
@@ -499,6 +545,10 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         return CommandVisibility::Hide;
     }
 
+    if (cmdId == CmdShowGeneratedHTML && !ctx.isMarkdown) {
+        return CommandVisibility::Hide;
+    }
+
     if (ctx.tab) {
         int idFirst = CmdOpenWithKnownExternalViewerFirst + 1;
         int idLast = CmdOpenWithKnownExternalViewerLast;
@@ -526,10 +576,6 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         return ctx.hasSelection ? CommandVisibility::Show : MapForSurface(CommandVisibility::Disable, surface);
     }
 
-    if (surface == CommandSurface::Palette && cmdId == CmdToggleFrequentlyRead) {
-        return CommandVisibility::Hide;
-    }
-
     if (cmdId == CmdToggleMenuBar) {
         return ctx.allowToggleMenuBar ? CommandVisibility::Show : CommandVisibility::Hide;
     }
@@ -543,6 +589,10 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         }
     }
 
+    if (!ctx.hasTextSelection && CmdIdInList(cmdId, createAnnotFromSelection)) {
+        return MapForSurface(CommandVisibility::Disable, surface);
+    }
+
     if (ctx.isChm && CmdIdInList(cmdId, removeIfChm)) {
         return CommandVisibility::Hide;
     }
@@ -551,10 +601,15 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         return CommandVisibility::Hide;
     }
 
+    if (!ctx.isReflowable && cmdId == CmdChangeEbookSettings) {
+        // font, line spacing and CSS only mean something for a reflowed document
+        return CommandVisibility::Hide;
+    }
+
     if (!ctx.isPdf) {
         if (cmdId == CmdPdShowInfo || cmdId == CmdPdfBake || cmdId == CmdPdfCompress || cmdId == CmdPdfDecompress ||
             cmdId == CmdPdfEncrypt || cmdId == CmdPdfDecrypt || cmdId == CmdPdfDeletePages ||
-            cmdId == CmdPdfExtractPages) {
+            cmdId == CmdPdfExtractPages || cmdId == CmdTogglePageBoxes || cmdId == CmdConvertPdfToImages) {
             return CommandVisibility::Hide;
         }
     }
@@ -581,11 +636,57 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         }
     }
 
-    if (cmdId == CmdToggleMangaMode) {
-        if (surface == CommandSurface::Palette && ctx.isSinglePage) {
+    bool isTextSelectCmd = cmdId == CmdSelectTextViaKeyboard || cmdId == CmdExtendSelectionCharLeft ||
+                           cmdId == CmdExtendSelectionCharRight || cmdId == CmdExtendSelectionWordLeft ||
+                           cmdId == CmdExtendSelectionWordRight;
+    if (isTextSelectCmd) {
+        // needs a fixed-page engine with extractable text: image collections
+        // have none and CHM / markdown do their own selection (#4684, #4116)
+        Kind k = ctx.engineKind;
+        bool isImage = k == kindEngineImage || k == kindEngineImageDir || k == kindEngineComicBooks;
+        if (ctx.isImageCollection || isImage || ctx.isChm || !k) {
             return CommandVisibility::Hide;
         }
-        if (!ctx.isCbx) {
+    }
+
+    if (cmdId == CmdToggleKeyboardLinkFollowing) {
+        // pages of image collections (comic books, image folders, single
+        // images) can't carry links; CHM / markdown handle their own (#2629)
+        Kind k = ctx.engineKind;
+        bool isImage = k == kindEngineImage || k == kindEngineImageDir || k == kindEngineComicBooks;
+        if (ctx.isImageCollection || isImage || ctx.isChm || !k) {
+            return CommandVisibility::Hide;
+        }
+    }
+
+    if (cmdId == CmdToggleMangaMode) {
+        if (!ctx.isFixedPage) {
+            return CommandVisibility::Hide;
+        }
+        // available in single page view too: right-to-left also decides which
+        // way the page turns and which side of the canvas advances (#1264)
+    }
+
+    if (cmdId == CmdToggleUniformPageWidth && !ctx.isFixedPage) {
+        return CommandVisibility::Hide;
+    }
+
+    if (cmdId == CmdConvertToPDF) {
+        // comic books, image folders, single images (issue #4118)
+        Kind k = ctx.engineKind;
+        bool isImage =
+            k == kindEngineImage || k == kindEngineImageDir || k == kindEngineComicBooks || ctx.isImageCollection;
+        if (!ctx.isDocLoaded || !isImage) {
+            return CommandVisibility::Hide;
+        }
+    }
+
+    if (surface == CommandSurface::Palette && ctx.engineKind != kindEngineImage) {
+        // The context menu can edit an image embedded in another document because it
+        // retains the page element under the cursor. Palette commands only receive the
+        // current tab, so these operations are available for standalone images only.
+        if (cmdId == CmdSaveImage || cmdId == CmdCropImage || cmdId == CmdResizeImage ||
+            cmdId == CmdConvertImageToPdf) {
             return CommandVisibility::Hide;
         }
     }
@@ -642,6 +743,16 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         return ctx.hasToc ? CommandVisibility::Show : CommandVisibility::Hide;
     }
 
+    // No extractable text on comics, image folders, or single images.
+    if (cmdId == CmdReadAloud || cmdId == CmdReadAloudFromTopPage || cmdId == CmdReadAloudSelection ||
+        cmdId == CmdPauseReadAloud || cmdId == CmdContinueReadAloud || cmdId == CmdStopReadAloud) {
+        Kind k = ctx.engineKind;
+        bool isImage =
+            k == kindEngineImage || k == kindEngineImageDir || k == kindEngineComicBooks || ctx.isImageCollection;
+        if (isImage) {
+            return CommandVisibility::Hide;
+        }
+    }
     if (cmdId == CmdPauseReadAloud) {
         return ctx.isSpeaking ? CommandVisibility::Show : CommandVisibility::Hide;
     }

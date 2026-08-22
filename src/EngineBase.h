@@ -4,6 +4,26 @@
 struct fz_outline;
 struct fz_link;
 struct Pixmap;
+struct RenderedBitmap;
+struct IPageDestination;
+struct TocItem;
+struct PropValue;
+enum class DocProp : u8;
+
+struct ILinkHandler {
+    virtual ~ILinkHandler() {};
+    virtual void GotoLink(IPageDestination*) = 0;
+    virtual void GotoNamedDest(Str) = 0;
+    virtual void GoToPage(int pageNo, bool addNavPoint) = 0;
+    virtual bool GoToNextPage() = 0;
+    virtual bool GoToPrevPage(bool toBottom = false) = 0;
+    virtual void ScrollTo(IPageDestination*) = 0;
+    virtual void ScrollTo(int pageNo, RectF rect, float zoom) = 0;
+    virtual void LaunchURL(Str) = 0;
+    virtual void LaunchFile(Str path, IPageDestination*) = 0;
+    // first ToC entry whose title (partially) matches name; nullptr if none
+    virtual TocItem* FindTocItem(TocItem* item, Str name, bool partially) = 0;
+};
 
 enum class PageInfoState {
     Unknown,
@@ -49,8 +69,29 @@ struct PageLayout {
     explicit PageLayout(Type t) { type = t; }
     Type type{Type::Single};
     bool r2l = false;
+    // the document stated its reading direction (PDF /Direction or EPUB
+    // page-progression-direction), so r2l is its wish rather than our default.
+    // A remembered setting must not silently overrule it
+    bool r2lDeclared = false;
     bool nonContinuous = false;
 };
+
+// PDF page boxes (ISO 32000). MediaBox is required; Crop/Bleed/Trim/Art are
+// optional and inherit from the parent /Pages node. They are per-page.
+enum class PdfPageBoxKind : u8 {
+    Media = 0,
+    Crop,
+    Bleed,
+    Trim,
+    Art
+};
+
+struct PdfPageBox {
+    PdfPageBoxKind kind{};
+    RectF rect;
+};
+
+const char* PdfPageBoxName(PdfPageBoxKind kind);
 
 extern Kind kindDestinationNone;
 extern Kind kindDestinationScrollTo;
@@ -60,6 +101,7 @@ extern Kind kindDestinationAttachment;
 extern Kind kindDestinationLaunchFile;
 extern Kind kindDestinationDjVu;
 extern Kind kindDestinationMupdf;
+extern Kind kindDestinationJsMenu;
 
 enum class TextExtractionState {
     NotExtracted,
@@ -81,7 +123,7 @@ void FreePageText(PageText*);
 struct IPageDestination : KindBase {
     // page the destination points to (-1 for external destinations such as URLs)
     int pageNo = -1;
-    RectF rect = {};
+    RectF rect;
     float zoom = 0.f;
 
     IPageDestination() = default;
@@ -108,6 +150,17 @@ static inline Str PageDestGetName(IPageDestination* dest) {
 
 static inline Str PageDestGetValue(IPageDestination* dest) {
     return dest->GetValue2();
+}
+
+// true when the destination's value is an address worth copying (a URL or a
+// file path). A link inside the document has no address; its value is the
+// description the PDF gives it, which is for showing, not for copying
+static inline bool PageDestHasAddress(IPageDestination* dest) {
+    if (!dest || !dest->GetValue2()) {
+        return false;
+    }
+    Kind k = dest->GetKind();
+    return k == kindDestinationLaunchURL || k == kindDestinationLaunchFile;
 }
 
 static inline int PageDestGetPageNo(IPageDestination* dest) {
@@ -158,8 +211,7 @@ struct PageDestinationURL : IPageDestination {
             return {};
         }
         if (!displayUrl) {
-            displayUrl = str::Dup(url);
-            url::DecodeInPlace(displayUrl.s);
+            displayUrl = str::Dup(url::DecodeTemp(url));
         }
         return displayUrl;
     }
@@ -168,6 +220,10 @@ struct PageDestinationURL : IPageDestination {
 struct PageDestinationFile : IPageDestination {
     Str path;
     Str dest;
+    // PDF GoToR /NewWindow (when known). MuPDF's file: URI conversion does not
+    // currently preserve this flag; callers may still set it, and Ctrl+click
+    // also opens remote files in a new window.
+    bool openInNewWindow = false;
 
     PageDestinationFile() = delete;
 
@@ -201,10 +257,21 @@ struct PageDestination : IPageDestination {
     Str GetName2() override;
 };
 
+// JavaScript app.popUpMenu items (Altium schematic PDFs, issue #1198).
+struct PageDestinationJsMenu : IPageDestination {
+    StrVec items;
+    Str tooltip;
+
+    PageDestinationJsMenu();
+    ~PageDestinationJsMenu() override;
+
+    Str GetValue2() override;
+};
+
 IPageDestination* NewSimpleDest(int pageNo, RectF rect, float zoom = 0.f, Str value = {});
 
 // use in PageDestination::GetDestRect for values that don't matter
-#define DEST_USE_DEFAULT -999.9f
+constexpr float kDestUseDefault = -999.9f;
 
 extern Kind kindPageElementDest;
 extern Kind kindPageElementImage;
@@ -214,7 +281,7 @@ extern Kind kindPageElementComment;
 struct IPageElement {
     Kind kind = nullptr;
     // position of the element on the page
-    RectF rect{};
+    RectF rect;
     int pageNo = -1;
 
     virtual ~IPageElement() = default;
@@ -288,9 +355,9 @@ extern Kind kindTocDjvu;
 
 // an item in a document's Table of Content
 struct TocItem {
-    HTREEITEM hItem = nullptr;
+    uintptr_t userData = 0;
 
-    TocItem* parent = nullptr;
+    TocItem* parent;
 
     // the item's visible label
     Str title;
@@ -298,46 +365,38 @@ struct TocItem {
     // in some formats, the document can specify the tree item
     // is expanded by default. We keep track if user toggled
     // expansion state of the tree item
-    bool isOpenDefault = false;
-    bool isOpenToggled = false;
+    bool isOpenDefault;
+    bool isOpenToggled;
 
-    bool isUnchecked = false;
+    bool isUnchecked;
 
     // page this item points to (-1 for non-page destinations)
     // if GetLink() returns a destination to a page, the two should match
-    int pageNo = 0;
+    int pageNo;
 
     // arbitrary number allowing to distinguish this TocItem
     // from any other of the same ToC tree (must be constant
     // between runs so that it can be persisted in FileState::tocState)
-    int id = 0;
+    int id;
 
-    int fontFlags = 0; // fontBitBold, fontBitItalic
-    COLORREF color{kColorUnset};
+    int fontFlags; // fontBitBold, fontBitItalic
+    Color color;
 
-    IPageDestination* dest = nullptr;
-    bool destNotOwned = false;
+    IPageDestination* dest;
+    bool destNotOwned;
 
     // first child item
-    TocItem* child = nullptr;
+    TocItem* child;
     // next sibling
-    TocItem* next = nullptr;
+    TocItem* next;
 
     // caching to speed up ChildAt
-    TocItem* currChild = nullptr;
-    int currChildNo = 0;
-
-    TocItem() = default;
-
-    explicit TocItem(TocItem* parent, Str title, int pageNo);
-
-    ~TocItem();
+    TocItem* currChild;
+    int currChildNo;
 
     void AddSibling(TocItem* sibling);
     void AddSiblingAtEnd(TocItem* sibling);
     void AddChild(TocItem* child);
-
-    void DeleteJustSelf();
 
     IPageDestination* GetPageDestination() const;
 
@@ -348,6 +407,9 @@ struct TocItem {
     bool PageNumbersMatch() const;
 };
 
+TocItem* AllocTocItem(Arena* arena, Str title, int pageNo);
+void FreeTocItemRec(Arena* arena, TocItem* item);
+
 struct TocTree : TreeModel {
     TocItem* root = nullptr;
 
@@ -355,18 +417,17 @@ struct TocTree : TreeModel {
     explicit TocTree(TocItem* root);
     ~TocTree() override;
 
-    // TreeModel
     TreeItem Root() override;
 
     Str Text(TreeItem) override;
     TreeItem Parent(TreeItem) override;
     int ChildCount(TreeItem) override;
-    TreeItem ChildAt(TreeItem, int index) override;
+    TreeItem ChildAt(TreeItem, int idx) override;
     bool IsExpanded(TreeItem) override;
     bool IsChecked(TreeItem) override;
 
-    void SetHandle(TreeItem, HTREEITEM) override;
-    HTREEITEM GetHandle(TreeItem) override;
+    void SetUserData(TreeItem, uintptr_t) override;
+    uintptr_t GetUserData(TreeItem) override;
 };
 
 struct VisitTocTreeData {
@@ -387,6 +448,8 @@ class AbortCookie {
     virtual void* GetData() = 0;
 };
 
+struct DarkModeProfile;
+
 struct RenderPageArgs {
     int pageNo = 0;
     float zoom = 0.f;
@@ -394,7 +457,15 @@ struct RenderPageArgs {
     /* if nullptr: defaults to the page's mediabox */
     RectF* pageRect = nullptr;
     RenderTarget target = RenderTarget::View;
+    // the caller paints a background first and composites the page over it, so
+    // a page with transparency should keep its alpha instead of being flattened
+    // onto white. Only the canvas does that; print and export need an opaque
+    // page, and so does anything that blits the result with SRCCOPY (#5844)
+    bool keepAlpha = false;
     AbortCookie** cookie_out = nullptr;
+    // dark/recolor rendering profile for View renders (see PdfDarkMode.h);
+    // owned by the caller, only valid for the duration of RenderPage()
+    const DarkModeProfile* darkProfile = nullptr;
 
     RenderPageArgs(int pageNo, float zoom, int rotation, RectF* pageRect = nullptr,
                    RenderTarget target = RenderTarget::View, AbortCookie** cookie_out = nullptr);
@@ -412,6 +483,10 @@ class EngineBase {
     PageLayout preferredLayout;
     float fileDPI = 96.0f;
     bool isImageCollection = false;
+    // a document laid out into pages we choose (epub, mobi, fb2, html...),
+    // as opposed to one with fixed pages. the ebook settings only apply to
+    // these, so the UI uses it to decide what to offer (#4600)
+    bool isReflowable = false;
     bool allowsPrinting = true;
     bool allowsCopyingText = true;
     bool isPasswordProtected = false;
@@ -423,8 +498,6 @@ class EngineBase {
     bool disableAutoLinks = false;
     int pageCount = -1;
 
-    StrVec errors;
-
     // TODO: migrate other engines to use this
     Str fileNameBase;
 
@@ -434,24 +507,23 @@ class EngineBase {
     virtual EngineBase* Clone() = 0;
 
     int AddRef();
-    // return true if deleted the object
     bool Release();
 
-    // number of pages the loaded document contains
+    void AppendError(Str msg);
+    bool HasErrors();
+    TempStr GetErrorsTextTemp();
+
     int PageCount() const;
 
     // the box containing the visible page content (usually RectF(0, 0, pageWidth, pageHeight))
     virtual RectF PageMediabox(int pageNo) = 0;
-    // the box inside PageMediabox that actually contains any relevant content
-    // (used for auto-cropping in Fit Content mode, can be PageMediabox)
     virtual RectF PageContentBox(int pageNo, RenderTarget target = RenderTarget::View);
+    virtual void GetPdfPageBoxes(int pageNo, Vec<PdfPageBox>& out);
 
-    // renders a page into a cacheable RenderedBitmap
+    // renders a page into a cacheable Pixmap
     // (*cookie_out must be deleted after the call returns)
     virtual Pixmap* RenderPage(RenderPageArgs& args) = 0;
 
-    // applies zoom and rotation to a point in user/page space converting
-    // it into device/screen space - or in the inverse direction
     PointF Transform(PointF pt, int pageNo, float zoom, int rotation, bool inverse = false);
     virtual RectF Transform(const RectF& rect, int pageNo, float zoom, int rotation, bool inverse = false) = 0;
 
@@ -461,94 +533,85 @@ class EngineBase {
     virtual Str GetFileData() = 0;
 
     // saves a copy of the current file under a different name (overwriting an existing file)
-    virtual bool SaveFileAs(Str copyFileName) = 0;
+    virtual bool SaveFileAs(Str dstPath) = 0;
 
     // extracts all text found in the given page (and optionally also the
     // coordinates of the individual glyphs)
     // caller needs to free() the result and *coordsOut (if coordsOut is non-nullptr)
     virtual PageText ExtractPageText(int) { return {}; }
+    virtual bool TryExtractPageText(int pageNo, PageText* out);
 
-    // cached per-page text. First call on a page extracts text and caches it,
-    // subsequent calls return the cached copy. The returned pointers are owned
-    // by EngineBase and remain valid for the lifetime of the engine.
     bool HasTextForPage(int pageNo);
     TextExtractionState GetTextExtractionState(int pageNo);
     void RequestTextExtraction(int pageNo);
     Str GetTextForPage(int pageNo, int* lenOut = nullptr, Rect** coordsOut = nullptr);
+    bool TryGetTextForPage(int pageNo, int* lenOut = nullptr, Rect** coordsOut = nullptr);
     virtual void ReleaseTextExtractionThreadContext() {}
     // pages where clipping doesn't help are rendered in larger tiles
     virtual bool HasClipOptimizations(int pageNo) = 0;
 
-    // the layout type this document's author suggests (if the user doesn't care)
-    // whether the content should be displayed as images instead of as document pages
-    // (e.g. with a black background and less padding in between and without search UI)
     bool IsImageCollection() const;
 
     // access to various document properties (such as Author, Title, etc.)
-    virtual TempStr GetPropertyTemp(Str name) = 0;
+    virtual TempStr GetPropertyTemp(DocProp prop) = 0;
 
-    // keys are names of properties the caller wants. If given, we append those
-    // proerties in this order and potentially add more
-    // if keys are empty, we put them in order we want
-    virtual void GetProperties(StrVec& keyValOut);
+    virtual void GetProperties(Vec<PropValue>& propsOut);
 
-    // TODO: needs a more general interface
-    // whether it is allowed to print the current document
     virtual bool AllowsPrinting() const;
 
-    // whether it is allowed to extract text from the current document
-    // (except for searching an accessibility reasons)
     bool AllowsCopyingText() const;
 
-    // the DPI for a file is needed when converting internal measures to physical ones
     float GetFileDPI() const;
 
     // returns a list of all available elements for this page
     // caller must delete the Vec but not the elements inside the vector
     virtual Vec<IPageElement*> GetElements(int pageNo) = 0;
+    virtual bool TryGetElements(int pageNo, Vec<IPageElement*>* out);
 
     // returns the element at a given point or nullptr if there's none
     virtual IPageElement* GetElementAtPos(int pageNo, PointF pt) = 0;
 
-    // creates a PageDestination from a name (or nullptr for invalid names)
-    // caller must delete the result
     virtual IPageDestination* GetNamedDest(Str name);
 
-    // checks whether this document has an associated Table of Contents
-    bool HasToc();
+    // 1-based page from safe PDF /OpenAction GoTo, or 0 (issue #1631)
+    virtual int GetOpenActionPageNo() { return 0; }
 
-    // returns the root element for the loaded document's Table of Contents
-    // caller must delete the result (when no longer needed)
+    virtual bool HasToc();
+
     virtual TocTree* GetToc();
 
-    // checks whether this document has explicit labels for pages (such as
-    // roman numerals) instead of the default plain arabic numbering
     bool HasPageLabels() const;
 
-    // returns a label to be displayed instead of the page number
-    // caller must free() the result
     virtual TempStr GetPageLabeTemp(int pageNo) const;
 
-    // reverts GetPageLabel by returning the first page number having the given label
     virtual int GetPageByLabel(Str label) const;
 
-    // whether this document required a password in order to be loaded
     bool IsPasswordProtected() const;
 
     // loads the given page so that the time required can be measured
     // without also measuring rendering times
     virtual bool BenchLoadPage(int pageNo) = 0;
 
-    // the name of the file this engine handles
     Str FilePath() const;
 
     virtual RenderedBitmap* GetImageForPageElement(IPageElement*);
+    virtual Str GetImageDataForPageElement(IPageElement*);
 
-    // returns false if didn't perform action (temporary until we move
-    // all code there)
     virtual bool HandleLink(IPageDestination*, ILinkHandler*);
 
-    // protected:
+    // bitmap regions (in device pixels of the rendered tile) whose original
+    // colors should be preserved by the dark-mode bitmap recolor pass
+    // (photos / artwork); default: none
+    virtual void GetBitmapRecolorSkipRects(int pageNo, float zoom, int rotation, const RectF& renderPageRect,
+                                           Size bmpSize, Vec<Rect>& skipRects) {
+        (void)pageNo;
+        (void)zoom;
+        (void)rotation;
+        (void)renderPageRect;
+        (void)bmpSize;
+        skipRects.Clear();
+    }
+
     void SetFilePath(Str s);
 
   protected:
@@ -557,11 +620,14 @@ class EngineBase {
     // cached text, one entry per page (lazily allocated)
     PageText* pagesText = nullptr;
     TextExtractionState* pagesTextState = nullptr;
-    CRITICAL_SECTION textCacheLock;
+    Mutex textCacheLock;
+
+    str::Builder errors;
+    Mutex errorsLock;
 };
 
 struct PasswordUI {
-    virtual Str GetPassword(Str fileName, u8* fileDigest, u8 decryptionKeyOut[32], bool* saveKey) = 0;
+    virtual Str GetPassword(Str path, u8* fileDigest, u8 decryptionKeyOut[32], bool* saveKey) = 0;
     virtual ~PasswordUI() = default;
 };
 
@@ -585,9 +651,8 @@ struct PdfViewerPrintPrefs {
     bool printScalingNone = false; // true when /PrintScaling is /None
 };
 
-// reads the four print-related /ViewerPreferences entries from a PDF document.
-// returns false for non-PDF engines or when none of the entries are present.
 bool GetPdfViewerPrintPrefs(EngineBase* engine, PdfViewerPrintPrefs& prefs);
+bool SaveFileOrData(Str srcFilePath, Str data, Str dstFilePath);
 
 template <typename T>
 void SafeEngineRelease(T** enginePtr) {

@@ -5,14 +5,21 @@
 #include "base/WinDynCalls.h"
 #include "base/UITask.h"
 #include "base/Win.h"
-#include "base/Dpi.h"
+#include "gui/Dpi.h"
 
-#include "wingui/UIModels.h"
-#include "wingui/Layout.h"
-#include "wingui/WinGui.h"
+#include "base/Pixmap.h"
+
+#include "gui/UIModels.h"
+#include "gui/Layout.h"
+#include "gui/win/WinGui.h"
+#include "gui/PlatformFont.h"
+#include "gui/Gfx.h"
+#include "gui/GuiColors.h"
+#include "gui/VirtCtrl.h"
 
 #include "Settings.h"
 #include "GlobalPrefs.h"
+#include "AppSettings.h"
 #include "DocController.h"
 #include "EngineBase.h"
 #include "ProgressUpdateUI.h"
@@ -24,24 +31,102 @@
 #include "Commands.h"
 #include "Accelerators.h"
 #include "SvgIcons.h"
-#include "Toolbar.h"
 #include "SearchAndDDE.h"
 #include "FindBar.h"
 #include "FindWindow.h"
 #include "FilterHighlightDraw.h"
 #include "Translations.h"
 #include "Theme.h"
-#include "DarkModeSubclass.h"
-
-// match the frame's title bar to the current theme (dark caption in dark mode)
-static void ApplyTitleBarTheme(HWND hwnd) {
-    if (UseDarkModeLib()) {
-        DarkMode::setDarkTitleBarEx(hwnd, true);
-    }
-}
+#include "DarkMode_win.h"
 
 // command ids for the window's toolbar buttons (handled in OnCommand)
 constexpr int kFindWinPinCmdId = (int)CmdLast + 51;
+
+constexpr int kFindWinPadding = 8;
+constexpr int kFindWinGap = 6;
+constexpr int kFindWinMinEditDx = 48;
+
+namespace {
+
+// exact-width box: the child is constrained to `dx`
+struct FindFixedDx : ILayout {
+    ILayout* child = nullptr;
+    int dx = 0;
+
+    FindFixedDx(ILayout* c, int dxIn);
+    ~FindFixedDx() override;
+
+    Size Layout(Constraints bc) override;
+    int MinIntrinsicHeight(int width) override;
+    int MinIntrinsicWidth(int height) override;
+    void SetBounds(Rect) override;
+    int LayoutChildCount() override;
+    ILayout* LayoutChildAt(int) override;
+};
+
+FindFixedDx::FindFixedDx(ILayout* c, int dxIn) {
+    child = c;
+    dx = dxIn;
+}
+
+FindFixedDx::~FindFixedDx() {
+    delete child;
+}
+
+int FindFixedDx::LayoutChildCount() {
+    return child ? 1 : 0;
+}
+
+ILayout* FindFixedDx::LayoutChildAt(int) {
+    return child;
+}
+
+int FindFixedDx::MinIntrinsicWidth(int) {
+    return dx;
+}
+
+int FindFixedDx::MinIntrinsicHeight(int width) {
+    return child ? child->MinIntrinsicHeight(width) : 0;
+}
+
+Size FindFixedDx::Layout(const Constraints bc) {
+    int w = MinIntrinsicWidth(0);
+    if (bc.min.dx > w) {
+        w = bc.min.dx;
+    }
+    if (bc.HasBoundedWidth() && bc.max.dx < w) {
+        w = bc.max.dx;
+    }
+    Size s = child ? child->Layout(bc.TightenWidth(w)) : Size{};
+    return {w, s.dy};
+}
+
+void FindFixedDx::SetBounds(Rect r) {
+    lastBounds = r;
+    if (child) {
+        child->SetBounds(r);
+    }
+}
+
+static int DecimalDigits(int n) {
+    int digits = 1;
+    while (n >= 10) {
+        n /= 10;
+        digits++;
+    }
+    return digits;
+}
+
+static int FindStatusDx(PlatformFont* font, int totalHits, bool capped) {
+    int digits = DecimalDigits(std::max(totalHits, 0));
+    int nChars = (2 * digits) + 3; // N, " / ", M
+    if (capped) {
+        nChars++; // the trailing '+' in e.g. "999 / 999+"
+    }
+    return nChars * font->averageCharWidth;
+}
+
+} // namespace
 
 struct FindWindowWnd;
 
@@ -63,17 +148,49 @@ struct FindResultsModel : ListBoxModel {
     Str Item(int i) override { return win->findMatches[i].snippet; }
 };
 
-struct FindWindowWnd : Wnd {
+// list index of the match starting at (page, glyph), or -1 if there is none
+static int FindMatchIndex(MainWindow* win, int page, int glyph) {
+    int n = len(win->findMatches);
+    for (int i = 0; i < n; i++) {
+        const FindMatch& fm = win->findMatches[i];
+        if (fm.startPage == page && fm.startGlyph == glyph) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+struct FindWindowWnd : WindowBase {
     MainWindow* win = nullptr;
-    Edit* edit = nullptr;
-    Static* status = nullptr;
-    HWND hwndBtns = nullptr; // prev / next / match-case / unpin(dock)
-    HIMAGELIST himl = nullptr;
-    ListBox* results = nullptr;
+    DropDown* edit = nullptr;
+    Edit* editPages = nullptr;      // optional page range, e.g. "10-25" (issue #5694)
+    VirtText* pagesLabel = nullptr; // "Limit to pages 1-N:"
+    // the status text, the buttons and the results list are virtual controls;
+    // the search fields are HWND children. Owned by `layout` once built
+    VirtText* status = nullptr;
+    FindFixedDx* statusBox = nullptr;
+    FindFixedDx* pagesBox = nullptr;
+    HBox* toolsLayout = nullptr;
+    Wrap* headerLayout = nullptr;
+    Spacer* pagesLabelGap = nullptr;
+    Spacer* headerPagesGap = nullptr;
+    Spacer* pagesResultsGap = nullptr;
+    Padding* rootPadding = nullptr;
+    int layoutDpi = 96;
+    // prev / next / match-case / match-whole-word / unpin(dock)
+    VirtIconButton* btns[5]{};
+    VirtListBox* results = nullptr;
     StrVec filterWords; // search term(s) to highlight in snippets
     Vec<u8> hlScratch;  // reused highlight mask for DrawMaybeHighlightedText
     // coalesce rapid list selections: only the latest deferred navigation runs
-    LONG pendingNavEpoch = 0;
+    AtomicInt pendingNavEpoch = 0;
+    // the match the list was selected on, saved before win->findMatches is
+    // rebuilt. The list is sorted by page while the scan wraps around, so a
+    // later batch inserts rows *above* the selection; restoring by match
+    // identity keeps the selection on the same result instead of the same row.
+    // One-shot: RefreshResults consumes and clears it. <= 0: nothing saved
+    int savedSelPage = -1;
+    int savedSelGlyph = -1;
     // in an interactive size/move loop (between WM_ENTERSIZEMOVE/EXITSIZEMOVE)
     bool inSizeMove = false;
     // list redraw is paused only while interactively *resizing* (a WM_SIZE
@@ -84,27 +201,38 @@ struct FindWindowWnd : Wnd {
     ~FindWindowWnd() override;
 
     bool Create(MainWindow* win);
+    void CreateButtons();
+    void UpdateButtonIcons(int dpi = 0);
+    void BuildLayout();
     void Layout();
+    void UpdateDpi(int dpi);
+    bool UpdateStatusWidth(int totalHits, bool capped);
     void SavePos();
-    void RefreshResults();
-    void UpdateTheme();
+    void RefreshResults(bool allowNavigation = true);
+    void UpdateTheme() override;
+    void ApplyDarkMode() override;
+    void UpdatePagesLabel();
 
     void OnTextChanged();
-    void DrawResultItem(ListBox::DrawItemEvent* ev);
+    void OnHistorySelected();
+    void DrawResultItem(VirtListBox::DrawItemEvent* ev);
     void OnResultSelected();
+    void SaveSelectedMatch();
     bool MoveResultSelection(WPARAM vkey);
     int CurrentMatchIndex();         // list index of the document's current match, or -1
     int FirstMatchFromCurrentPage(); // list index of the first match at/after the current page
 
-    LRESULT WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) override;
-    LRESULT OnNotify(int controlId, NMHDR* nmh) override;
-    bool PreTranslateMessage(MSG& msg) override;
-    bool OnCommand(WPARAM wparam, LPARAM lparam) override;
+    void OnSize(WindowBase::SizeEvent* ev);
+    void OnDpiChanged(WindowBase::DpiChangedEvent* ev);
+    void OnGetMinMaxInfo(WindowBase::GetMinMaxInfoEvent* ev);
+    void OnClose(WindowBase::CloseEvent* ev);
+    void OnKeyDown(KeyEvent* ev);
+    void OnCommand(WindowBase::CommandEvent* ev);
 };
 
 static void DeferredGoToFindMatch(DeferredGoToFindMatchData* d) {
     AutoDelete del(d);
-    if (!IsMainWindowValid(d->win) || !d->findWindow) {
+    if (!IsMainWindowValidAndNotClosing(d->win) || !d->findWindow) {
         return;
     }
     if (d->epoch != d->findWindow->pendingNavEpoch) {
@@ -139,13 +267,46 @@ static TempStr FindWindowButtonTooltip(int cmd) {
 }
 
 FindWindowWnd::~FindWindowWnd() {
-    delete edit;
-    delete status;
-    delete results; // also deletes its FindResultsModel
-    HwndDestroyWindowSafe(&hwndBtns);
-    if (himl) {
-        ImageList_Destroy(himl);
+    // edit, status, buttons and results are owned by `layout` (deleted in ~WindowBase)
+}
+
+// the pixmaps belong to the icon cache, which re-renders them for the current
+// theme and size
+void FindWindowWnd::UpdateButtonIcons(int dpi) {
+    static const char* icons[5] = {gIconChevronUp, gIconChevronDown, gIconMatchCase, gIconMatchWholeWord,
+                                   gIconArrowsDiagonalMinimize};
+    if (dpi <= 0) {
+        dpi = GetDpi();
     }
+    int isz = RoundUp(DpiScaleByDpi(dpi, 16), 4);
+    for (int i = 0; i < 5; i++) {
+        if (btns[i]) {
+            btns[i]->pixmap = GetCachedPixmapForSvg(icons[i], isz, isz);
+        }
+    }
+}
+
+static void FindWindowButtonClicked(FindWindowWnd* w, VirtMouseEvent* ev) {
+    auto* btn = (VirtIconButton*)ev->target;
+    WindowBase::CommandEvent ce;
+    ce.w = w;
+    ce.wparam = (WPARAM)btn->id;
+    w->OnCommand(&ce);
+}
+
+void FindWindowWnd::CreateButtons() {
+    static const int cmds[5] = {CmdFindPrev, CmdFindNext, CmdFindToggleMatchCase, CmdFindToggleMatchWholeWord,
+                                kFindWinPinCmdId};
+    int pad = DpiScale(4);
+    for (int i = 0; i < 5; i++) {
+        auto* b = new VirtIconButton();
+        b->id = cmds[i];
+        b->padding = Insets{pad, pad, pad, pad};
+        b->SetTooltip(FindWindowButtonTooltip(cmds[i]));
+        b->onClick = MkFunc1(FindWindowButtonClicked, this);
+        btns[i] = b;
+    }
+    UpdateButtonIcons();
 }
 
 // Destination rect: saved position, or a default size near the top-right of
@@ -174,7 +335,11 @@ bool FindWindowWnd::Create(MainWindow* mainWin) {
         CreateCustomArgs args;
         args.visible = false;
         args.title = _TRA("Find");
-        args.style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
+        // WS_CLIPCHILDREN neutralizes CS_PARENTDC of the standard controls
+        // (their DCs get clipped to the control, not to this window), so e.g.
+        // the results listbox can't paint its partially visible bottom row
+        // below itself onto this window
+        args.style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_CLIPCHILDREN;
         args.exStyle = WS_EX_TOOLWINDOW; // small caption, off the taskbar
         args.isRtl = IsUIRtl();
         args.pos = FindWindowPlacementRect(win);
@@ -186,158 +351,222 @@ bool FindWindowWnd::Create(MainWindow* mainWin) {
     // owned by the frame so it groups/minimizes with it but isn't a child
     SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, (LONG_PTR)win->hwndFrame);
     SetColors(colTxt, colBg);
-    ApplyTitleBarTheme(hwnd);
+    DarkModeApplyToTitleBar(hwnd);
+
+    {
+        DropDown::CreateArgs args;
+        args.parent = hwnd;
+        args.font = GetAppFont();
+        args.isRtl = IsUIRtl();
+        args.isEditable = true;
+        edit = new DropDown();
+        edit->SetColors(colTxt, colBg);
+        edit->Create(args);
+        edit->SetCueBanner(_TRA("Find"));
+        edit->onTextChanged = MkMethod0<FindWindowWnd, &FindWindowWnd::OnTextChanged>(this);
+        edit->onSelectionChanged = MkMethod0<FindWindowWnd, &FindWindowWnd::OnHistorySelected>(this);
+        ApplyFindHistory(edit);
+    }
 
     {
         Edit::CreateArgs args;
         args.parent = hwnd;
         args.isMultiLine = false;
         args.withBorder = true;
-        args.cueText = _TRA("Find");
+        args.cueText = StrL("e.g. 3,4-6,18-");
         args.isRtl = IsUIRtl();
-        edit = new Edit();
-        edit->maxDx = DpiScale(hwnd, 1000);
-        edit->SetColors(colTxt, colBg);
-        edit->Create(args);
-        edit->onTextChanged = MkMethod0<FindWindowWnd, &FindWindowWnd::OnTextChanged>(this);
+        editPages = new Edit();
+        editPages->SetColors(colTxt, colBg);
+        editPages->Create(args);
+        editPages->onTextChanged = MkMethod0<FindWindowWnd, &FindWindowWnd::OnTextChanged>(this);
     }
+
+    PlatformFont* platformFont = GetAppFont();
+
+    pagesLabel = NewVirtText({
+        .font = platformFont,
+        .isRtl = IsUIRtl(),
+    });
+    UpdatePagesLabel();
+
+    status = NewVirtText({
+        .font = platformFont,
+        .isRtl = IsUIRtl(),
+        // single line, vertically centered (what SS_CENTERIMAGE used to do)
+        .ellipsis = true,
+    });
+
+    CreateButtons();
 
     {
-        Static::CreateArgs args;
-        args.parent = hwnd;
-        args.text = "";
-        args.isRtl = IsUIRtl();
-        status = new Static();
-        status->SetColors(colTxt, colBg);
-        status->Create(args);
-        SetWindowStyle(status->hwnd, SS_CENTERIMAGE, true);
+        auto* c = new VirtListBox();
+        c->dpi = GetDpi();
+        c->font = platformFont;
+        c->onDrawItem = MkMethod1<FindWindowWnd, VirtListBox::DrawItemEvent*, &FindWindowWnd::DrawResultItem>(this);
+        c->onSelectionChanged = MkMethod0<FindWindowWnd, &FindWindowWnd::OnResultSelected>(this);
+        c->onDoubleClick = MkMethod0<FindWindowWnd, &FindWindowWnd::OnResultSelected>(this);
+        c->SetModel(new FindResultsModel(win));
+        results = c;
     }
 
-    {
-        DWORD style = WS_CHILD | WS_VISIBLE | TBSTYLE_FLAT | TBSTYLE_LIST | TBSTYLE_TOOLTIPS | CCS_NODIVIDER |
-                      CCS_NORESIZE | CCS_NOPARENTALIGN;
-        DWORD exStyle = IsUIRtl() ? WS_EX_LAYOUTRTL : 0;
-        HINSTANCE hinst = GetModuleHandleW(nullptr);
-        hwndBtns = CreateWindowExW(exStyle, TOOLBARCLASSNAMEW, nullptr, style, 0, 0, 0, 0, hwnd, (HMENU) nullptr, hinst,
-                                   nullptr);
-        // drop the visual-style button background so the flat toolbar shows the
-        // window's themed background instead of a light box in dark themes
-        SetWindowTheme(hwndBtns, L"", L"");
-        SendMessageW(hwndBtns, TB_BUTTONSTRUCTSIZE, (WPARAM)sizeof(TBBUTTON), 0);
+    BuildLayout();
 
-        int isz = RoundUp(DpiScale(hwnd, 16), 4);
-        himl = BuildStdToolbarImageList(isz);
-        SendMessageW(hwndBtns, TB_SETIMAGELIST, 0, (LPARAM)himl);
-        SendMessageW(hwndBtns, TB_SETBUTTONSIZE, 0, MAKELONG(isz, isz));
+    DarkModeApplyToPopupWindow(hwnd);
+    return true;
+}
 
-        TBBUTTON b[5]{};
-        b[0].iBitmap = (int)TbIcon::ChevronUp;
-        b[0].idCommand = CmdFindPrev;
-        b[0].fsState = TBSTATE_ENABLED;
-        b[0].fsStyle = BTNS_BUTTON;
-        b[1].iBitmap = (int)TbIcon::ChevronDown;
-        b[1].idCommand = CmdFindNext;
-        b[1].fsState = TBSTATE_ENABLED;
-        b[1].fsStyle = BTNS_BUTTON;
-        b[2].iBitmap = (int)TbIcon::MatchCase;
-        b[2].idCommand = CmdFindToggleMatchCase;
-        b[2].fsState = TBSTATE_ENABLED;
-        b[2].fsStyle = BTNS_CHECK;
-        b[3].iBitmap = (int)TbIcon::MatchWholeWord;
-        b[3].idCommand = CmdFindToggleMatchWholeWord;
-        b[3].fsState = TBSTATE_ENABLED;
-        b[3].fsStyle = BTNS_CHECK;
-        b[4].iBitmap = (int)TbIcon::ArrowsDiagonalMinimize;
-        b[4].idCommand = kFindWinPinCmdId;
-        b[4].fsState = TBSTATE_ENABLED;
-        b[4].fsStyle = BTNS_BUTTON;
-        SendMessageW(hwndBtns, TB_ADDBUTTONS, 5, (LPARAM)&b);
-        SendMessageW(hwndBtns, TB_AUTOSIZE, 0, 0);
+void FindWindowWnd::BuildLayout() {
+    int pad = DpiScale(kFindWinPadding);
+    int gap = DpiScale(kFindWinGap);
+    // cap preferred width at the min so Wrap decides the break from the min
+    // edit width, not the typed text (a long query would otherwise always wrap)
+    int minEditDx = DpiScale(kFindWinMinEditDx);
+    edit->idealDx = minEditDx;
+    edit->maxDx = minEditDx;
+    int pagesDx = DpiScale(160);
+    editPages->idealDx = pagesDx;
+    editPages->maxDx = pagesDx;
+
+    // status + buttons stay together so they wrap as a unit under the edit
+    auto* tools = new HBox();
+    toolsLayout = tools;
+    tools->alignCross = CrossAxisAlign::CrossCenter;
+    tools->gap = status->font->averageCharWidth;
+    statusBox = new FindFixedDx(status, FindStatusDx(status->font, 0, false));
+    tools->AddChild(statusBox);
+    for (VirtIconButton* b : btns) {
+        tools->AddChild(b);
     }
 
-    {
-        ListBox::CreateArgs args;
-        args.parent = hwnd;
-        args.font = GetDefaultGuiFont();
-        results = new ListBox();
-        results->onDrawItem = MkMethod1<FindWindowWnd, ListBox::DrawItemEvent*, &FindWindowWnd::DrawResultItem>(this);
-        results->onSelectionChanged = MkMethod0<FindWindowWnd, &FindWindowWnd::OnResultSelected>(this);
-        results->onDoubleClick = MkMethod0<FindWindowWnd, &FindWindowWnd::OnResultSelected>(this);
-        results->SetColors(colTxt, colBg);
-        results->Create(args);
-        results->SetModel(new FindResultsModel(win));
+    auto* header = new Wrap();
+    headerLayout = header;
+    header->alignCross = CrossAxisAlign::CrossCenter;
+    header->colGap = gap;
+    header->rowGap = gap;
+    header->AddChild(edit, 1);
+    header->AddChild(tools);
+
+    auto* pagesRow = new HBox();
+    pagesRow->alignCross = CrossAxisAlign::CrossCenter;
+    pagesRow->AddChild(pagesLabel);
+    pagesLabelGap = new Spacer(gap, 0);
+    pagesRow->AddChild(pagesLabelGap);
+    pagesBox = new FindFixedDx(editPages, pagesDx);
+    pagesRow->AddChild(pagesBox);
+
+    auto* vbox = new VBox();
+    vbox->alignCross = CrossAxisAlign::Stretch;
+    vbox->AddChild(header);
+    headerPagesGap = new Spacer(0, gap);
+    vbox->AddChild(headerPagesGap);
+    vbox->AddChild(pagesRow);
+    pagesResultsGap = new Spacer(0, pad);
+    vbox->AddChild(pagesResultsGap);
+    vbox->AddChild(results, 1);
+
+    rootPadding = new Padding(vbox, Insets{pad, pad, pad, pad});
+    layout = rootPadding;
+    layoutDpi = DpiGet();
+}
+
+void FindWindowWnd::UpdateDpi(int dpi) {
+    if (dpi <= 0 || dpi == layoutDpi) {
+        return;
     }
+    // WM_DPICHANGED can arrive during CreateCustom, before the child controls
+    // exist (a hidden WS_CAPTION popup is parked on the primary, #5998).
+    // Layout() already ignores WM_SIZE then.
+    if (!layout || !edit || !editPages) {
+        return;
+    }
+    PlatformFont* appFont = GetAppFontForDpi(dpi);
+    edit->SetFont(appFont);
+    editPages->SetFont(appFont);
+    pagesLabel->font = appFont;
+    status->font = appFont;
+    results->font = appFont;
+    results->dpi = dpi;
+
+    int pad = DpiScaleByDpi(dpi, kFindWinPadding);
+    int gap = DpiScaleByDpi(dpi, kFindWinGap);
+    int minEditDx = DpiScaleByDpi(dpi, kFindWinMinEditDx);
+    edit->idealDx = minEditDx;
+    edit->maxDx = minEditDx;
+    int pagesDx = DpiScaleByDpi(dpi, 160);
+    editPages->idealDx = pagesDx;
+    editPages->maxDx = pagesDx;
+    pagesBox->dx = pagesDx;
+    toolsLayout->gap = appFont->averageCharWidth;
+    headerLayout->colGap = gap;
+    headerLayout->rowGap = gap;
+    pagesLabelGap->dx = gap;
+    headerPagesGap->dy = gap;
+    pagesResultsGap->dy = pad;
+    rootPadding->insets = Insets{pad, pad, pad, pad};
+    statusBox->dx = MulDiv(statusBox->dx, dpi, layoutDpi);
+    int buttonPad = DpiScaleByDpi(dpi, 4);
+    for (VirtIconButton* button : btns) {
+        if (button) {
+            button->padding = Insets{buttonPad, buttonPad, buttonPad, buttonPad};
+        }
+    }
+    layoutDpi = dpi;
+    UpdateButtonIcons(dpi);
+    Layout();
+}
+
+bool FindWindowWnd::UpdateStatusWidth(int totalHits, bool capped) {
+    if (!statusBox || totalHits < 0) {
+        return false;
+    }
+    int dx = FindStatusDx(status->font, totalHits, capped);
+    if (statusBox->dx == dx) {
+        return false;
+    }
+    statusBox->dx = dx;
     return true;
 }
 
 void FindWindowWnd::Layout() {
     // a WS_CAPTION/WS_THICKFRAME window gets WM_SIZE during CreateCustom, before
     // the child controls exist; ignore layout until they're created
-    if (!edit || !status || !hwndBtns || !results) {
+    if (!layout) {
         return;
     }
-    Rect rc = ClientRect(hwnd);
-    int pad = DpiScale(hwnd, 8);
-    int gap = DpiScale(hwnd, 6);
-    int statusDx = DpiScale(hwnd, 90);
-    int minEditDx = DpiScale(hwnd, 48);
-
-    int editDy = edit->GetIdealSize().dy;
-    SIZE tbSz{};
-    SendMessageW(hwndBtns, TB_GETMAXSIZE, 0, (LPARAM)&tbSz);
-    int tbW = (int)tbSz.cx;
-    int tbH = (int)tbSz.cy;
-
-    int contentDx = std::max(0, rc.dx - 2 * pad);
-    // minimum width for [edit][status][toolbar] on one row without overlap
-    int singleRowDx = minEditDx + gap + statusDx + gap + tbW;
-
-    int y = pad;
-    int headerDy;
-    if (contentDx >= singleRowDx) {
-        // wide: [edit][n/m][toolbar]
-        headerDy = std::max(editDy, tbH);
-        int tbX = pad + contentDx - tbW;
-        int statusX = tbX - gap - statusDx;
-        int editDx = statusX - gap - pad;
-        MoveWindow(hwndBtns, tbX, y + (headerDy - tbH) / 2, tbW, tbH, TRUE);
-        MoveWindow(status->hwnd, statusX, y + (headerDy - editDy) / 2, statusDx, editDy, TRUE);
-        MoveWindow(edit->hwnd, pad, y + (headerDy - editDy) / 2, editDx, editDy, TRUE);
-    } else {
-        // narrow: full-width edit, then [n/m][toolbar] (issue #5692)
-        MoveWindow(edit->hwnd, pad, y, contentDx, editDy, TRUE);
-        y += editDy + gap;
-        headerDy = editDy + gap + std::max(editDy, tbH);
-        int row2Dy = std::max(editDy, tbH);
-        int statusW = std::max(0, contentDx - gap - tbW);
-        MoveWindow(status->hwnd, pad, y + (row2Dy - editDy) / 2, statusW, editDy, TRUE);
-        int tbX = pad + contentDx - tbW;
-        MoveWindow(hwndBtns, tbX, y + (row2Dy - tbH) / 2, tbW, tbH, TRUE);
-    }
-
-    // the results list fills the rest of the window below the header
-    int listTop = pad + headerDy + pad;
-    int listDy = std::max(0, rc.dy - listTop - pad);
-    MoveWindow(results->hwnd, pad, listTop, contentDx, listDy, TRUE);
+    DoLayout();
+    // Erase margins (and any area the list just vacated when shrinking) so
+    // snippet/page-number pixels don't ghost at the bottom/side of the window
+    // when the dialog is resized narrower than the previous text (#5796).
+    HwndInvalidate(hwnd, true);
 }
 
-void FindWindowWnd::RefreshResults() {
+void FindWindowWnd::RefreshResults(bool allowNavigation) {
     if (!results) {
         return;
     }
     // rebuild the highlight terms from the current search text
     filterWords.Reset();
     Str term = win->findCountText;
-    if (str::IsEmpty(term)) {
-        term = win->hwndFindEdit ? HwndGetTextTemp(win->hwndFindEdit) : nullptr;
+    if (len(term) == 0) {
+        term = win->findEdit ? win->findEdit->GetTextTemp() : TempStr{};
     }
-    if (!str::IsEmpty(term)) {
+    if (len(term) > 0) {
         filterWords.Append(term);
     }
-    FillWithItems(results->hwnd, results->model);
+    results->SetModel(results->model); // the model is live; re-read it
     // keep a result selected so it's visible as you type and Next/Prev have a
     // sensible starting point.
-    int sel = CurrentMatchIndex();
+    int sel = -1;
+    if (savedSelPage > 0) {
+        // the list was re-sorted (or grew at the front) under an existing
+        // selection: stay on that match, not on that row number
+        sel = FindMatchIndex(win, savedSelPage, savedSelGlyph);
+        savedSelPage = -1;
+        savedSelGlyph = -1;
+    }
+    if (sel < 0) {
+        sel = CurrentMatchIndex();
+    }
     if (sel >= 0) {
         // the document already sits on a match (find-as-you-type found it): just
         // mirror it in the list, no navigation
@@ -349,80 +578,80 @@ void FindWindowWnd::RefreshResults() {
         // like find-as-you-type would have.
         sel = FirstMatchFromCurrentPage();
         results->SetCurrentSelection(sel);
-        OnResultSelected();
+        // streamed partial updates must not navigate: OnResultSelected joins
+        // the in-flight count worker (GoToFindMatch), which would cancel the
+        // very scan that's producing these results
+        if (allowNavigation) {
+            OnResultSelected();
+        }
     }
 }
 
-void FindWindowWnd::DrawResultItem(ListBox::DrawItemEvent* ev) {
-    ListBox* lb = ev->listBox;
+void FindWindowWnd::DrawResultItem(VirtListBox::DrawItemEvent* ev) {
+    VirtListBox* lb = ev->listBox;
     if (ev->itemIndex < 0 || ev->itemIndex >= len(win->findMatches)) {
         return;
     }
-    if (!win->ctrl) {
-        return;
-    }
-    HDC hdc = ev->hdc;
-    RECT rc = ev->itemRect;
+    Gfx* gfx = ev->gfx;
+    HWND hwndList = lb->GetHwnd();
+    Rect rc = ev->itemRect;
 
-    COLORREF colBg = IsSpecialColor(lb->bgColor) ? GetSysColor(COLOR_WINDOW) : lb->bgColor;
-    COLORREF colText = IsSpecialColor(lb->textColor) ? GetSysColor(COLOR_WINDOWTEXT) : lb->textColor;
+    // clip the whole row so a partially visible last item (LBS_NOINTEGRALHEIGHT)
+    // and highlight fill cannot paint outside the item / list client (#5796)
+    gfx->PushClip(rc);
+
+    Color colBg = lb->GetColor(kColListBg);
+    Color colText = lb->GetColor(kColListText);
+    if (IsSpecialColor(colBg)) {
+        colBg = GetSysColor(COLOR_WINDOW);
+    }
+    if (IsSpecialColor(colText)) {
+        colText = GetSysColor(COLOR_WINDOWTEXT);
+    }
+
     if (ev->selected) {
         colBg = AccentColor(colBg, 30);
     }
-    SetBkColor(hdc, colBg);
-    ExtTextOutW(hdc, 0, 0, ETO_OPAQUE, &rc, nullptr, 0, nullptr);
-    SetBkMode(hdc, TRANSPARENT);
+    gfx->FillRect(rc, colBg);
 
-    HFONT oldFont = lb->font ? SelectFont(hdc, lb->font) : nullptr;
-    int pad = DpiScale(lb->hwnd, 6);
-    RECT rcText = rc;
-    rcText.left += pad;
-    rcText.right -= pad;
+    int pad = DpiScale(6);
+    Rect rcText = rc;
+    rcText.x += pad;
+    rcText.dx -= 2 * pad;
 
-    // page number in a fixed right column so it can't overlap the snippet while
-    // the window is being resized (issue #5692)
+    // Fixed-width page column (room for multi-digit labels) so the right edge
+    // stays stable while the window is resized; long snippets ellipsize into it
+    // instead of fighting a per-row measured width (#5692 / #5796).
     const FindMatch& fm = win->findMatches[ev->itemIndex];
     TempStr pageStr = fmt("%s", win->ctrl->GetPageLabeTemp(fm.startPage));
-    int pageCch;
-    WCHAR* pageW = CWStrTemp(pageStr, pageCch);
-    SIZE pSz{};
-    GetTextExtentPoint32W(hdc, pageW, pageCch, &pSz);
-    int pageGap = DpiScale(lb->hwnd, 10);
-    int pageColDx = std::max((int)pSz.cx, DpiScale(lb->hwnd, 32));
-    RECT rcPage = rcText;
-    rcPage.left = std::max(rcText.left, (LONG)(rcText.right - pageColDx));
+    int pageGap = DpiScale(10);
+    int pageColDx = DpiScale(40);
+    Size pageSize = gfx->MeasureText(pageStr, lb->font);
+    pageColDx = std::max(pageSize.dx + DpiScale(4), pageColDx);
+    Rect rcPage = rcText;
+    rcPage.x = std::max(rcText.x, rcText.x + rcText.dx - pageColDx);
+    rcPage.dx = rcText.x + rcText.dx - rcPage.x;
 
     // snippet on the left, with the matched term highlighted
-    RECT rcSnippet = rcText;
-    rcSnippet.right = std::max(rcSnippet.left, rcPage.left - pageGap);
-    if (rcSnippet.right > rcSnippet.left) {
-        SetTextColor(hdc, colText);
-        uint drawFmt = DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_LEFT | DT_END_ELLIPSIS;
+    Rect rcSnippet = rcText;
+    rcSnippet.dx = std::max(0, rcPage.x - pageGap - rcSnippet.x);
+    if (rcSnippet.dx > 0) {
+        u32 drawFmt = gfxTextEllipsis | gfxTextVCenter | gfxTextLeft;
         // clip snippet drawing so match highlights cannot bleed into the page
-        // number column when the floating window is narrow (issue #5736)
-        HRGN clipRgn = CreateRectRgnIndirect(&rcSnippet);
-        if (clipRgn) {
-            SelectClipRgn(hdc, clipRgn);
-            DrawMaybeHighlightedText(hdc, rcSnippet, fm.snippet, filterWords, hlScratch, colBg, false,
-                                     win->findMatchWholeWord, drawFmt);
-            SelectClipRgn(hdc, nullptr);
-            DeleteObject(clipRgn);
-        } else {
-            DrawMaybeHighlightedText(hdc, rcSnippet, fm.snippet, filterWords, hlScratch, colBg, false,
-                                     win->findMatchWholeWord, drawFmt);
-        }
+        // number column when the floating window is narrow (issue #5736); it
+        // nests, so the outer row clip stays in effect afterwards
+        gfx->PushClip(rcSnippet);
+        DrawMaybeHighlightedText(gfx, rcSnippet, fm.snippet, filterWords, hlScratch, colBg, false,
+                                 win->findMatchWholeWord, drawFmt, lb->font, colText);
+        gfx->PopClip();
     }
 
     // repaint the page column on top in case a prior draw left stray pixels
-    SetBkColor(hdc, colBg);
-    ExtTextOutW(hdc, 0, 0, ETO_OPAQUE, &rcPage, nullptr, 0, nullptr);
-    SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, AccentColor(colText, 80));
-    DrawTextW(hdc, pageW, -1, &rcPage, DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_RIGHT | DT_END_ELLIPSIS);
+    gfx->FillRect(rcPage, colBg);
+    u32 pageFmt = gfxTextEllipsis | gfxTextVCenter | gfxTextRight;
+    gfx->DrawText(pageStr, rcPage, pageFmt, lb->font, AccentColor(colText, 80));
 
-    if (oldFont) {
-        SelectFont(hdc, oldFont);
-    }
+    gfx->PopClip();
 }
 
 void FindWindowWnd::OnResultSelected() {
@@ -431,57 +660,83 @@ void FindWindowWnd::OnResultSelected() {
         return;
     }
     const FindMatch& fm = win->findMatches[idx];
+    if (win->ctrl && win->ctrl->CanFindInPage() && idx == win->browserFindCurrent) {
+        return; // already on this match
+    }
     DisplayModel* dm = win->AsFixed();
-    if (dm && dm->textSearch && dm->textSearch->startPage == fm.startPage &&
+    if (dm && dm->textSearch && dm->textSearch->result.len > 0 && dm->textSearch->startPage == fm.startPage &&
         dm->textSearch->startGlyph == fm.startGlyph) {
         return; // already on this match
     }
     // defer document navigation so the results list can scroll/repaint first
     // (issue #5692). Coalesce rapid F3 / arrow presses to the latest selection.
-    auto data = new DeferredGoToFindMatchData;
+    auto* data = new DeferredGoToFindMatchData;
     data->win = win;
     data->findWindow = this;
     data->startPage = fm.startPage;
     data->startGlyph = fm.startGlyph;
     data->endPage = fm.endPage;
     data->endGlyph = fm.endGlyph;
-    data->epoch = InterlockedIncrement(&pendingNavEpoch);
+    data->epoch = AtomicIntInc(&pendingNavEpoch);
     uitask::Post(MkFunc0<DeferredGoToFindMatchData>(DeferredGoToFindMatch, data), "GoToFindMatch");
+}
+
+// remember which match the list is on, by identity rather than by row, so the
+// next RefreshResults can restore it after the list is re-sorted or grows at
+// the front. Called before win->findMatches is rebuilt
+void FindWindowWnd::SaveSelectedMatch() {
+    savedSelPage = -1;
+    savedSelGlyph = -1;
+    int idx = results ? results->GetCurrentSelection() : -1;
+    if (idx < 0 || idx >= len(win->findMatches)) {
+        return;
+    }
+    const FindMatch& fm = win->findMatches[idx];
+    savedSelPage = fm.startPage;
+    savedSelGlyph = fm.startGlyph;
 }
 
 // list index of the match the document is currently on (so the selection can
 // track the current match), or -1 if it isn't in the list
 int FindWindowWnd::CurrentMatchIndex() {
+    if (win->ctrl && win->ctrl->CanFindInPage()) {
+        // tracked by the browser (chm / markdown) webview find (see
+        // SearchAndDDE.cpp BrowserFind*)
+        return win->browserFindCurrent;
+    }
     DisplayModel* dm = win->AsFixed();
-    if (!dm || !dm->textSearch) {
+    if (!dm || !dm->textSearch || dm->textSearch->result.len == 0) {
         return -1;
     }
-    int page = dm->textSearch->startPage;
-    int glyph = dm->textSearch->startGlyph;
-    int n = len(win->findMatches);
-    for (int i = 0; i < n; i++) {
-        const FindMatch& fm = win->findMatches[i];
-        if (fm.startPage == page && fm.startGlyph == glyph) {
-            return i;
-        }
-    }
-    return -1;
+    return FindMatchIndex(win, dm->textSearch->startPage, dm->textSearch->startGlyph);
 }
 
-// first match at/after the current page (matches are in page order); wraps to
-// the first match if none follow. Mirrors find-as-you-type's FindFirst(curPage).
+// first match at/after the current page, wrapping to the start of the document
+// if there is none: the match with the smallest forward page distance from the
+// current page (the list itself is in document order)
 int FindWindowWnd::FirstMatchFromCurrentPage() {
     int n = len(win->findMatches);
     if (n == 0) {
         return -1;
     }
     int curPage = win->ctrl ? win->ctrl->CurrentPageNo() : 1;
+    int nPages = win->ctrl ? win->ctrl->PageCount() : 1;
+    int best = 0;
+    int bestDist = INT_MAX;
     for (int i = 0; i < n; i++) {
-        if (win->findMatches[i].startPage >= curPage) {
-            return i;
+        int dist = win->findMatches[i].startPage - curPage;
+        if (dist < 0) {
+            dist += nPages;
+        }
+        if (dist < bestDist) {
+            bestDist = dist;
+            best = i;
+            if (dist == 0) {
+                break; // first match on the current page
+            }
         }
     }
-    return 0;
+    return best;
 }
 
 // move the results-list selection (keyboard arrows or the Next/Prev buttons)
@@ -510,6 +765,12 @@ bool FindWindowWnd::MoveResultSelection(WPARAM vkey) {
         case VK_UP:
             idx = (cur < 0) ? n - 1 : (cur - 1 + n) % n;
             break;
+        case VK_HOME:
+            idx = 0;
+            break;
+        case VK_END:
+            idx = n - 1;
+            break;
         case VK_NEXT: // Page Down
             // unlike the arrow keys, paging doesn't wrap around; it clamps to the
             // last match (issue #5742)
@@ -528,9 +789,7 @@ bool FindWindowWnd::MoveResultSelection(WPARAM vkey) {
                 idx = n - 1;
             } else {
                 idx = cur - kPage;
-                if (idx < 0) {
-                    idx = 0;
-                }
+                idx = std::max(idx, 0);
             }
             break;
         default:
@@ -545,194 +804,217 @@ bool FindWindowWnd::MoveResultSelection(WPARAM vkey) {
     return true;
 }
 
+void FindWindowWnd::UpdatePagesLabel() {
+    int n = 1;
+    if (win && win->ctrl) {
+        n = std::max(win->ctrl->PageCount(), 1);
+    }
+    if (pagesLabel) {
+        pagesLabel->SetText(fmt(_TRA("Limit to pages 1-%d:").s, n));
+    }
+}
+
 void FindWindowWnd::SavePos() {
-    if (!IsWindowVisible(hwnd)) {
+    if (!HwndIsVisible(hwnd)) {
         return;
     }
-    Rect r = WindowRect(hwnd);
+    Rect r = HwndWindowRect(hwnd);
     gGlobalPrefs->searchUIWindowPos = r;
 }
 
 // re-apply theme colors after the user switches themes. The toolbar icons are
 // baked into an image list at the current text color, so rebuild it; the
 // controls and caption also need recoloring.
+void FindWindowWnd::ApplyDarkMode() {
+    DarkModeApplyToTitleBar(hwnd);
+}
+
 void FindWindowWnd::UpdateTheme() {
-    auto colBg = ThemeWindowControlBackgroundColor();
-    auto colTxt = ThemeWindowTextColor();
-    SetColors(colTxt, colBg);
-    if (edit) {
-        edit->SetColors(colTxt, colBg);
-    }
-    if (status) {
-        status->SetColors(colTxt, colBg);
-    }
-    if (results) {
-        results->SetColors(colTxt, colBg);
-    }
-    if (hwndBtns) {
-        int isz = RoundUp(DpiScale(hwnd, 16), 4);
-        HIMAGELIST oldHiml = himl;
-        himl = BuildStdToolbarImageList(isz);
-        SendMessageW(hwndBtns, TB_SETIMAGELIST, 0, (LPARAM)himl);
-        if (oldHiml) {
-            ImageList_Destroy(oldHiml);
-        }
-    }
-    ApplyTitleBarTheme(hwnd);
-    RedrawWindow(hwnd, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN);
+    WindowBase::UpdateTheme();
+    UpdatePagesLabel();
+    // the icons are drawn in the theme's text color, so re-render them
+    UpdateButtonIcons();
 }
 
 void FindWindowWnd::OnTextChanged() {
     OnFindBarTextChanged(win);
 }
 
-LRESULT FindWindowWnd::WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
-    switch (msg) {
-        case WM_ENTERSIZEMOVE:
-            inSizeMove = true;
-            break;
-        case WM_SIZE:
-            Layout();
-            // Pause list redraws only on an actual resize (a WM_SIZE arrived
-            // during the interactive size/move loop), to avoid the page-number
-            // glitch (#5692). Don't pause for a plain move -- doing so left the
-            // results list blank/white while dragging the window (#5737 follow-up).
-            if (inSizeMove && results && !listRedrawPaused && wp != SIZE_MINIMIZED) {
-                SendMessageW(results->hwnd, WM_SETREDRAW, FALSE, 0);
-                listRedrawPaused = true;
-            }
-            break;
-        case WM_EXITSIZEMOVE:
-            inSizeMove = false;
-            if (results && listRedrawPaused) {
-                SendMessageW(results->hwnd, WM_SETREDRAW, TRUE, 0);
-                InvalidateRect(results->hwnd, nullptr, TRUE);
-                listRedrawPaused = false;
-            }
-            SavePos();
-            break;
-        case WM_GETMINMAXINFO: {
-            auto mmi = (MINMAXINFO*)lp;
-            int pad = DpiScale(h, 8);
-            int gap = DpiScale(h, 6);
-            int editDy = edit ? edit->GetIdealSize().dy : DpiScale(h, 22);
-            int tbH = DpiScale(h, 24);
-            int tbW = DpiScale(h, 120);
-            if (hwndBtns) {
-                SIZE tbSz{};
-                SendMessageW(hwndBtns, TB_GETMAXSIZE, 0, (LPARAM)&tbSz);
-                tbW = (int)tbSz.cx;
-                tbH = (int)tbSz.cy;
-            }
-            int row2Dy = std::max(editDy, tbH);
-            // narrow two-row header: edit, then status+toolbar
-            mmi->ptMinTrackSize.x = 2 * pad + std::max(tbW, DpiScale(h, 160));
-            mmi->ptMinTrackSize.y = 2 * pad + editDy + gap + row2Dy + pad + DpiScale(h, 48);
-            return 0;
-        }
-        case WM_CLOSE:
-            // the caption close button hides the bar instead of destroying it
-            HideFindWindow(win);
-            return 0;
-        case WM_NOTIFY: {
-            // the embedded toolbar paints a light button background in dark
-            // themes; repaint it with the window's theme background so the icons
-            // sit on the same color as the rest of the window
-            auto nmh = (NMHDR*)lp;
-            if (nmh->hwndFrom == hwndBtns && nmh->code == NM_CUSTOMDRAW) {
-                auto cd = (NMTBCUSTOMDRAW*)nmh;
-                auto stage = cd->nmcd.dwDrawStage;
-                if (stage == CDDS_PREPAINT || stage == CDDS_ITEMPREPAINT) {
-                    // reuse the window's cached background brush (rebuilt on theme
-                    // change via SetColors) instead of allocating one per paint
-                    FillRect(cd->nmcd.hdc, &cd->nmcd.rc, BackgroundBrush());
-                    return stage == CDDS_PREPAINT ? CDRF_NOTIFYITEMDRAW : CDRF_DODEFAULT;
-                }
-            }
-            break;
-        }
+void FindWindowWnd::OnHistorySelected() {
+    if (!edit || edit->GetCurrentSelection() < 0) {
+        return;
     }
-    return WndProcDefault(h, msg, wp, lp);
+    OnFindBarTextChanged(win);
+    FindFlushPendingSearch(win);
 }
 
-LRESULT FindWindowWnd::OnNotify(int, NMHDR* nmh) {
-    if (nmh->code == TTN_GETDISPINFOW) {
-        auto di = (NMTTDISPINFOW*)nmh;
-        TempStr s = FindWindowButtonTooltip((int)nmh->idFrom);
-        if (s) {
-            lstrcpynW(di->szText, CWStrTemp(s), dimof(di->szText));
-            di->lpszText = di->szText;
-        }
+void FindWindowWnd::OnSize(WindowBase::SizeEvent* ev) {
+    if (ev->msg == WM_ENTERSIZEMOVE) {
+        inSizeMove = true;
+        return;
     }
-    return 0;
+    if (ev->msg == WM_SIZE) {
+        // autoLayout already reflowed `layout`; erase so snippet pixels
+        // don't ghost when the dialog shrinks (#5796)
+        HwndInvalidate(hwnd, true);
+        return;
+    }
+    if (ev->msg == WM_EXITSIZEMOVE) {
+        inSizeMove = false;
+        HwndInvalidate(hwnd, true);
+        SavePos();
+    }
 }
 
+void FindWindowWnd::OnDpiChanged(WindowBase::DpiChangedEvent* ev) {
+    // Don't apply the suggested rect until Create() finished: it would pin the
+    // still-hidden popup to the primary monitor (#5998).
+    if (!layout) {
+        ev->didHandle = true;
+        return;
     }
-    switch (msg.wParam) {
+    RECT* r = ev->suggested;
+    if (r) {
+        SetWindowPos(hwnd, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    UpdateDpi((int)ev->dpiX);
+    ev->didHandle = true;
+}
+
+void FindWindowWnd::OnGetMinMaxInfo(WindowBase::GetMinMaxInfoEvent* ev) {
+    auto* mmi = ev->mmi;
+    if (layout) {
+        int clientMinDx = layout->MinIntrinsicWidth(0);
+        int clientMinDy = layout->MinIntrinsicHeight(clientMinDx);
+        Rect wr = HwndWindowRect(hwnd);
+        Rect cr = HwndClientRect(hwnd);
+        mmi->ptMinTrackSize.x = clientMinDx + (wr.dx - cr.dx);
+        mmi->ptMinTrackSize.y = clientMinDy + (wr.dy - cr.dy);
+        return;
+    }
+    int pad = DpiScale(kFindWinPadding);
+    mmi->ptMinTrackSize.x = (2 * pad) + DpiScale(160);
+    mmi->ptMinTrackSize.y = (2 * pad) + DpiScale(80);
+}
+
+void FindWindowWnd::OnClose(WindowBase::CloseEvent* /*ev*/) {
+    // the caption close button hides the bar instead of destroying it
+    HideFindWindow(win);
+    // WmEvent.didHandle defaults true -> skip WindowBase::Destroy()
+}
+
+void FindWindowWnd::OnKeyDown(KeyEvent* ev) {
+    switch (ev->vkey) {
         case 'F':
-            if (IsCtrlPressed() && !IsAltPressed()) {
+            if (ev->isCtrl && !ev->isAlt) {
                 FocusFindEditSelectAll(win);
-                return true;
+                ev->didHandle = true;
             }
             break;
         case VK_ESCAPE:
             HideFindWindow(win);
-            return true;
+            ev->didHandle = true;
+            break;
         case VK_RETURN:
         case VK_F3: {
             // Enter forces a pending debounced search to start now (find the
             // first match) instead of stepping the (stale) results list (#4626)
-            if (msg.wParam == VK_RETURN && FindFlushPendingSearch(win)) {
-                return true;
+            if (ev->vkey == VK_RETURN && FindFlushPendingSearch(win)) {
+                ev->didHandle = true;
+                break;
             }
             // step through the results list; fall back to a document search when
             // there's no list (e.g. count not ready)
-            WPARAM dir = IsShiftPressed() ? VK_UP : VK_DOWN;
+            WPARAM dir = ev->isShift ? VK_UP : VK_DOWN;
             if (!MoveResultSelection(dir)) {
-                IsShiftPressed() ? FindPrev(win) : FindNext(win);
+                ev->isShift ? FindPrev(win) : FindNext(win);
             }
-            return true;
+            ev->didHandle = true;
+            break;
         }
         case VK_DOWN:
         case VK_UP:
         case VK_NEXT:
         case VK_PRIOR:
+            // let the combo walk its own history list while dropped
+            if (edit && ComboBox_GetDroppedState(edit->hwnd)) {
+                break;
+            }
             // walk the results list from the search edit
-            return MoveResultSelection(msg.wParam);
+            ev->didHandle = MoveResultSelection(ev->vkey);
+            break;
+        case VK_HOME:
+        case VK_END: {
+            // Ctrl+Home / Ctrl+End: always jump to first/last result (#5797)
+            if (ev->isCtrl) {
+                ev->didHandle = MoveResultSelection(ev->vkey);
+                break;
+            }
+            // Home / End: if the caret is already at the start/end of the search
+            // text, move the results list; otherwise let the combo move
+            // the caret (same idea as the two-press pattern in the request).
+            // Focus is on the combo's child edit, not the combo HWND.
+            bool editFocused = edit && (ev->hwnd == edit->hwnd || (edit->EditHwnd() && ev->hwnd == edit->EditHwnd()));
+            if (!editFocused) {
+                // focus is on the list itself: Home/End jump first/last
+                ev->didHandle = MoveResultSelection(ev->vkey);
+                break;
+            }
+            int selStart = 0, selEnd = 0;
+            edit->GetSelection(selStart, selEnd);
+            int textLen = edit->GetTextLen();
+            bool toEnd = (ev->vkey == VK_END);
+            bool caretAtBound = (selStart == selEnd) && (toEnd ? selEnd == textLen : selStart == 0);
+            if (caretAtBound) {
+                ev->didHandle = MoveResultSelection(ev->vkey);
+            }
+            // else leave didHandle false: Edit moves the caret
+            break;
+        }
     }
-    return false;
 }
 
-bool FindWindowWnd::OnCommand(WPARAM wparam, LPARAM) {
-    int cmd = LOWORD(wparam);
+void FindWindowWnd::OnCommand(WindowBase::CommandEvent* ev) {
+    int cmd = LOWORD(ev->wparam);
     switch (cmd) {
         case CmdFindPrev:
             if (!MoveResultSelection(VK_UP)) {
                 FindPrev(win);
             }
-            return true;
+            break;
         case CmdFindNext:
             if (!MoveResultSelection(VK_DOWN)) {
                 FindNext(win);
             }
-            return true;
+            break;
         case CmdFindToggleMatchCase:
             FindToggleMatchCase(win);
-            return true;
+            break;
         case CmdFindToggleMatchWholeWord:
             FindToggleMatchWholeWord(win);
-            return true;
+            break;
         case kFindWinPinCmdId:
             ToggleFloatingFindUI(win); // dock back to the compact toolbar bar
-            return true;
+            break;
+        default:
+            return;
     }
-    return false;
+    ev->didHandle = true;
 }
 
 //--- public API
 
+// The floating, movable/resizable variant of the find UI (see SearchUIFloating).
+// Phase 1: search controls only; a results list is added in a later phase.
 FindWindowWnd* CreateFindWindow(MainWindow* win) {
-    auto w = new FindWindowWnd();
+    auto* w = new FindWindowWnd();
+    w->onCommand = MkMethod1<FindWindowWnd, WindowBase::CommandEvent*, &FindWindowWnd::OnCommand>(w);
+    w->onSize = MkMethod1<FindWindowWnd, WindowBase::SizeEvent*, &FindWindowWnd::OnSize>(w);
+    w->onDpiChanged = MkMethod1<FindWindowWnd, WindowBase::DpiChangedEvent*, &FindWindowWnd::OnDpiChanged>(w);
+    w->onGetMinMaxInfo = MkMethod1<FindWindowWnd, WindowBase::GetMinMaxInfoEvent*, &FindWindowWnd::OnGetMinMaxInfo>(w);
+    w->onClose = MkMethod1<FindWindowWnd, WindowBase::CloseEvent*, &FindWindowWnd::OnClose>(w);
+    w->onKeyDown = MkMethod1<FindWindowWnd, KeyEvent*, &FindWindowWnd::OnKeyDown>(w);
     if (!w->Create(win)) {
         delete w;
         return nullptr;
@@ -743,6 +1025,14 @@ FindWindowWnd* CreateFindWindow(MainWindow* win) {
 void DeleteFindWindow(MainWindow* win) {
     if (!win->findWindow) {
         return;
+    }
+    // only if this window is the active find UI; the compact bar's edit must
+    // survive us (mirrors DeleteFindBar)
+    if (win->findEdit == win->findWindow->edit) {
+        win->findEdit = nullptr;
+    }
+    if (win->findPagesEdit == win->findWindow->editPages) {
+        win->findPagesEdit = nullptr;
     }
     delete win->findWindow;
     win->findWindow = nullptr;
@@ -761,7 +1051,9 @@ void ShowFindWindow(MainWindow* win) {
         return;
     }
     FindWindowWnd* w = win->findWindow;
-    win->hwndFindEdit = w->edit->hwnd; // make this the active find edit
+    win->findEdit = w->edit; // make this the active find edit
+    win->findPagesEdit = w->editPages;
+    w->UpdatePagesLabel();
     FindWindowSetMatchCaseChecked(win, win->findMatchCase);
     FindWindowSetMatchWholeWordChecked(win, win->findMatchWholeWord);
     PositionFindWindow(w);
@@ -771,12 +1063,12 @@ void ShowFindWindow(MainWindow* win) {
     w->UpdateDpi(DpiGetForPoint(wr.x + wr.dx / 2, wr.y + wr.dy / 2));
     w->Layout();
     ShowWindow(w->hwnd, SW_SHOW);
-    HwndSetFocus(win->hwndFindEdit);
-    Edit_SetSel(win->hwndFindEdit, 0, -1);
+    win->findEdit->SetFocus();
+    win->findEdit->SelectAll();
     // populate the results list: show what's cached, and (re)run the search for
     // the current term so snippets get built now that the window is visible
     w->RefreshResults();
-    if (win->hwndFindEdit && HwndGetTextLen(win->hwndFindEdit) > 0) {
+    if (win->findEdit && win->findEdit->GetTextLen() > 0) {
         OnFindBarTextChanged(win);
     }
 }
@@ -786,7 +1078,17 @@ void HideFindWindow(MainWindow* win) {
         return;
     }
     win->findWindow->SavePos();
+    // Cancel any deferred GoToFindMatch so it cannot run after the document/tab
+    // that owned these matches is gone (issue #5807).
+    AtomicIntInc(&win->findWindow->pendingNavEpoch);
     ClearFindMatches(win);
+    // drop the active TextSearch hit so closing find clears the highlight;
+    // F3 still works (FindNext re-searches) and paints the new hit (#5802)
+    if (DisplayModel* dm = win->AsFixed()) {
+        if (dm->textSearch) {
+            dm->textSearch->Reset();
+        }
+    }
     AbortFinding(win, true);
     ShowWindow(win->findWindow->hwnd, SW_HIDE);
     HwndSetFocus(win->hwndFrame);
@@ -794,40 +1096,172 @@ void HideFindWindow(MainWindow* win) {
 }
 
 bool IsFindWindowVisible(MainWindow* win) {
-    return win->findWindow && IsWindowVisible(win->findWindow->hwnd);
+    return win->findWindow && HwndIsVisible(win->findWindow->hwnd);
 }
 
-void FindWindowSetStatus(MainWindow* win, Str s) {
+void FindWindowSetStatus(MainWindow* win, Str s, int totalHits) {
     if (win->findWindow && win->findWindow->status) {
-        HwndSetText(win->findWindow->status->hwnd, s ? s : StrL(""));
+        FindWindowWnd* w = win->findWindow;
+        Str text = s ? s : StrL("");
+        bool capped = str::EndsWith(text, StrL("+"));
+        bool widthChanged = w->UpdateStatusWidth(totalHits, capped);
+        w->status->SetText(text);
+        if (IsFindWindowVisible(win)) {
+            if (widthChanged) {
+                w->Layout();
+            } else {
+                w->status->Invalidate();
+            }
+        }
     }
+}
+
+// idx into FindWindowWnd::btns
+constexpr int kBtnMatchCase = 2;
+constexpr int kBtnMatchWholeWord = 3;
+
+static void FindWindowSetBtnChecked(MainWindow* win, int idx, bool checked) {
+    if (!win->findWindow) {
+        return;
+    }
+    VirtIconButton* b = win->findWindow->btns[idx];
+    if (!b || b->isSelected == checked) {
+        return;
+    }
+    b->isSelected = checked;
+    b->Invalidate();
 }
 
 void FindWindowSetMatchCaseChecked(MainWindow* win, bool checked) {
-    if (win->findWindow && win->findWindow->hwndBtns) {
-        SendMessageW(win->findWindow->hwndBtns, TB_CHECKBUTTON, CmdFindToggleMatchCase, MAKELONG(checked ? 1 : 0, 0));
-    }
+    FindWindowSetBtnChecked(win, kBtnMatchCase, checked);
 }
 
 void FindWindowSetMatchWholeWordChecked(MainWindow* win, bool checked) {
-    if (win->findWindow && win->findWindow->hwndBtns) {
-        SendMessageW(win->findWindow->hwndBtns, TB_CHECKBUTTON, CmdFindToggleMatchWholeWord,
-                     MAKELONG(checked ? 1 : 0, 0));
+    FindWindowSetBtnChecked(win, kBtnMatchWholeWord, checked);
+}
+
+// repopulate the results list from win->findMatches (no-op if not visible).
+// allowNavigation=false for streamed partial updates: don't navigate the
+// document (navigation would cancel the in-flight count scan)
+void FindWindowUpdatePagesLabel(MainWindow* win) {
+    if (win && win->findWindow) {
+        win->findWindow->UpdatePagesLabel();
+        if (IsFindWindowVisible(win)) {
+            win->findWindow->Layout();
+        }
     }
 }
 
-void FindWindowRefreshResults(MainWindow* win) {
+void FindWindowRefreshResults(MainWindow* win, bool allowNavigation) {
     if (IsFindWindowVisible(win)) {
-        win->findWindow->RefreshResults();
+        win->findWindow->RefreshResults(allowNavigation);
     }
 }
 
+// remember the selected result by match identity (page + glyph) so the next
+// FindWindowRefreshResults can restore it even though the list was re-sorted
+// or grew at the front. Call before changing win->findMatches
+void FindWindowSaveSelectedMatch(MainWindow* win) {
+    if (IsFindWindowVisible(win)) {
+        win->findWindow->SaveSelectedMatch();
+    }
+}
+
+// re-apply theme colors/icons to the floating window after a theme change
 void UpdateFindWindowTheme(MainWindow* win) {
     if (win->findWindow) {
         win->findWindow->UpdateTheme();
     }
 }
 
+int FindWindowFontHeight(MainWindow* win) {
+    if (!win || !win->findWindow || !win->findWindow->edit) {
+        return 0;
+    }
+    return PlatformFontLineHeight(win->findWindow->edit->GetFont());
+}
+
+void FindWindowSyncHistory(MainWindow* win) {
+    if (win && win->findWindow && win->findWindow->edit) {
+        ApplyFindHistory(win->findWindow->edit);
+    }
+}
+
+// term the pending / finished FindResultsOrderResultTemp scan was started for
+static Str gFindOrderTerm;
+
+// Report the order of the floating results list, to verify results are always
+// listed in document order. The count scan starts at the page that is current
+// when it begins and wraps around, so it finds matches out of order (e.g. 89,
+// 104, 47 when starting on page 89) -- they get re-sorted before being
+// installed. The scan is async, so the first call starts it and every call
+// reports NOTREADY until it finishes; the test polls.
+// Test hook: run a search from startPage and report the results list order.
+TempStr FindResultsOrderResultTemp(Str term, int startPage, int* exitCodeOut) {
+    str::Builder out;
+    auto fail = [&](Str msg) -> Str {
+        out.Append(msg);
+        out.AppendChar('\n');
+        if (exitCodeOut) {
+            *exitCodeOut = 1;
+        }
+        return ToStrTemp(out);
+    };
+
+    if (str::IsEmptyOrWhiteSpace(term)) {
+        return fail("ERROR missing term");
+    }
+    if (len(gWindows) == 0) {
+        return fail("NOTREADY no-window");
+    }
+    MainWindow* win = gWindows[0];
+    if (!win || !win->AsFixed()) {
+        return fail("NOTREADY no-doc");
+    }
+    if (!str::Eq(gFindOrderTerm, term)) {
+        str::ReplaceWithCopy(&gFindOrderTerm, term);
+        // start the search the way find-as-you-type does, from `startPage`
+        gGlobalPrefs->searchUIFloating = true;
+        if (startPage > 0) {
+            win->ctrl->GoToPage(startPage, false);
+        }
+        ShowFindWindow(win);
+        if (win->findEdit) {
+            win->findEdit->SetText(term);
+        }
+        OnFindBarTextChanged(win);
+        FindFlushPendingSearch(win); // run it now instead of waiting out the debounce
+        return fail("NOTREADY scan-started");
+    }
+    if (!win->findCountValid) {
+        return fail("NOTREADY scanning");
+    }
+    FindWindowWnd* fw = win->findWindow;
+    if (!fw || !fw->results) {
+        return fail("ERROR no-find-window");
+    }
+
+    int n = len(win->findMatches);
+    for (int i = 0; i < n; i++) {
+        if (str::ContainsChar(win->findMatches[i].snippet, '\0')) {
+            return fail(fmt("ERROR embedded-nul snippet=%d", i));
+        }
+    }
+    out.Append(fmt("OK n=%d sel=%d pages=", n, fw->results->GetCurrentSelection()));
+    for (int i = 0; i < n; i++) {
+        if (i > 0) {
+            out.AppendChar(',');
+        }
+        out.Append(fmt("%d", win->findMatches[i].startPage));
+    }
+    out.AppendChar('\n');
+    if (exitCodeOut) {
+        *exitCodeOut = 0;
+    }
+    return ToStrTemp(out);
+}
+
+// Headless draw test for issue #5736: match highlights must not bleed into the page column.
 TempStr FindResultPageColumnClipResultTemp(int* exitCodeOut) {
     str::Builder out;
     auto fail = [&](Str msg) -> Str {
@@ -839,10 +1273,10 @@ TempStr FindResultPageColumnClipResultTemp(int* exitCodeOut) {
         return ToStrTemp(out);
     };
 
-    if (gWindows.IsEmpty()) {
+    if (len(gWindows) == 0) {
         return fail("NOTREADY no-window");
     }
-    MainWindow* win = gWindows.at(0);
+    MainWindow* win = gWindows[0];
     if (!win || !win->ctrl) {
         return fail("NOTREADY no-doc");
     }
@@ -867,26 +1301,36 @@ TempStr FindResultPageColumnClipResultTemp(int* exitCodeOut) {
         return fail("ERROR no-screen-dc");
     }
     const int w = 110;
-    const int h = DpiScale(fw->hwnd, 20);
+    const int h = DpiScale(20);
     HDC hdcMem = CreateCompatibleDC(hdcScreen);
     HBITMAP hbmp = CreateCompatibleBitmap(hdcScreen, w, h);
     if (!hdcMem || !hbmp) {
+        if (hdcMem) {
+            DeleteDC(hdcMem);
+        }
+        if (hbmp) {
+            DeleteObject(hbmp);
+        }
         ReleaseDC(nullptr, hdcScreen);
-        DeleteDC(hdcMem);
-        DeleteObject(hbmp);
         return fail("ERROR no-mem-dc");
     }
     HGDIOBJ oldBmp = SelectObject(hdcMem, hbmp);
 
-    ListBox::DrawItemEvent ev;
-    ev.listBox = fw->results;
-    ev.hdc = hdcMem;
-    ev.itemRect = {0, 0, w, h};
-    ev.itemIndex = 0;
-    ev.selected = false;
-    fw->DrawResultItem(&ev);
+    // scoped: GfxDirect2D reaches the bitmap only when destroyed, and the
+    // GetPixel() probe below needs the pixels to be there
+    {
+        Gfx* gfx = GfxCreate(hdcMem);
+        VirtListBox::DrawItemEvent ev;
+        ev.listBox = fw->results;
+        ev.gfx = gfx;
+        ev.itemRect = {0, 0, w, h};
+        ev.itemIndex = 0;
+        ev.selected = false;
+        fw->DrawResultItem(&ev);
+        delete gfx;
+    }
 
-    COLORREF px = GetPixel(hdcMem, w - 3, h / 2);
+    Color px = GetPixel(hdcMem, w - 3, h / 2);
     SelectObject(hdcMem, oldBmp);
     DeleteObject(hbmp);
     DeleteDC(hdcMem);

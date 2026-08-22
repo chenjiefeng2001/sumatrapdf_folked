@@ -2,10 +2,11 @@
    License: GPLv3 */
 
 #include "base/Base.h"
+#include "base/Win.h"
 
 #include <uiautomationcore.h>
 
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
 
 #include "Settings.h"
 #include "DocController.h"
@@ -52,7 +53,7 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationPageProvider::QueryInterface(REFIID
 }
 
 ULONG STDMETHODCALLTYPE SumatraUIAutomationPageProvider::AddRef() {
-    return InterlockedIncrement(&refCount);
+    return AtomicIntInc(&refCount);
 }
 
 ULONG STDMETHODCALLTYPE SumatraUIAutomationPageProvider::Release() {
@@ -105,7 +106,7 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationPageProvider::GetRuntimeId(SAFEARRA
     }
 
     // RuntimeID magic, use hwnd to differentiate providers of different windows
-    int rId[] = {(int)canvasHwnd, SUMATRA_UIA_PAGE_RUNTIME_ID(pageNum)};
+    int rId[] = {HandleToLong(canvasHwnd), SUMATRA_UIA_PAGE_RUNTIME_ID(pageNum)};
     for (LONG i = 0; i < 2; i++) {
         HRESULT hr = SafeArrayPutElement(psa, &i, (void*)&(rId[i]));
         ReportIf(FAILED(hr));
@@ -144,11 +145,10 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationPageProvider::get_BoundingRectangle
         return E_FAIL;
     }
 
-    RECT canvasRect;
-    GetWindowRect(canvasHwnd, &canvasRect);
+    Rect canvasRect = HwndWindowRect(canvasHwnd);
 
-    pRetVal->left = canvasRect.left + page->pageOnScreen.x;
-    pRetVal->top = canvasRect.top + page->pageOnScreen.y;
+    pRetVal->left = canvasRect.x + page->pageOnScreen.x;
+    pRetVal->top = canvasRect.y + page->pageOnScreen.y;
     pRetVal->width = page->pageOnScreen.dx;
     pRetVal->height = page->pageOnScreen.dy;
 
@@ -190,8 +190,9 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationPageProvider::GetPropertyValue(PROP
         pRetVal->bstrVal = SysAllocString(CWStrTemp(s));
         return S_OK;
     } else if (propertyId == UIA_IsValuePatternAvailablePropertyId) {
+        // VARIANT_TRUE (-1), not TRUE (1) - see DocumentProvider::GetPropertyValue
         pRetVal->vt = VT_BOOL;
-        pRetVal->boolVal = TRUE;
+        pRetVal->boolVal = VARIANT_TRUE;
         return S_OK;
     }
 

@@ -9,8 +9,6 @@
 #include "base/Base.h"
 #include "RefHoverTextDetect.h"
 
-#include <wctype.h>
-
 // === Plain-text citation detection ===
 
 // Lowercase name-prefix particles that are part of a multi-word surname
@@ -39,12 +37,8 @@ static Rect GlyphSpanBounds(const Rect* coords, int textLen, int startIdx, int e
             dy = r.dy;
             any = true;
         }
-        if (r.x < xMin) {
-            xMin = r.x;
-        }
-        if (r.x + r.dx > xMax) {
-            xMax = r.x + r.dx;
-        }
+        xMin = std::min(r.x, xMin);
+        xMax = std::max(r.x + r.dx, xMax);
     }
     if (!any) {
         return {};
@@ -79,7 +73,7 @@ static bool IsNamePrefix(WStr word) {
         return false;
     }
     for (WStr prefix : kNamePrefixes) {
-        if (word.len == prefix.len && _wcsnicmp(word.s, prefix.s, (size_t)prefix.len) == 0) {
+        if (wstr::EqI(word, prefix)) {
             return true;
         }
     }
@@ -90,6 +84,15 @@ static bool IsNamePrefix(WStr word) {
 // pagePos in a page's glyph arrays. On success, returns true and fills
 // *surnameOut with a freshly-allocated UTF-8 surname (caller frees) and
 // *yearOut with the 4-digit year.
+// Pure-function plain-text citation detectors for PDFs without hyperref links.
+// Engine-independent so the heuristics can be unit-tested with synthetic glyph
+// arrays (see src/base/tests/RefHover_ut.cpp).
+//
+// Both functions take page text converted to one WCHAR per engine text
+// codepoint:
+//   text     — per-glyph WCHAR view
+//   coords   — per-glyph Rect array, parallel to `text`
+//   textLen  — glyph count
 bool DetectCitationInPageText(WStr text, const Rect* coords, int textLen, Point pagePos, Str* surnameOut, int* yearOut,
                               Rect* srcRectOut) {
     *surnameOut = {};
@@ -106,11 +109,11 @@ bool DetectCitationInPageText(WStr text, const Rect* coords, int textLen, Point 
         if (r.dx <= 0 && r.dy <= 0) {
             continue;
         }
-        int cx = r.x + r.dx / 2;
-        int cy = r.y + r.dy / 2;
+        int cx = r.x + (r.dx / 2);
+        int cy = r.y + (r.dy / 2);
         int ddx = cx - pagePos.x;
         int ddy = cy - pagePos.y;
-        int distSq = ddx * ddx + ddy * ddy;
+        int distSq = (ddx * ddx) + (ddy * ddy);
         if (distSq < bestDistSq) {
             bestDistSq = distSq;
             cursorIdx = i;
@@ -129,14 +132,16 @@ bool DetectCitationInPageText(WStr text, const Rect* coords, int textLen, Point 
         lineH = 14;
     }
     int yMin = cursorY - lineH - 2;
-    int yMax = cursorY + lineH * 2 + 2;
+    int yMax = cursorY + (lineH * 2) + 2;
 
     // Word-generated PDFs frequently emit kerning-driven inter-glyph spaces
     // ("et  al .", "Geneti c  Al gorith ms"), which break naive pattern
     // matching. Collapse runs of whitespace to a single space so downstream
     // checks (the "et al." literal, walk-back stop conditions) work against
     // normalized text. Line breaks also become a single space.
-    wstr::Builder chunk;
+    // 3-line band of page text; most citations fit in a few hundred WCHARs.
+    WCHAR chunkScratch[512]{};
+    wstr::Builder chunk(WStr(chunkScratch, dimofi(chunkScratch)));
     Vec<int> chunkGlyphs;
     int cursorChunkPos = -1;
     int prevY = INT_MIN;
@@ -189,7 +194,8 @@ bool DetectCitationInPageText(WStr text, const Rect* coords, int textLen, Point 
         if (i > 0 && iswdigit(s.s[i - 1])) {
             return -1;
         }
-        int y = (s.s[i] - L'0') * 1000 + (s.s[i + 1] - L'0') * 100 + (s.s[i + 2] - L'0') * 10 + (s.s[i + 3] - L'0');
+        int y =
+            ((s.s[i] - L'0') * 1000) + ((s.s[i + 1] - L'0') * 100) + ((s.s[i + 2] - L'0') * 10) + (s.s[i + 3] - L'0');
         if (y < 1900 || y > 2050) {
             return -1;
         }
@@ -221,8 +227,8 @@ bool DetectCitationInPageText(WStr text, const Rect* coords, int textLen, Point 
             return false;
         }
     }
-    int year = (s.s[bestYearPos] - L'0') * 1000 + (s.s[bestYearPos + 1] - L'0') * 100 +
-               (s.s[bestYearPos + 2] - L'0') * 10 + (s.s[bestYearPos + 3] - L'0');
+    int year = ((s.s[bestYearPos] - L'0') * 1000) + ((s.s[bestYearPos + 1] - L'0') * 100) +
+               ((s.s[bestYearPos + 2] - L'0') * 10) + (s.s[bestYearPos + 3] - L'0');
 
     // 4. Walk back from the year through punctuation to find the surname.
     int p = bestYearPos - 1;
@@ -339,8 +345,9 @@ bool DetectCitationInPageText(WStr text, const Rect* coords, int textLen, Point 
         return false;
     }
 
-    // Build surname string.
-    wstr::Builder surnameW;
+    // Build surname string (author names are short).
+    WCHAR surnameScratch[128]{};
+    wstr::Builder surnameW(WStr(surnameScratch, dimofi(surnameScratch)));
     for (int j = surnameStart; j < surnameEnd; j++) {
         surnameW.AppendChar(s.s[j]);
     }
@@ -371,6 +378,10 @@ bool DetectCitationInPageText(WStr text, const Rect* coords, int textLen, Point 
 // `surnameW` and where `year` appears within the next ~5 lines (the entry).
 // Returns true on hit and fills xOut/yOut with the entry's anchor (top-left
 // of the surname's first glyph).
+// Search a page's glyph arrays for a bibliography entry whose line starts
+// with (or contains, near the line start) `surnameW` and whose entry text
+// contains `year`. Returns true on hit and fills xOut/yOut with the entry's
+// anchor (top-left of the matching line's first glyph).
 bool FindSurnameInPageText(WStr text, const Rect* coords, int textLen, WStr surnameW, int year, float* xOut,
                            float* yOut) {
     if (!text || textLen <= 0 || !coords || !surnameW) {
@@ -385,9 +396,7 @@ bool FindSurnameInPageText(WStr text, const Rect* coords, int textLen, WStr surn
         if (c == L' ' || c == L'\t' || c == L'\n' || c == L'\r') {
             continue;
         }
-        if (coords[i].x < leftX) {
-            leftX = coords[i].x;
-        }
+        leftX = std::min(coords[i].x, leftX);
     }
     if (leftX == INT_MAX) {
         return false;
@@ -395,10 +404,10 @@ bool FindSurnameInPageText(WStr text, const Rect* coords, int textLen, WStr surn
 
     // Year as a wide string for searching.
     WCHAR yearStr[6];
-    yearStr[0] = (WCHAR)(L'0' + (year / 1000) % 10);
-    yearStr[1] = (WCHAR)(L'0' + (year / 100) % 10);
-    yearStr[2] = (WCHAR)(L'0' + (year / 10) % 10);
-    yearStr[3] = (WCHAR)(L'0' + year % 10);
+    yearStr[0] = (WCHAR)(L'0' + ((year / 1000) % 10));
+    yearStr[1] = (WCHAR)(L'0' + ((year / 100) % 10));
+    yearStr[2] = (WCHAR)(L'0' + ((year / 10) % 10));
+    yearStr[3] = (WCHAR)(L'0' + (year % 10));
     yearStr[4] = 0;
 
     int prevY = INT_MIN;
@@ -429,7 +438,7 @@ bool FindSurnameInPageText(WStr text, const Rect* coords, int textLen, WStr surn
         }
         int matchAt = -1;
         // Tier 1: strict line-start prefix.
-        if (i + surnameLen <= textLen && _wcsnicmp(text.s + i, surnameW.s, (size_t)surnameLen) == 0) {
+        if (i + surnameLen <= textLen && wstr::StartsWithI(WStr(text.s + i, textLen - i), surnameW)) {
             matchAt = i;
         }
         // Tier 2: fragment match within the first ~30 chars of the line.
@@ -437,7 +446,7 @@ bool FindSurnameInPageText(WStr text, const Rect* coords, int textLen, WStr surn
         if (matchAt < 0 && surnameLen >= 3) {
             int lineEnd = (i + 30 < textLen) ? i + 30 : textLen;
             for (int k = i + 1; k + surnameLen <= lineEnd; k++) {
-                if (_wcsnicmp(text.s + k, surnameW.s, (size_t)surnameLen) == 0) {
+                if (wstr::StartsWithI(WStr(text.s + k, textLen - k), surnameW)) {
                     // Require token boundary (not preceded by another letter).
                     if (iswalpha(text.s[k - 1])) {
                         continue;
@@ -479,6 +488,12 @@ bool FindSurnameInPageText(WStr text, const Rect* coords, int textLen, WStr surn
 
 // === Numeric "[N]" citation detection ===
 
+// Detect a numeric "[N]" citation marker (IEEE / numbered reference style) at
+// pagePos (page coordinates). Handles lists / ranges ("[1, 2]", "[3-5]") by
+// picking the number token nearest the cursor. On success returns true and
+// fills *numOut with the reference number.
+// srcRectOut (optional): see DetectCitationInPageText — stable per-occurrence
+// "[N]" bracket span set on success.
 bool DetectNumericCitationInPageText(WStr text, const Rect* coords, int textLen, Point pagePos, int* numOut,
                                      Rect* srcRectOut) {
     *numOut = 0;
@@ -494,11 +509,11 @@ bool DetectNumericCitationInPageText(WStr text, const Rect* coords, int textLen,
         if (r.dx <= 0 && r.dy <= 0) {
             continue;
         }
-        int cx = r.x + r.dx / 2;
-        int cy = r.y + r.dy / 2;
+        int cx = r.x + (r.dx / 2);
+        int cy = r.y + (r.dy / 2);
         int ddx = cx - pagePos.x;
         int ddy = cy - pagePos.y;
-        int distSq = ddx * ddx + ddy * ddy;
+        int distSq = (ddx * ddx) + (ddy * ddy);
         if (distSq < bestDistSq) {
             bestDistSq = distSq;
             cursorIdx = i;
@@ -508,7 +523,6 @@ bool DetectNumericCitationInPageText(WStr text, const Rect* coords, int textLen,
         return false;
     }
 
-    int cursorY = coords[cursorIdx].y;
     int lineTol = coords[cursorIdx].dy + 4;
     if (lineTol < 12) {
         lineTol = 14;
@@ -627,7 +641,7 @@ bool DetectNumericCitationInPageText(WStr text, const Rect* coords, int textLen,
 
     // Reading order: previous line, cursor line, next line — each sorted by x.
     int m = prevN + curN + nextN;
-    int* seq = AllocArray<int>((size_t)m);
+    int* seq = AllocArrayTemp<int>(m);
     {
         int w = 0;
         for (int t = 0; t < prevN; t++) {
@@ -640,7 +654,7 @@ bool DetectNumericCitationInPageText(WStr text, const Rect* coords, int textLen,
             seq[w++] = nextSeg[t];
         }
     }
-    auto cleanup = [&]() { free(seq); };
+    auto cleanup = [] {}; // seq is temp-arena scratch, nothing to free
     int cursorPos = -1;
     for (int k = 0; k < m; k++) {
         if (seq[k] == cursorIdx) {
@@ -701,10 +715,8 @@ bool DetectNumericCitationInPageText(WStr text, const Rect* coords, int textLen,
         int start = k;
         int val = 0;
         while (k < closePos && iswdigit(text.s[seq[k]])) {
-            val = val * 10 + (text.s[seq[k]] - L'0');
-            if (val > 99999) {
-                val = 99999; // guard against pathological runs
-            }
+            val = (val * 10) + (text.s[seq[k]] - L'0');
+            val = std::min(val, 99999); // guard against pathological runs
             k++;
         }
         int end = k - 1;
@@ -734,18 +746,10 @@ bool DetectNumericCitationInPageText(WStr text, const Rect* coords, int textLen,
             if (r.dx <= 0 && r.dy <= 0) {
                 continue;
             }
-            if (r.x < xMin) {
-                xMin = r.x;
-            }
-            if (r.y < sMinY) {
-                sMinY = r.y;
-            }
-            if (r.x + r.dx > xMax) {
-                xMax = r.x + r.dx;
-            }
-            if (r.y + r.dy > sMaxY) {
-                sMaxY = r.y + r.dy;
-            }
+            xMin = std::min(r.x, xMin);
+            sMinY = std::min(r.y, sMinY);
+            xMax = std::max(r.x + r.dx, xMax);
+            sMaxY = std::max(r.y + r.dy, sMaxY);
         }
         *srcRectOut = (xMin != INT_MAX) ? Rect{xMin, sMinY, xMax - xMin, sMaxY - sMinY} : Rect{};
     }
@@ -754,6 +758,9 @@ bool DetectNumericCitationInPageText(WStr text, const Rect* coords, int textLen,
     return true;
 }
 
+// Search a page's glyph arrays for a bibliography entry whose line starts with
+// "[num]" at the page's leftmost text column. Returns true on hit and fills
+// xOut/yOut with the entry's anchor (top-left of the "[" glyph).
 bool FindNumericReferenceInPageText(WStr text, const Rect* coords, int textLen, int num, float* xOut, float* yOut) {
     if (!text || textLen <= 0 || !coords || num <= 0) {
         return false;
@@ -776,7 +783,7 @@ bool FindNumericReferenceInPageText(WStr text, const Rect* coords, int textLen, 
         int val = 0;
         int nd = 0;
         while (j < textLen && iswdigit(text.s[j])) {
-            val = val * 10 + (text.s[j] - L'0');
+            val = (val * 10) + (text.s[j] - L'0');
             j++;
             nd++;
         }

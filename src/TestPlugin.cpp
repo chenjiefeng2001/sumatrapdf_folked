@@ -6,6 +6,7 @@
 // Only available in debug builds.
 
 #include "base/Base.h"
+#include "base/File.h"
 #include "base/Win.h"
 #include "base/CmdLineArgsIter.h"
 
@@ -48,12 +49,12 @@ static LRESULT CALLBACK PluginParentWndProc(HWND hwnd, UINT msg, WPARAM wp, LPAR
         HWND hChild = FindWindowEx(hwnd, nullptr, nullptr, nullptr);
         if (!hChild) {
             gPluginTimedOut = true;
-            InvalidateRect(hwnd, nullptr, TRUE);
+            HwndInvalidate(hwnd, true);
         }
     } else if (WM_SIZE == msg) {
         HWND hChild = FindWindowEx(hwnd, nullptr, nullptr, nullptr);
         if (hChild) {
-            Rect rcClient = ClientRect(hwnd);
+            Rect rcClient = HwndClientRect(hwnd);
             MoveWindow(hChild, rcClient.x, rcClient.y, rcClient.dx, rcClient.dy, FALSE);
         }
     } else if (WM_COPYDATA == msg) {
@@ -75,9 +76,9 @@ static LRESULT CALLBACK PluginParentWndProc(HWND hwnd, UINT msg, WPARAM wp, LPAR
         if (!hChild) {
             PAINTSTRUCT ps;
             HDC hDC = BeginPaint(hwnd, &ps);
-            RECT rcClient = ToRECT(ClientRect(hwnd));
+            RECT rcClient = ToRECT(HwndClientRect(hwnd));
             HBRUSH brushBg = CreateSolidBrush(0xCCCCCC);
-            FillRect(hDC, &rcClient, brushBg);
+            HdcFillRect(hDC, ToRect(rcClient), brushBg);
             LOGFONTW lf{};
             lf.lfHeight = -14;
             str::BufSet(lf.lfFaceName, dimof(lf.lfFaceName), "MS Shell Dlg");
@@ -111,7 +112,7 @@ void TestPlugin(WStr cmdLine) {
     // find the position of -test-plugin and take args after it
     int pluginIdx = -1;
     for (int i = 0; i < len(argList); i++) {
-        if (str::EqI(argList.At(i), "-test-plugin")) {
+        if (str::EqI(argList[i], StrL("-test-plugin"))) {
             pluginIdx = i;
             break;
         }
@@ -120,7 +121,7 @@ void TestPlugin(WStr cmdLine) {
     StrVec args;
     if (pluginIdx >= 0) {
         for (int i = pluginIdx + 1; i < len(argList); i++) {
-            args.Append(argList.At(i));
+            args.Append(argList[i]);
         }
     }
 
@@ -131,7 +132,7 @@ void TestPlugin(WStr cmdLine) {
     }
 
     // if no exe path given or first arg doesn't end with .exe, use our own exe
-    if (len(args) == 1 || !str::EndsWithI(args.At(0), ".exe")) {
+    if (len(args) == 1 || !str::EndsWithI(args[0], StrL(".exe"))) {
         TempStr selfPath = GetSelfExePathTemp();
         args.InsertAt(0, selfPath);
     }
@@ -152,10 +153,10 @@ void TestPlugin(WStr cmdLine) {
     wc.lpfnWndProc = PluginParentWndProc;
     wc.hInstance = hInstance;
     wc.lpszClassName = PLUGIN_TEST_NAME;
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hCursor = GetCachedCursor(IDC_ARROW);
     RegisterClass(&wc);
 
-    PluginStartData data = {args.At(0), args.At(2), args.At(1)};
+    PluginStartData data = {args[0], args[2], args[1]};
     HWND hwnd = CreateWindowExW(0, PLUGIN_TEST_NAME, PLUGIN_TEST_NAME, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, 0,
                                 CW_USEDEFAULT, 0, nullptr, nullptr, hInstance, &data);
     ShowWindow(hwnd, SW_SHOW);

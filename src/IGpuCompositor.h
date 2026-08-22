@@ -6,7 +6,7 @@
 // active. The backend is selected at compile time via the build system; only
 // one implementation is linked.
 
-#include "wingui/Layout.h" // for Size
+#include "gui/Layout.h" // for Size
 
 struct Pixmap;
 

@@ -3,8 +3,9 @@
 
 #include "base/Base.h"
 #include "base/Win.h"
-#include "base/Dpi.h"
-#include "wingui/UIModels.h"
+#include "gui/Dpi.h"
+#include "gui/PlatformFont.h"
+#include "gui/UIModels.h"
 #include "Settings.h"
 #include "DocController.h"
 #include "DisplayMode.h"
@@ -14,7 +15,7 @@
 #include "MainWindow.h"
 #include "Theme.h"
 #include "ThumbnailPanel.h"
-#include "wingui/Renderer.h"
+#include "gui/win/Renderer.h"
 
 // Window class for the thumbnail panel
 static WStr GetThumbClass() {
@@ -47,7 +48,7 @@ static LRESULT CALLBACK WndProcThumbnail(HWND hwnd, UINT msg, WPARAM wp, LPARAM 
                 gRenderer->FillRect(ps.rcPaint, RgbaColor(ThemeControlBackgroundColor()));
                 if (!panel || panel->selectedPage < 0) {
                     gRenderer->DrawTextW(WStrL(L"No thumbnails"), rc, RgbaColor(ThemeWindowTextColor()),
-                                         GetDefaultGuiFont(), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                                         GetDefaultGuiFont()->GetHFont(), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 } else {
                     int y = -panel->scrollPos;
                     for (int i = 0; i < 10 && y < rc.bottom; i++, y += panel->itemHeight) {
@@ -60,7 +61,7 @@ static LRESULT CALLBACK WndProcThumbnail(HWND hwnd, UINT msg, WPARAM wp, LPARAM 
                         WCHAR buf[32];
                         int cch = swprintf_s(buf, L"Page %d", i + 1);
                         gRenderer->DrawTextW(WStr(buf, cch), itemRc, RgbaColor(ThemeWindowTextColor()),
-                                             GetDefaultGuiFont(), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                                             GetDefaultGuiFont()->GetHFont(), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                     }
                 }
                 gRenderer->EndPaint();
@@ -150,8 +151,8 @@ void ThumbnailPanel::Create(HWND parent) {
         RegisterClassExW(&wcex);
     }
 
-    int panelWidth = DpiScale(parent, width);
-    int panelHeight = DpiScale(parent, 400);
+    int panelWidth = DpiScaleByDpi(DpiGetForHwnd(parent), width);
+    int panelHeight = DpiScaleByDpi(DpiGetForHwnd(parent), 400);
     hwnd = CreateWindowExW(WS_EX_NOACTIVATE, clsName.s, nullptr, WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, 0, 0,
                            panelWidth, panelHeight, parent, nullptr, GetModuleHandleW(nullptr), this);
     if (hwnd) {
@@ -181,7 +182,7 @@ void ThumbnailPanel::ReloadThumbnails() {
 
 void ThumbnailPanel::UpdateLayout(int parentY, int parentHeight) {
     if (!hwnd) return;
-    int panelWidth = DpiScale(hwndOwner, width);
+    int panelWidth = DpiScaleByDpi(DpiGetForHwnd(hwndOwner), width);
     SetWindowPos(hwnd, nullptr, 0, parentY, panelWidth, parentHeight, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 

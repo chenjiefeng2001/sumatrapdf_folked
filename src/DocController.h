@@ -3,28 +3,20 @@
 
 struct DocController;
 struct ChmModel;
+struct MarkdownModel;
 struct DisplayModel;
 struct IPageElement;
 struct IPageDestination;
+struct ILinkHandler;
 struct TocTree;
 struct TocItem;
 struct MainWindow;
 struct FileState;
 struct RenderedBitmap;
 enum class DisplayMode;
+enum class DocProp : u8;
 
 using OnBitmapRendered = Func1<RenderedBitmap*>;
-
-struct ILinkHandler {
-    virtual ~ILinkHandler() {};
-    virtual DocController* GetDocController() = 0;
-    virtual void GotoLink(IPageDestination*) = 0;
-    virtual void GotoNamedDest(Str) = 0;
-    virtual void ScrollTo(IPageDestination*) = 0;
-    virtual void LaunchURL(Str) = 0;
-    virtual void LaunchFile(Str path, IPageDestination*) = 0;
-    virtual IPageDestination* FindTocItem(TocItem* item, Str name, bool partially) = 0;
-};
 
 struct DocControllerCallback {
     virtual ~DocControllerCallback() = default;
@@ -50,6 +42,15 @@ struct DocControllerCallback {
     virtual void FocusFrame(bool always) = 0;
     // tell the UI to let the user save the provided data to a file
     virtual void SaveDownload(Str url, Str) = 0;
+    // MarkdownModel //
+    // in-page find result from the webview: search generation, 1-based
+    // current match and total match count on the current page
+    virtual void FindResultReceived(int gen, int current, int total) = 0;
+    // all-pages find result from the webview (raw 'mdfindall' payload)
+    virtual void FindAllResultReceived(Str payload) = 0;
+    // the controller replaced its TocTree (built in the background): show the
+    // new one. Must not return while anything still points into the old tree.
+    virtual void TocChanged(DocController*) = 0;
 };
 
 struct DocController {
@@ -62,7 +63,7 @@ struct DocController {
     virtual Str GetFilePath() const = 0;
     virtual Str GetDefaultFileExt() const = 0;
     virtual int PageCount() const = 0;
-    virtual TempStr GetPropertyTemp(Str name) = 0;
+    virtual TempStr GetPropertyTemp(DocProp prop) = 0;
 
     // page navigation (stateful)
     virtual int CurrentPageNo() const = 0;
@@ -79,8 +80,17 @@ struct DocController {
     virtual float GetNextZoomStep(float towards) const = 0;
     virtual void SetViewPortSize(Size size) = 0;
 
+    // in-page find in an embedded browser view (ChmModel, MarkdownModel with
+    // a WebView2 backend); see SearchAndDDE.cpp BrowserFind* and BrowserDocView
+    virtual bool CanFindInPage() const { return false; }
+    virtual void FindStart(Str, bool, bool, int) {}
+    virtual void FindAllPages(Str, bool, bool, int) {}
+    virtual void FindGoto(int) {}
+    virtual void GoToPageWithFind(int, Str, bool, bool, int, int) {}
+    virtual void FindClear() {}
+
     // table of contents
-    bool HasToc() {
+    virtual bool HasToc() {
         auto* tree = GetToc();
         return tree != nullptr;
     }
@@ -90,7 +100,7 @@ struct DocController {
     virtual IPageDestination* GetNamedDest(Str name) = 0;
 
     // get display state (pageNo, zoom, scroll etc. of the document)
-    virtual void GetDisplayState(FileState* ds) = 0;
+    virtual void GetDisplayState(FileState* fs) = 0;
     // asynchronously calls saveThumbnail (fails silently)
     virtual void CreateThumbnail(Size size, const OnBitmapRendered* saveThumbnail) = 0;
 
@@ -138,4 +148,9 @@ struct DocController {
     // for quick type determination and type-safe casting
     virtual DisplayModel* AsFixed() { return nullptr; }
     virtual ChmModel* AsChm() { return nullptr; }
+    virtual MarkdownModel* AsMarkdown() { return nullptr; }
 };
+
+inline bool IsBrowserDocController(DocController* ctrl) {
+    return ctrl && (ctrl->AsChm() || ctrl->AsMarkdown());
+}

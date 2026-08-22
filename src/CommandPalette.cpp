@@ -3,12 +3,16 @@
 
 #include "base/Base.h"
 #include "base/Win.h"
-#include "base/Dpi.h"
+#include "gui/Dpi.h"
 #include "base/UITask.h"
 
-#include "wingui/UIModels.h"
-#include "wingui/Layout.h"
-#include "wingui/WinGui.h"
+#include "gui/UIModels.h"
+#include "gui/Layout.h"
+#include "gui/win/WinGui.h"
+#include "gui/PlatformFont.h"
+#include "gui/Gfx.h"
+#include "gui/GuiColors.h"
+#include "gui/VirtCtrl.h"
 
 #include "Settings.h"
 #include "AppSettings.h"
@@ -17,7 +21,6 @@
 #include "EngineBase.h"
 #include "MainWindow.h"
 #include "Theme.h"
-#include "HardwareProfile.h"
 #include "WindowTab.h"
 #include "SumatraConfig.h"
 #include "Commands.h"
@@ -25,13 +28,10 @@
 #include "TableOfContents.h"
 #include "Favorites.h"
 #include "FileHistory.h"
-#include "DarkModeSubclass.h"
+#include "Menu.h"
 #include "Translations.h"
 #include "CommandPalette.h"
-#include "CommandPaletteScoring.h"
 #include "CommandPaletteInternal.h"
-
-#include "base/Log.h"
 
 // clang-format off
 static i32 gCommandsNoActivate[] = {
@@ -69,9 +69,15 @@ static bool IsCmdInList(i32 cmdId, i32* ids) {
     return false;
 }
 
+// UI language (and the debug RTL toggle), not the palette hwnd: that window
+// stays LTR so virtual-control coords and clicks are not mirrored (#5956).
+bool CommandPaletteUiRtl() {
+    return IsUIRtl();
+}
+
 Str CommandPaletteSkipWS(Str s) {
     if (!s.s) {
-        return Str();
+        return {};
     }
     int off = 0;
     while (off < s.len && str::IsWs(s.s[off])) {
@@ -81,7 +87,6 @@ Str CommandPaletteSkipWS(Str s) {
 }
 
 CommandPaletteWnd* gCommandPaletteWnd = nullptr;
-HWND gCommandPaletteHwnd = nullptr;
 static HWND gHwndToActivateOnClose = nullptr;
 static WindowTab* gTabToSelectOnClose = nullptr;
 static i32 gCmdIdToExecOnClose = 0;
@@ -94,9 +99,8 @@ void SafeDeleteCommandPaletteWnd() {
     }
 
     MainWindow* win = gCommandPaletteWnd->win;
-    auto tmp = gCommandPaletteWnd;
+    auto* tmp = gCommandPaletteWnd;
     gCommandPaletteWnd = nullptr;
-    gCommandPaletteHwnd = nullptr;
     delete tmp;
     if (gHwndToActivateOnClose) {
         HWND fg = GetForegroundWindow();
@@ -108,14 +112,14 @@ void SafeDeleteCommandPaletteWnd() {
     if (gTabToSelectOnClose) {
         WindowTab* tab = gTabToSelectOnClose;
         gTabToSelectOnClose = nullptr;
-        if (tab->win && IsMainWindowValid(tab->win) && tab->win->GetTabIdx(tab) >= 0) {
+        if (IsMainWindowValidAndNotClosing(tab->win) && tab->win->GetTabIdx(tab) >= 0) {
             SelectTabInWindow(tab);
         }
     }
     if (gCmdIdToExecOnClose != 0) {
         i32 cmdId = gCmdIdToExecOnClose;
         gCmdIdToExecOnClose = 0;
-        if (win && IsMainWindowValid(win)) {
+        if (IsMainWindowValidAndNotClosing(win)) {
             HwndPostCommand(win->hwndFrame, cmdId);
         }
     }
@@ -124,7 +128,7 @@ void SafeDeleteCommandPaletteWnd() {
         Favorite* fav = gFavToGoToOnClose;
         gFavFsToGoToOnClose = nullptr;
         gFavToGoToOnClose = nullptr;
-        if (win && IsMainWindowValid(win)) {
+        if (IsMainWindowValidAndNotClosing(win)) {
             GoToFavorite(win, fs, fav);
         }
     }
@@ -135,7 +139,7 @@ void ScheduleDeleteAndExecCommand(i32 cmdId) {
         return;
     }
     gCmdIdToExecOnClose = cmdId;
-    if (IsMainWindowValid(gCommandPaletteWnd->win)) {
+    if (IsMainWindowValidAndNotClosing(gCommandPaletteWnd->win)) {
         HighlightTab(gCommandPaletteWnd->win, nullptr);
     }
     auto fn = MkFunc0Void(SafeDeleteCommandPaletteWnd);
@@ -181,31 +185,44 @@ void CommandPaletteWnd::SwitchToFavorites() {
     SwitchToPrefix(kPalettePrefixFavorites);
 }
 
-LRESULT CommandPaletteWnd::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    switch (msg) {
-        case WM_ACTIVATE:
-            if (wp == WA_INACTIVE) {
-                ScheduleDeleteAndExecCommand();
-                return 0;
-            }
-            break;
-        case WM_COMMAND: {
-            int cmdId = LOWORD(wp);
-            CustomCommand* cmd = FindCustomCommand(cmdId);
-            if (cmd != nullptr) {
-                cmdId = cmd->origId;
-            }
-            switch (cmdId) {
-                case CmdNextTabSmart:
-                case CmdPrevTabSmart: {
-                    int dir = cmdId == CmdNextTabSmart ? 1 : -1;
-                    return AdvanceSelection(dir);
-                }
-            }
-        }
+void CommandPaletteWnd::OnActivate(WindowBase::ActivateEvent* ev) {
+    if (ev->state == WA_INACTIVE) {
+        ScheduleDeleteAndExecCommand();
+        ev->didHandle = true;
     }
+}
 
-    return WndProcDefault(hwnd, msg, wp, lp);
+void CommandPaletteWnd::OnCommand(WindowBase::CommandEvent* ev) {
+    int cmdId = LOWORD(ev->wparam);
+    CustomCommand* cmd = FindCustomCommand(cmdId);
+    if (cmd != nullptr) {
+        cmdId = cmd->origId;
+    }
+    switch (cmdId) {
+        case CmdNextTabSmart:
+        case CmdPrevTabSmart: {
+            int dir = cmdId == CmdNextTabSmart ? 1 : -1;
+            AdvanceSelection(dir);
+            ev->didHandle = true;
+            return;
+        }
+        case CmdSelectAll:
+            // Ctrl+A is an accelerator (CmdSelectAll) sent to this window;
+            // select the query instead of the document (issue #5972).
+            if (editQuery) {
+                editQuery->SelectAll();
+            }
+            ev->didHandle = true;
+            return;
+        case CmdCopySelection:
+            // Ctrl+C is an accelerator (CmdCopySelection) sent to this window;
+            // copy the query instead of the document (issue #5972).
+            if (editQuery && editQuery->hwnd) {
+                SendMessageW(editQuery->hwnd, WM_COPY, 0, 0);
+            }
+            ev->didHandle = true;
+            return;
+    }
 }
 
 void CommandPaletteWnd::OnSelectionChange() {
@@ -213,7 +230,7 @@ void CommandPaletteWnd::OnSelectionChange() {
     if (!smartTabMode) {
         return;
     }
-    auto m = (ListBoxModelCP*)listBox->model;
+    auto* m = (ListBoxModelCP*)listBox->model;
     ItemDataCP* data = m->strings.AtData(idx);
     HighlightTab(win, data->tab);
 }
@@ -222,7 +239,7 @@ bool CommandPaletteWnd::AdvanceSelection(int dir) {
     if (dir == 0) {
         return false;
     }
-    int n = listBox->GetCount();
+    int n = listBox->ItemsCount();
     if (n == 0) {
         return false;
     }
@@ -238,124 +255,187 @@ bool CommandPaletteWnd::AdvanceSelection(int dir) {
     return true;
 }
 
-bool CommandPaletteWnd::PreTranslateMessage(MSG& msg) {
-    if (msg.message == WM_KEYDOWN) {
-        int dir = 0;
-        if (msg.wParam == VK_ESCAPE) {
-            // Esc-twice-to-close: if query is non-empty, clear it first.
-            // If query is already empty (or was cleared by a previous Esc), close.
-            Str query = CommandPaletteSkipWS(Str(editQuery->GetTextTemp()));
-            if (len(query) > 0) {
-                // First Esc: clear the query. Reset to default prefix mode.
-                editQuery->SetText(_TRA(""));
-                // Reset to "everything" search after clearing
-                queryWasEmptyOnLastEsc = false;
-                // The SetText triggers QueryChanged which will repopulate the list.
-                // Give focus back to the edit control so user can type a new query.
-                HwndSetFocus(editQuery->hwnd);
-                return true;
-            }
-            // Second Esc (or first Esc when query was already empty): close
+// Delete selected list item when it is removable: file-history entry, open tab,
+// or favorite. Commands and TOC entries are not removable (caller should let
+// the edit control handle Delete). After removal, refilter and keep selection
+// on the same index (or the new last item if we deleted the last row).
+// remove selected history / tab / favorite; keeps selection index stable
+bool CommandPaletteWnd::RemoveSelectedItem() {
+    if (!listBox || !listBox->model) {
+        return false;
+    }
+    int currSel = listBox->GetCurrentSelection();
+    if (currSel < 0) {
+        return false;
+    }
+    auto* m = (ListBoxModelCP*)listBox->model;
+    int n = m->ItemsCount();
+    if (currSel >= n) {
+        return false;
+    }
+    ItemDataCP* d = m->Data(currSel);
+    if (!d) {
+        return false;
+    }
+
+    // Commands and TOC: not removable from the palette
+    if (d->cmdId != 0 || d->tocItem) {
+        return false;
+    }
+
+    if (d->tab) {
+        WindowTab* tab = d->tab;
+        CloseTab(tab, false);
+        if (!IsMainWindowValid(win)) {
+            // closing the last tab closed the host window
             ScheduleDeleteAndExecCommand();
             return true;
         }
+    } else if (d->fav && d->favFs) {
+        // copy before DelFavorite frees the Favorite*
+        Str path = d->favFs->filePath;
+        int pageNo = d->fav->pageNo;
+        DelFavorite(path, pageNo);
+    } else if (d->filePath) {
+        ForgetFileFromFrequentlyRead(win, d->filePath);
+    } else {
+        return false;
+    }
 
-        if (msg.wParam == VK_RETURN) {
-            ExecuteCurrentSelection();
-            return true;
+    CollectStrings(win);
+    Str filter = CommandPaletteSkipWS(Str(editQuery->GetTextTemp()));
+    FilterStringsForQuery(filter, m->strings);
+    listBox->SetModel(m);
+
+    n = m->ItemsCount();
+    if (n == 0) {
+        listBox->SetCurrentSelection(-1);
+        return true;
+    }
+    int sel = currSel;
+    if (sel >= n) {
+        sel = n - 1;
+    }
+    CommandPaletteSetCurrentSelection(this, sel);
+    return true;
+}
+
+void CommandPaletteWnd::OnKeyDown(KeyEvent* ev) {
+    if (ev->vkey == VK_ESCAPE) {
+        ScheduleDeleteAndExecCommand();
+        ev->didHandle = true;
+        return;
+    }
+
+    if (ev->vkey == VK_RETURN) {
+        ExecuteCurrentSelection();
+        ev->didHandle = true;
+        return;
+    }
+
+    if (ev->vkey == VK_DELETE) {
+        if (RemoveSelectedItem()) {
+            ev->didHandle = true;
         }
+        // not a removable list item: let the edit control process Delete
+        return;
+    }
 
-        if (msg.wParam == VK_DELETE) {
-            Str filter = CommandPaletteSkipWS(Str(editQuery->GetTextTemp()));
-            if (str::StartsWith(filter, kPalettePrefixFileHistory)) {
-                int n = listBox->GetCount();
-                if (n == 0) {
-                    return false;
-                }
-                int currSel = listBox->GetCurrentSelection();
-                auto m = (ListBoxModelCP*)listBox->model;
-                auto d = m->Data(currSel);
-                FileState* fs = gFileHistory.FindByPath(d->filePath);
-                if (!fs) {
-                    return true;
-                }
-                gFileHistory.Remove(fs);
-                CollectStrings(this->win);
-                this->QueryChanged();
+    if (ev->vkey == VK_TAB) {
+        if (ev->isCtrl) {
+            ev->didHandle = AdvanceSelection(ev->isShift ? -1 : 1);
+        }
+        return;
+    }
 
-                n = listBox->GetCount();
-                if (n == 0) {
-                    return true;
-                }
-                int lastIdx = n - 1;
-                if (currSel > lastIdx) {
-                    currSel = lastIdx;
-                }
-                listBox->SetCurrentSelection(currSel);
-                return true;
+    if (ev->vkey == VK_UP || ev->vkey == VK_DOWN || ev->vkey == VK_NEXT || ev->vkey == VK_PRIOR) {
+        ev->didHandle = MoveSelection(ev->vkey);
+        return;
+    }
+
+    if (ev->vkey == VK_HOME || ev->vkey == VK_END) {
+        // Ctrl+Home / Ctrl+End: always first / last row
+        if (ev->isCtrl) {
+            ev->didHandle = MoveSelection(ev->vkey);
+            return;
+        }
+        if (!editQuery || ev->hwnd != editQuery->hwnd) {
+            ev->didHandle = MoveSelection(ev->vkey);
+            return;
+        }
+        // Home / End: if the caret is already at the start/end of the query,
+        // move the list; otherwise let the Edit control move the caret.
+        int selStart = 0, selEnd = 0;
+        editQuery->GetSelection(selStart, selEnd);
+        int textLen = editQuery->GetTextLen();
+        bool toEnd = (ev->vkey == VK_END);
+        bool caretAtBound = (selStart == selEnd) && (toEnd ? selEnd == textLen : selStart == 0);
+        if (caretAtBound) {
+            ev->didHandle = MoveSelection(ev->vkey);
+        }
+    }
+}
+
+// Home / End / PageUp / PageDown move the list the same way as the Find
+// window: Home/End go to the first/last row, PageUp/PageDown jump a page
+// (no wrap). Up/Down still wrap via AdvanceSelection.
+bool CommandPaletteWnd::MoveSelection(int vkey) {
+    if (vkey == VK_UP) {
+        return AdvanceSelection(-1);
+    }
+    if (vkey == VK_DOWN) {
+        return AdvanceSelection(1);
+    }
+    if (!listBox) {
+        return false;
+    }
+    int n = listBox->ItemsCount();
+    if (n == 0) {
+        return false;
+    }
+    int curr = listBox->GetCurrentSelection();
+    int perPage = std::max(listBox->UsableDy() / listBox->GetItemHeight(), 1);
+    int idx = curr;
+    switch (vkey) {
+        case VK_HOME:
+            idx = 0;
+            break;
+        case VK_END:
+            idx = n - 1;
+            break;
+        case VK_NEXT:
+            if (curr < 0) {
+                idx = 0;
+            } else {
+                idx = std::min(curr + perPage, n - 1);
             }
-            // not in file-history mode: let the edit control process Delete
-            // normally (delete the character to the right of the cursor)
+            break;
+        case VK_PRIOR:
+            if (curr < 0) {
+                idx = n - 1;
+            } else {
+                idx = std::max(curr - perPage, 0);
+            }
+            break;
+        default:
             return false;
-        }
-
-        if (msg.wParam == VK_UP) {
-            dir = -1;
-        } else if (msg.wParam == VK_DOWN) {
-            dir = 1;
-        } else if (msg.wParam == VK_HOME) {
-            // Jump to the first item in the list
-            int n = listBox->GetCount();
-            if (n > 0) {
-                CommandPaletteSetCurrentSelection(this, 0);
-            }
-            return true;
-        } else if (msg.wParam == VK_END) {
-            // Jump to the last item in the list
-            int n = listBox->GetCount();
-            if (n > 0) {
-                CommandPaletteSetCurrentSelection(this, n - 1);
-            }
-            return true;
-        } else if (msg.wParam == VK_PRIOR) {
-            // Page Up: move up by half the visible items
-            int n = listBox->GetCount();
-            int pageSize = listBox->idealSizeLines / 2;
-            int currSel = listBox->GetCurrentSelection();
-            int sel = currSel - pageSize;
-            if (sel < 0) sel = 0;
-            CommandPaletteSetCurrentSelection(this, sel);
-            return true;
-        } else if (msg.wParam == VK_NEXT) {
-            // Page Down: move down by half the visible items
-            int n = listBox->GetCount();
-            int pageSize = listBox->idealSizeLines / 2;
-            int currSel = listBox->GetCurrentSelection();
-            int sel = currSel + pageSize;
-            if (sel >= n) sel = n - 1;
-            CommandPaletteSetCurrentSelection(this, sel);
-            return true;
-        }
-
-        if (msg.wParam == VK_TAB) {
-            if (IsCtrlPressed()) {
-                dir = IsShiftPressed() ? -1 : 1;
-            }
-        }
-        return AdvanceSelection(dir);
     }
-
-    if (smartTabMode) {
-        if (msg.message == WM_KEYUP) {
-            if (msg.wParam == VK_CONTROL) {
-                if (!stickyMode) {
-                    ExecuteCurrentSelection();
-                }
-                return true;
-            }
-        }
+    if (idx == curr) {
+        return true;
     }
-    return false;
+    CommandPaletteSetCurrentSelection(this, idx);
+    return true;
+}
+
+// smart-tab releases Ctrl after the palette is open; key-downs go via onKeyDown
+void CommandPaletteWnd::PreTranslate(WindowBase::PreTranslateEvent* ev) {
+    MSG& msg = *ev->msg;
+    if (smartTabMode && msg.message == WM_KEYUP && msg.wParam == VK_CONTROL) {
+        if (!stickyMode) {
+            ExecuteCurrentSelection();
+        }
+        ev->didHandle = true;
+    }
 }
 
 void CommandPaletteWnd::ExecuteCurrentSelection() {
@@ -363,7 +443,7 @@ void CommandPaletteWnd::ExecuteCurrentSelection() {
     if (idx < 0) {
         return;
     }
-    auto m = (ListBoxModelCP*)listBox->model;
+    auto* m = (ListBoxModelCP*)listBox->model;
     ItemDataCP* data = m->strings.AtData(idx);
     i32 cmdId = data->cmdId;
     if (cmdId != 0) {
@@ -412,7 +492,7 @@ void CommandPaletteWnd::ExecuteCurrentSelection() {
         ScheduleDeleteAndExecCommand();
         return;
     }
-    logf("CommandPaletteWnd::ExecuteCurrentSelection: no match for selection '%s'\n", m->strings.At(idx));
+    logf("CommandPaletteWnd::ExecuteCurrentSelection: no match for selection '%s'\n", m->strings[idx]);
     ReportIf(true);
     ScheduleDeleteAndExecCommand();
 }
@@ -421,33 +501,119 @@ void CommandPaletteWnd::OnListDoubleClick() {
     ExecuteCurrentSelection();
 }
 
-static void OnDestroy(Wnd::DestroyEvent*) {
+static void OnClose(WindowBase::CloseEvent* /*ev*/) {
     ScheduleDeleteAndExecCommand();
 }
 
-static Static* CreateStatic(HWND parent, HFONT font, Str s) {
-    Static::CreateArgs args;
-    args.parent = parent;
-    args.font = font;
-    args.text = s;
-    args.isRtl = IsUIRtl();
-    auto c = new Static();
-    auto wnd = c->Create(args);
-    ReportIf(!wnd);
-    return c;
+static void OnDestroy(WindowBase::DestroyEvent* /*ev*/) {
+    ScheduleDeleteAndExecCommand();
+}
+
+// The help lines name keys, and a key reads better as a key-cap than as a word
+// in the sentence. The strings are translated, so instead of putting markup in
+// them - which would invalidate every existing translation - the key names are
+// wrapped wherever they ended up in the sentence. Translators leave key names
+// in English, so matching on them works in every language
+static const char* kHelpKeys[] = {
+    "Ctrl+Tab", "Ctrl", "Enter", "Space", "Del", "Esc", "PgUp", "PgDn", "\u2191", "\u2193",
+};
+
+// s[at..] is tok and isn't part of a longer word
+static bool IsTokenAt(Str s, int at, Str tok) {
+    int n = len(tok);
+    if (at + n > len(s)) {
+        return false;
+    }
+    if (!str::EqN(Str(s.s + at, n), tok, n)) {
+        return false;
+    }
+    char before = (at > 0) ? s.s[at - 1] : ' ';
+    char after = (at + n < len(s)) ? s.s[at + n] : ' ';
+    bool okBefore = (before == ' ') || (before == '(');
+    bool okAfter = (after == ' ') || (after == ',') || (after == ')') || (after == '.');
+    return okBefore && okAfter;
+}
+
+static TempStr WithKbdMarkupTemp(Str s) {
+    str::Builder out;
+    int i = 0;
+    while (i < len(s)) {
+        Str match{};
+        for (const char* k : kHelpKeys) {
+            if (IsTokenAt(s, i, Str(k))) {
+                match = Str(k);
+                break;
+            }
+        }
+        if (!match) {
+            out.AppendChar(s.s[i]);
+            i++;
+            continue;
+        }
+        out.Append("(Kbd/");
+        out.Append(match);
+        out.Append(")");
+        i += len(match);
+    }
+    return ToStrTemp(out);
+}
+
+// one of the "# File History" / "> Commands" switches in the top row; it
+// carries the prefix it switches to so they can share one click handler
+struct PaletteSwitch : VirtRichText {
+    CommandPaletteWnd* wnd = nullptr;
+    Str prefix;
+};
+
+static void OnPaletteSwitchClicked(VirtMouseEvent* ev) {
+    auto* t = (PaletteSwitch*)ev->target;
+    t->wnd->SwitchToPrefix(t->prefix);
+}
+
+// what the two help rows have in common
+struct HelpStyle {
+    HWND hwnd = nullptr;
+    PlatformFont* font = nullptr;
+    Color colTxt = kColorUnset;
+    Color colBg = kColorUnset;
+};
+
+static void InitHelpText(const HelpStyle& st, VirtRichText* t, Str markup) {
+    ParseTipInto(t, markup);
+    t->font = st.font;
+    // the help rows are not links, so they take the plain text color
+    t->SetColor(kColRichText, st.colTxt);
+    t->SetColor(kColRichLink, st.colTxt);
+    t->SetColor(kColRichBg, st.colBg);
+    int padX = DpiScale(8);
+    t->padding = Insets{0, padX, 0, padX};
+}
+
+static VirtRichText* NewHelpText(const HelpStyle& st, Str markup) {
+    auto* t = new VirtRichText();
+    InitHelpText(st, t, markup);
+    return t;
+}
+
+// a row of help items: virtual controls sitting in the palette's layout next
+// to the real edit and list
+static HBox* NewHelpRow(HBox* box) {
+    box->alignMain = MainAxisAlign::MainCenter;
+    box->alignCross = CrossAxisAlign::CrossCenter;
+    return box;
 }
 
 bool CommandPaletteWnd::Create(MainWindow* win, Str prefix, int smartTabAdvance) {
     if (str::Eq(prefix, kPalettePrefixTabs)) {
         smartTabMode = smartTabAdvance != 0;
     }
-    tocMode = str::Eq(prefix, kPalettePrefixTOC);
+    tocMode = str::Eq(prefix, kPalettePrefixTOC) || str::Eq(prefix, kPalettePrefixTOCLegacy);
     CollectStrings(win);
     {
         CreateCustomArgs args;
         args.visible = false;
         args.style = WS_POPUPWINDOW;
-        args.font = font;
+        args.font = GetFont();
         CreateCustom(args);
     }
     if (!hwnd) {
@@ -458,154 +624,128 @@ bool CommandPaletteWnd::Create(MainWindow* win, Str prefix, int smartTabAdvance)
     auto colTxt = ThemeWindowTextColor();
     SetColors(colTxt, colBg);
 
-    auto vbox = new VBox();
+    auto* vbox = new VBox();
     vbox->alignMain = MainAxisAlign::MainStart;
     vbox->alignCross = CrossAxisAlign::Stretch;
 
     {
-        // Query edit + \"×\" clear button in one row.
-        auto hbox = new HBox();
-        hbox->alignMain = MainAxisAlign::MainStart;
-        hbox->alignCross = CrossAxisAlign::CrossCenter;
-
         Edit::CreateArgs args;
         args.parent = hwnd;
         args.isMultiLine = false;
-        args.withBorder = false;
+        args.withBorder = true;
         args.cueText = "enter search term";
         args.text = prefix;
-        args.font = font;
+        args.font = GetFont();
         args.isRtl = IsUIRtl();
-        auto c = new Edit();
+        auto* c = new Edit();
         c->SetColors(colTxt, colBg);
+        c->maxDx = 150;
         HWND ok = c->Create(args);
         ReportIf(!ok);
         c->onTextChanged = MkMethod0<CommandPaletteWnd, &CommandPaletteWnd::QueryChanged>(this);
         editQuery = c;
-        hbox->AddChild(c, 1);
-
-        {
-            auto clear = CreateStatic(hwnd, font, StrL("×"));
-            clear->SetColors(colTxt, colBg);
-            clear->onClick = MkMethod0<CommandPaletteWnd, &CommandPaletteWnd::ClearQuery>(this);
-            clearButton = clear;
-            hbox->AddChild(new Padding(clear, Insets{4, 0, 4, 0}));
-        }
-        vbox->AddChild(hbox);
+        vbox->AddChild(c);
     }
 
     if (!smartTabMode) {
-        auto hbox = new HBox();
-        hbox->alignMain = MainAxisAlign::MainCenter;
-        hbox->alignCross = CrossAxisAlign::CrossCenter;
-        auto pad = Insets{0, 8, 0, 8};
-        {
-            auto c = CreateStatic(hwnd, font, _TRA("# File History"));
-            c->SetColors(colTxt, colBg);
-            c->onClick = MkMethod0<CommandPaletteWnd, &CommandPaletteWnd::SwitchToFileHistory>(this);
-            hbox->AddChild(new Padding(c, pad));
-        }
-        {
-            auto c = CreateStatic(hwnd, font, _TRA("> Commands"));
-            c->SetColors(colTxt, colBg);
-            c->onClick = MkMethod0<CommandPaletteWnd, &CommandPaletteWnd::SwitchToCommands>(this);
-            hbox->AddChild(new Padding(c, pad));
-        }
-        {
-            auto c = CreateStatic(hwnd, font, _TRA("@ Tabs"));
-            c->SetColors(colTxt, colBg);
-            c->onClick = MkMethod0<CommandPaletteWnd, &CommandPaletteWnd::SwitchToTabs>(this);
-            hbox->AddChild(new Padding(c, pad));
-        }
-        {
-            auto c = CreateStatic(hwnd, font, _TRA(": Everything"));
-            c->SetColors(colTxt, colBg);
-            c->onClick = MkMethod0<CommandPaletteWnd, &CommandPaletteWnd::SwitchToEverything>(this);
-            hbox->AddChild(new Padding(c, pad));
-        }
+        vbox->AddChild(new Spacer(0, DpiScale(4)));
+        auto* box = new HBox();
+        box->rtl = CommandPaletteUiRtl();
+        // same smaller app font as the bottom hint row
+        HelpStyle st{hwnd, GetAppFont(), colTxt, colBg};
+        // in "# File History" and friends the first character is what you type
+        // to get there, so it becomes a key-cap
+        auto addSwitch = [this, box, &st](Str s, Str switchTo) {
+            TempStr markup = str::JoinTemp(StrL("(Kbd/"), Str(s.s, 1), StrL(")"), Str(s.s + 1, len(s) - 1));
+            auto* t = new PaletteSwitch();
+            InitHelpText(st, t, markup);
+            t->wnd = this;
+            t->prefix = switchTo;
+            t->onClick = MkFunc1Void(OnPaletteSwitchClicked);
+            box->AddChild(t);
+        };
+        addSwitch(_TRA("# File History"), kPalettePrefixFileHistory);
+        addSwitch(_TRA("> Commands"), kPalettePrefixCommands);
+        addSwitch(_TRA("@ Tabs"), kPalettePrefixTabs);
+        addSwitch(_TRA(": Everything"), kPalettePrefixEverything);
         if (len(toc) > 0) {
-            auto c = CreateStatic(hwnd, font, _TRA("* TOC"));
-            c->SetColors(colTxt, colBg);
-            c->onClick = MkMethod0<CommandPaletteWnd, &CommandPaletteWnd::SwitchToTOC>(this);
-            hbox->AddChild(new Padding(c, pad));
+            addSwitch(_TRA("% TOC"), kPalettePrefixTOC);
         }
         if (len(favorites) > 0) {
-            auto c = CreateStatic(hwnd, font, _TRA("$ Favorites"));
-            c->SetColors(colTxt, colBg);
-            c->onClick = MkMethod0<CommandPaletteWnd, &CommandPaletteWnd::SwitchToFavorites>(this);
-            hbox->AddChild(new Padding(c, pad));
+            addSwitch(_TRA("$ Favorites"), kPalettePrefixFavorites);
         }
-        vbox->AddChild(hbox);
+        vbox->AddChild(NewHelpRow(box));
     }
 
     {
-        ListBox::CreateArgs args;
-        args.parent = hwnd;
-        args.font = font;
-        args.isRtl = IsUIRtl();
-        // virtual LBS_NODATA list: the result list can be thousands of items and
-        // is rebuilt on every keystroke (QueryChanged); per-item strings are
-        // unnecessary since DrawListBoxItem reads text from the model by index.
-        args.ownerData = true;
-        auto c = new ListBox();
+        auto* c = new VirtListBox();
+        // the query edit owns the keyboard here (the palette turns the arrow
+        // keys into selection changes itself), so the list doesn't take the
+        // focus and doesn't show a focus ring
+        c->SetFlag(vwfFocusable, false);
+        c->dpi = GetDpi();
+        c->font = font;
+        c->SetColor(kColListText, colTxt);
+        c->SetColor(kColListBg, colBg);
+        c->padding = DpiScaledInsets(4, 0);
         c->onDoubleClick = MkMethod0<CommandPaletteWnd, &CommandPaletteWnd::OnListDoubleClick>(this);
         c->onDrawItem =
-            MkMethod1<CommandPaletteWnd, ListBox::DrawItemEvent*, &CommandPaletteWnd::DrawListBoxItem>(this);
-        c->idealSizeLines = 32;
-        c->SetInsetsPt(4, 0);
-        c->Create(args);
-        c->SetColors(colTxt, colBg);
+            MkMethod1<CommandPaletteWnd, VirtListBox::DrawItemEvent*, &CommandPaletteWnd::DrawListBoxItem>(this);
         c->onSelectionChanged = MkMethod0<CommandPaletteWnd, &CommandPaletteWnd::OnSelectionChange>(this);
-        auto m = new ListBoxModelCP();
+        auto* m = new ListBoxModelCP();
         FilterStringsForQuery(prefix, m->strings);
         c->SetModel(m);
         listBox = c;
-        if (UseDarkModeLib()) {
-            DarkMode::setDarkScrollBar(listBox->hwnd);
-        }
         vbox->AddChild(c, 1);
     }
 
     {
-        Str strings[3];
+        Str strings[4];
+        int nHelp = 0;
         if (smartTabMode) {
-            strings[0] = _TRA("Ctrl+Tab to navigate");
-            strings[1] = _TRA("Release Ctrl to select");
-            strings[2] = _TRA("Space for sticky mode");
+            strings[nHelp++] = _TRA("Ctrl+Tab to navigate");
+            strings[nHelp++] = _TRA("Release Ctrl to select");
+            strings[nHelp++] = _TRA("Space for sticky mode");
+            strings[nHelp++] = _TRA("Del to remove item");
         } else {
-            strings[0] = _TRA("↑ ↓ to navigate");
-            strings[1] = _TRA("Enter to select");
-            strings[2] = _TRA("Esc to close");
+            strings[nHelp++] = _TRA("↑ ↓ PgUp PgDn to navigate");
+            strings[nHelp++] = _TRA("Enter to select");
+            strings[nHelp++] = _TRA("Del to remove item");
+            strings[nHelp++] = _TRA("Esc to close");
         }
-        auto hbox = new HBox();
-        hbox->alignMain = MainAxisAlign::MainCenter;
-        hbox->alignCross = CrossAxisAlign::CrossCenter;
-        auto pad = Insets{0, 8, 0, 8};
-        // result count, shown on the left of the navigation hints
-        auto info = CreateStatic(hwnd, font, StrL(""));
-        info->SetColors(colTxt, colBg);
-        staticInfo = info;
-        hbox->AddChild(new Padding(info, Insets{0, 8, 0, 8}));
-        for (int i = 0; i < 3; i++) {
-            auto c = CreateStatic(hwnd, font, strings[i]);
-            c->SetColors(colTxt, colBg);
-            auto p = new Padding(c, pad);
-            hbox->AddChild(p);
+        auto* box = new HBox();
+        box->rtl = CommandPaletteUiRtl();
+        // the hints are secondary information, so they use the regular (smaller)
+        // app font, not the bigger font of the query / list
+        HelpStyle st{hwnd, GetAppFont(), colTxt, colBg};
+        for (int i = 0; i < nHelp; i++) {
+            box->AddChild(NewHelpText(st, WithKbdMarkupTemp(strings[i])));
         }
-        vbox->AddChild(hbox);
+        vbox->AddChild(NewHelpRow(box));
     }
 
-    auto padding = new Padding(vbox, DpiScaledInsets(hwnd, 4, 8));
+    auto* padding = new Padding(vbox, DpiScaledInsets(4, 8));
     layout = padding;
 
-    auto rc = ClientRect(win->hwndFrame);
+    auto rc = HwndClientRect(win->hwndFrame);
     int dy = rc.dy - 72;
-    if (dy < 480) {
-        dy = 480;
-    }
+    dy = std::max(dy, 480);
     int dx = rc.dx - 256;
     dx = limitValue(dx, 640, 1024);
+    if (smartTabMode) {
+        // size the window to the number of tabs instead of using a fixed height
+        int itemDy = listBox->GetItemHeight();
+        int maxLines = 16;
+        if (itemDy > 0) {
+            maxLines = std::max((rc.dy - DpiScale(160)) / itemDy, 3);
+        }
+        listBox->idealSizeLines = std::min(listBox->model->ItemsCount(), maxLines);
+        dy = 0;
+    }
     LayoutAndSizeToContent(layout, dx, dy, hwnd);
+    // the help rows are virtual controls: pick them up so we paint them and
+    // they get their input
+    DoLayout(HwndClientRect(hwnd).Size());
     PositionCommandPalette(hwnd, win->hwndFrame);
 
     editQuery->SetCursorPositionAtEnd();
@@ -620,33 +760,33 @@ bool CommandPaletteWnd::Create(MainWindow* win, Str prefix, int smartTabAdvance)
         }
     }
 
-    UpdateResultCount();
-
     SetIsVisible(true);
-    // Phase 3: fade the palette in (popup windows are not layered; AnimateWindow
-    // temporarily applies alpha). Skipped when animations are disabled.
-    if (AnimationsEnabled()) {
-        AnimateWindow(hwnd, 150, AW_BLEND);
-    }
     HwndSetFocus(editQuery->hwnd);
     return true;
 }
 
 void RunCommandPalette(MainWindow* win, Str prefix, int smartTabAdvance) {
     if (gCommandPaletteWnd) {
-        HwndSetFocus(gCommandPaletteHwnd);
-        return;
+        if (gCommandPaletteWnd->hwnd && IsWindow(gCommandPaletteWnd->hwnd)) {
+            HwndSetFocus(gCommandPaletteWnd->hwnd);
+            return;
+        }
+        ScheduleDeleteAndExecCommand();
     }
 
-    auto wnd = new CommandPaletteWnd();
-    auto fn = MkFunc1Void<Wnd::DestroyEvent*>(OnDestroy);
-    wnd->onDestroy = fn;
-    wnd->font = GetAppBiggerFont();
+    auto* wnd = new CommandPaletteWnd();
+    wnd->onClose = MkFunc1Void<WindowBase::CloseEvent*>(OnClose);
+    wnd->onDestroy = MkFunc1Void<WindowBase::DestroyEvent*>(OnDestroy);
+    wnd->onActivate = MkMethod1<CommandPaletteWnd, WindowBase::ActivateEvent*, &CommandPaletteWnd::OnActivate>(wnd);
+    wnd->onCommand = MkMethod1<CommandPaletteWnd, WindowBase::CommandEvent*, &CommandPaletteWnd::OnCommand>(wnd);
+    wnd->onKeyDown = MkMethod1<CommandPaletteWnd, KeyEvent*, &CommandPaletteWnd::OnKeyDown>(wnd);
+    wnd->onPreTranslate =
+        MkMethod1<CommandPaletteWnd, WindowBase::PreTranslateEvent*, &CommandPaletteWnd::PreTranslate>(wnd);
+    wnd->SetFont(GetAppBiggerFont());
     wnd->win = win;
     bool ok = wnd->Create(win, prefix, smartTabAdvance);
     ReportIf(!ok);
     gCommandPaletteWnd = wnd;
-    gCommandPaletteHwnd = wnd->hwnd;
     gHwndToActivateOnClose = win->hwndFrame;
 }
 
@@ -654,7 +794,7 @@ HWND CommandPaletteHwndForAccelerator(HWND hwnd) {
     if (!gCommandPaletteWnd) {
         return nullptr;
     }
-    auto wnd = gCommandPaletteWnd;
+    auto* wnd = gCommandPaletteWnd;
     HWND wHwnd = wnd->hwnd;
     if (hwnd == wHwnd) {
         return wHwnd;
@@ -662,11 +802,37 @@ HWND CommandPaletteHwndForAccelerator(HWND hwnd) {
     if (wnd->editQuery && wnd->editQuery->hwnd == hwnd) {
         return wHwnd;
     }
-    if (!wnd->listBox) {
-        return nullptr;
-    }
-    if (hwnd == wnd->listBox->hwnd) {
-        return wHwnd;
-    }
     return nullptr;
+}
+
+// Selected list row and query-edit selection, for -dbg-control tests.
+TempStr CommandPaletteStateTemp(int* exitCodeOut) {
+    str::Builder out;
+    auto finish = [&](int code) -> TempStr {
+        if (exitCodeOut) {
+            *exitCodeOut = code;
+        }
+        return ToStrTemp(out);
+    };
+    if (!gCommandPaletteWnd || !gCommandPaletteWnd->hwnd) {
+        out.Append("NOTREADY no-palette\n");
+        return finish(2);
+    }
+    auto* wnd = gCommandPaletteWnd;
+    int sel = wnd->listBox ? wnd->listBox->GetCurrentSelection() : -1;
+    int n = wnd->listBox ? wnd->listBox->ItemsCount() : 0;
+    int selectedCmdId = 0;
+    if (sel >= 0 && sel < n) {
+        auto* model = (ListBoxModelCP*)wnd->listBox->model;
+        ItemDataCP* data = model->Data(sel);
+        selectedCmdId = data ? data->cmdId : 0;
+    }
+    int qStart = 0, qEnd = 0, qLen = 0;
+    if (wnd->editQuery) {
+        wnd->editQuery->GetSelection(qStart, qEnd);
+        qLen = wnd->editQuery->GetTextLen();
+    }
+    out.Append(fmt("OK sel=%d items=%d querySel=%d,%d queryLen=%d cmd=%d rtl=%d\n", sel, n, qStart, qEnd, qLen,
+                   selectedCmdId, (int)CommandPaletteUiRtl()));
+    return finish(0);
 }

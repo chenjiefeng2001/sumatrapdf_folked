@@ -6,7 +6,7 @@
 #include "base/FileWatcher.h"
 #include "base/GuessFileType.h"
 
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
 
 #include "Settings.h"
 #include "DocController.h"
@@ -14,6 +14,7 @@
 #include "EngineAll.h"
 #include "GlobalPrefs.h"
 #include "ChmModel.h"
+#include "MarkdownModel.h"
 #include "DisplayModel.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
@@ -23,14 +24,15 @@
 #include "Translations.h"
 #include "EditAnnotations.h"
 
-#include "base/Log.h"
-
 WindowTab::WindowTab(MainWindow* win) {
     this->win = win;
 }
 
 void WindowTab::SetFilePath(Str path) {
     type = Type::Document;
+    if (filePath && !path::IsSame(filePath, path) && IsOpenCachePath(filePath)) {
+        file::Delete(filePath);
+    }
     str::ReplaceWithCopy(&filePath, path);
 }
 
@@ -43,8 +45,40 @@ bool WindowTab::IsAboutTab() const {
     return type == WindowTab::Type::About;
 }
 
+bool WindowTab::IsFavoritesTab() const {
+    ReportIf(type == WindowTab::Type::None);
+    return type == WindowTab::Type::Favorites;
+}
+
+// About or Favorites: no document controller
+bool WindowTab::IsNonDocumentTab() const {
+    return IsAboutTab() || IsFavoritesTab();
+}
+
 WindowTab::~WindowTab() {
     logf("~WindowTab: 0x%p, dm: 0x%p\n", this, AsFixed());
+    // whatever a close path forgot, nothing may be left pointing at a tab that
+    // is going away (the read-aloud playback bar holds one)
+    ReadAloudForgetTab(this);
+    // Drop MainWindow pointers into this tab / its controller before we free
+    // them: DestroyWindow during WebView teardown can re-enter the canvas
+    // WndProc, which reads win->ctrl / CurrentTab().
+    if (win) {
+        if (win->ctrl == ctrl) {
+            win->ctrl = nullptr;
+        }
+        if (win->currentTabTemp == this) {
+            win->currentTabTemp = nullptr;
+        }
+    }
+    // Full browser teardown next (not mere hide). DestroyWindow pumps; with
+    // win->ctrl already nulled (and isBeingClosed on window close), canvas
+    // re-entry must not touch a freed DisplayModel.
+    if (AsChm()) {
+        AsChm()->DestroyParentHwnd();
+    } else if (AsMarkdown()) {
+        AsMarkdown()->DestroyParentHwnd();
+    }
     if (hwndPDFInfo) {
         DestroyWindow(hwndPDFInfo);
         hwndPDFInfo = nullptr;
@@ -55,20 +89,31 @@ WindowTab::~WindowTab() {
     }
     CloseAndDeleteEditAnnotationsWindow(this);
     FileWatcherUnsubscribe(watcher);
-    if (AsChm()) {
-        AsChm()->RemoveParentHwnd();
-    }
     delete selectionOnPage;
     // technically we only need to clear ctrl == gMostRecentlyOpenedDoc
     // but gMostRecentlyOpenedDoc is only for dde commands
     // so doesn't need to be kept for long
     gMostRecentlyOpenedDoc = nullptr;
-    delete ctrl;
+    // waits for in-flight renders off the UI thread; deletes on the UI thread
+    DeleteControllerAsync(ctrl);
+    ctrl = nullptr;
+    if (pendingLoadArgs) {
+        // LoadArgs dtor releases any leftover engine; drop ctrl first so we do
+        // not double-delete through both paths if both were set
+        delete pendingLoadArgs->ctrl;
+        pendingLoadArgs->ctrl = nullptr;
+        SafeEngineRelease(&pendingLoadArgs->engine);
+    }
+    delete pendingLoadArgs;
+    if (IsOpenCachePath(filePath)) {
+        file::Delete(filePath);
+    }
     str::Free(filePath);
     filePath = {};
     str::Free(displayName);
     displayName = {};
     str::Free(frameTitle);
+    str::Free(loadErrorReason);
     frameTitle = {};
     str::Free(readAloudText);
     readAloudText = {};
@@ -76,23 +121,13 @@ WindowTab::~WindowTab() {
         ReadAloudHighlightFree(readAloudHighlight);
         delete readAloudHighlight;
     }
-    str::Free(claudeSessionId);
-    claudeSessionId = {};
-    if (claudeProcess) {
-        TerminateProcess(claudeProcess, 0);
-        CloseHandle(claudeProcess);
-    }
-    str::Free(grokSessionId);
-    grokSessionId = {};
-    if (grokProcess) {
-        TerminateProcess(grokProcess, 0);
-        CloseHandle(grokProcess);
-    }
-    str::Free(codexSessionId);
-    codexSessionId = {};
-    if (codexProcess) {
-        TerminateProcess(codexProcess, 0);
-        CloseHandle(codexProcess);
+    for (AIChatTabState& st : aiChat) {
+        str::Free(st.sessionId);
+        st.sessionId = {};
+        if (st.process) {
+            TerminateProcess(st.process, 0);
+            CloseHandle(st.process);
+        }
     }
 }
 
@@ -108,6 +143,10 @@ ChmModel* WindowTab::AsChm() const {
     return ctrl ? ctrl->AsChm() : nullptr;
 }
 
+MarkdownModel* WindowTab::AsMarkdown() const {
+    return ctrl ? ctrl->AsMarkdown() : nullptr;
+}
+
 Kind WindowTab::GetEngineType() const {
     if (ctrl && ctrl->AsFixed()) {
         return ctrl->AsFixed()->GetEngine()->kind;
@@ -115,6 +154,7 @@ Kind WindowTab::GetEngineType() const {
     return nullptr;
 }
 
+// only if AsFixed()
 EngineBase* WindowTab::GetEngine() const {
     if (ctrl && ctrl->AsFixed()) {
         return ctrl->AsFixed()->GetEngine();
@@ -129,6 +169,10 @@ Str WindowTab::GetTabTitle() const {
     if (!filePath) {
         if (IsAboutTab()) {
             return StrL("Home");
+        }
+        if (IsFavoritesTab()) {
+            // same label as Favorites menu / sidebar header
+            return _TRA("Favorites");
         }
         return StrL("");
     }
@@ -167,22 +211,32 @@ void WindowTab::MoveDocBy(int dx, int dy) const {
     }
 }
 
+// the zoom ToggleZoom() would switch to. Split out so the command palette can
+// name it without repeating (and drifting from) the cycle
+float WindowTab::NextToggleZoom() const {
+    // TODO: maybe move to DocController?
+    float currZoom = ctrl ? ctrl->GetZoomVirtual() : kInvalidZoom;
+    if (kZoomFitPage == currZoom) {
+        return kZoomFitWidth;
+    }
+    if (kZoomFitWidth == currZoom) {
+        return kZoomFitHeight;
+    }
+    if (kZoomFitHeight == currZoom) {
+        return kZoomFitContent;
+    }
+    if (kZoomFitContent == currZoom) {
+        return kZoomShrinkToFit;
+    }
+    return kZoomFitPage;
+}
+
 void WindowTab::ToggleZoom() const {
     ReportIf(!ctrl);
     if (!IsDocLoaded()) {
         return;
     }
-    // TODO: maybe move to DocController?
-    float newZoom = kZoomFitPage;
-    float currZoom = ctrl->GetZoomVirtual();
-    if (kZoomFitPage == currZoom) {
-        newZoom = kZoomFitWidth;
-    } else if (kZoomFitWidth == currZoom) {
-        newZoom = kZoomFitContent;
-    } else if (kZoomFitContent == currZoom) {
-        newZoom = kZoomShrinkToFit;
-    }
-    ctrl->SetZoomVirtual(newZoom, nullptr);
+    ctrl->SetZoomVirtual(NextToggleZoom(), nullptr);
 }
 
 // https://github.com/sumatrapdfreader/sumatrapdf/issues/1336

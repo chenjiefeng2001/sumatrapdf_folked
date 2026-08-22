@@ -79,7 +79,7 @@ inline int ScorePaletteSingleWord(const char* text, int textLen, const char* wor
 // matching the old FilterMatches provided.
 inline int ScorePaletteItem(Str text, const StrVec& lowerWords, bool* matched) {
     if (matched) *matched = false;
-    if (str::IsEmpty(text)) return 0;
+    if (len(text) == 0) return 0;
     if (len(lowerWords) == 0) { // empty query matches everything, fixed score
         if (matched) *matched = true;
         return 100;
@@ -89,7 +89,7 @@ inline int ScorePaletteItem(Str text, const StrVec& lowerWords, bool* matched) {
     int totalScore = 0;
     for (int wi = 0; wi < len(lowerWords); wi++) {
         Str w = lowerWords.At(wi);
-        if (str::IsEmpty(w)) continue;
+        if (len(w) == 0) continue;
         int ws = ScorePaletteSingleWord(s, textLen, w.s, w.len);
         if (ws < 200 && !str::ContainsI(text, w)) {
             return 0;

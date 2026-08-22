@@ -7,7 +7,7 @@
 #ifdef _MSC_VER
 #include "base/Pixmap.h"
 #include "base/ComSafe.h"
-#include "base/Log.h"
+
 #include "GpuBackend.h"
 
 // Forward-declare the device-generation diagnostics counter (defined in RenderCache.cpp)
@@ -98,12 +98,12 @@ ID2D1DCRenderTarget* GpuBackend::GetRenderTarget(HDC hdc) {
 
     // Bind the DC render target to the entire HDC.
     // For memory DCs (double buffer), WindowFromDC returns NULL and
-    // ClientRECT(NULL) would yield garbage, so get the extent from
+    // HwndClientRect(NULL) would yield garbage, so get the extent from
     // the DC's clip box or selected bitmap instead.
     RECT rc = {};
     HWND hwnd = WindowFromDC(hdc);
     if (hwnd) {
-        rc = ClientRECT(hwnd);
+        rc = ToRECT(HwndClientRect(hwnd));
     } else {
         // Memory DC: use DC extent (clip box or bitmap size).
         if (GetClipBox(hdc, &rc) == ERROR || (rc.right <= 0 || rc.bottom <= 0)) {
@@ -158,7 +158,7 @@ void GpuBackend::RecreateRenderTarget() {
     ReportIf(deviceGeneration <= 0); // must remain positive
 #endif
     InterlockedIncrement(&gDeviceGenRecreations);
-    logfa(
+    logf(
         "[RenderCache Diagnostic] GpuBackend::RecreateRenderTarget: "
         "D2D device recreated. New device generation = %d.\n",
         deviceGeneration);
@@ -284,10 +284,10 @@ ID2D1Bitmap* GpuBackend::CreateBitmapFromPixmap(ID2D1DCRenderTarget* rt, const P
     free(buf);
 
     if (FAILED(hr) || !bitmap) {
-        logfa("[RenderCache Diagnostic] D2D CreateBitmap failed! w=%d h=%d pitch=%d HRESULT=0x%08X\n", w, h, pitch,
-              (unsigned)hr);
+        logf("[RenderCache Diagnostic] D2D CreateBitmap failed! w=%d h=%d pitch=%d HRESULT=0x%08X\n", w, h, pitch,
+             (unsigned)hr);
         if (hr == D2DERR_RECREATE_TARGET) {
-            logfa(
+            logf(
                 "[RenderCache Diagnostic] GPU Device Lost detected! Re-initializing D2D "
                 "context is required. All cached GPU bitmaps are now invalid.\n");
         }
@@ -340,7 +340,7 @@ bool GpuBackend::DrawOverlayRects(HDC hdc, Rect screenRc, Vec<Rect>& rects, COLO
 
     screenRc.Inflate(pad, pad);
     for (int i = 0; i < len(rects); i++) {
-        Rect rc = rects.at(i);
+        Rect rc = rects[i];
         if (pad > 0) {
             rc.Inflate(pad, pad);
         }
@@ -362,7 +362,7 @@ bool GpuBackend::DrawOverlayRects(HDC hdc, Rect screenRc, Vec<Rect>& rects, COLO
     brush->Release();
     HRESULT hrEnd = rt->EndDraw();
     if (FAILED(hrEnd)) {
-        logfa("[RenderCache Diagnostic] D2D EndDraw failed in DrawOverlayRects HRESULT=0x%08X\n", (unsigned)hrEnd);
+        logf("[RenderCache Diagnostic] D2D EndDraw failed in DrawOverlayRects HRESULT=0x%08X\n", (unsigned)hrEnd);
         if (hrEnd == D2DERR_RECREATE_TARGET && gGpuBackend) {
             InterlockedIncrement(&gDeviceGenRecreations);
             gGpuBackend->RecreateRenderTarget();
@@ -402,7 +402,7 @@ bool GpuBackend::DrawDashedBorder(HDC hdc, Rect rect, COLORREF color, float widt
     dashStyle->Release();
     HRESULT hrEnd = rt->EndDraw();
     if (FAILED(hrEnd)) {
-        logfa("[RenderCache Diagnostic] D2D EndDraw failed in DrawDashedBorder HRESULT=0x%08X\n", (unsigned)hrEnd);
+        logf("[RenderCache Diagnostic] D2D EndDraw failed in DrawDashedBorder HRESULT=0x%08X\n", (unsigned)hrEnd);
         if (hrEnd == D2DERR_RECREATE_TARGET && gGpuBackend) {
             InterlockedIncrement(&gDeviceGenRecreations);
             gGpuBackend->RecreateRenderTarget();
@@ -438,7 +438,7 @@ bool GpuBackend::DrawResizeHandle(HDC hdc, int x, int y, int size) {
 
     HRESULT hrEnd = rt->EndDraw();
     if (FAILED(hrEnd)) {
-        logfa("[RenderCache Diagnostic] D2D EndDraw failed in DrawResizeHandle HRESULT=0x%08X\n", (unsigned)hrEnd);
+        logf("[RenderCache Diagnostic] D2D EndDraw failed in DrawResizeHandle HRESULT=0x%08X\n", (unsigned)hrEnd);
         if (hrEnd == D2DERR_RECREATE_TARGET && gGpuBackend) {
             InterlockedIncrement(&gDeviceGenRecreations);
             gGpuBackend->RecreateRenderTarget();
@@ -466,7 +466,7 @@ bool GpuBackend::DrawFillRect(HDC hdc, Rect rect, COLORREF color, u8 alpha) {
 
     HRESULT hrEnd = rt->EndDraw();
     if (FAILED(hrEnd)) {
-        logfa("[RenderCache Diagnostic] D2D EndDraw failed in DrawFillRect HRESULT=0x%08X\n", (unsigned)hrEnd);
+        logf("[RenderCache Diagnostic] D2D EndDraw failed in DrawFillRect HRESULT=0x%08X\n", (unsigned)hrEnd);
         if (hrEnd == D2DERR_RECREATE_TARGET && gGpuBackend) {
             InterlockedIncrement(&gDeviceGenRecreations);
             gGpuBackend->RecreateRenderTarget();
@@ -494,7 +494,7 @@ bool GpuBackend::DrawSolidBorder(HDC hdc, Rect rect, COLORREF color, float width
 
     HRESULT hrEnd = rt->EndDraw();
     if (FAILED(hrEnd)) {
-        logfa("[RenderCache Diagnostic] D2D EndDraw failed in DrawSolidBorder HRESULT=0x%08X\n", (unsigned)hrEnd);
+        logf("[RenderCache Diagnostic] D2D EndDraw failed in DrawSolidBorder HRESULT=0x%08X\n", (unsigned)hrEnd);
         if (hrEnd == D2DERR_RECREATE_TARGET && gGpuBackend) {
             InterlockedIncrement(&gDeviceGenRecreations);
             gGpuBackend->RecreateRenderTarget();

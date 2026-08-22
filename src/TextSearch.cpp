@@ -2,17 +2,37 @@
    License: GPLv3 */
 
 #include "base/Base.h"
-#include "base/Win.h"
 
 #include "SearchSimd.h"
 
-#include "wingui/UIModels.h"
-
 #include "DocController.h"
+#include "gui/UIModels.h"
 #include "EngineBase.h"
 #include "ProgressUpdateUI.h"
 #include "TextSelection.h"
 #include "TextSearch.h"
+
+// Fetch page text for search. When *abortSearch is set, the caller should stop
+// immediately (search was cancelled while engine locks were contended).
+static Str GetTextForPageForSearch(EngineBase* engine, int pageNo, int* lenOut, const ProgressUpdateCb& progressCb,
+                                   bool* abortSearch) {
+    if (abortSearch) {
+        *abortSearch = false;
+    }
+    if (!engine->TryGetTextForPage(pageNo, lenOut)) {
+        if (WasCanceled(progressCb)) {
+            if (abortSearch) {
+                *abortSearch = true;
+            }
+            if (lenOut) {
+                *lenOut = 0;
+            }
+            return {};
+        }
+        return engine->GetTextForPage(pageNo, lenOut);
+    }
+    return engine->GetTextForPage(pageNo, lenOut);
+}
 
 static void SkipWhitespace(Str text, int textLen, int& idx, int& byteIdx) {
     while (idx < textLen) {
@@ -36,7 +56,7 @@ static void markAllPagesNonSkip(Vec<bool>& pagesToSkip) {
 }
 TextSearch::TextSearch(EngineBase* engine) : TextSelection(engine) {
     nPages = engine->PageCount();
-    pagesToSkip.SetSize(nPages);
+    VecResize(pagesToSkip, nPages);
     markAllPagesNonSkip(pagesToSkip);
 }
 
@@ -115,6 +135,7 @@ void TextSearch::SetText(Str text) {
     // Adobe Reader also matches certain hard-to-type Unicode
     // characters when searching for easy-to-type homoglyphs
     // cf. https://web.archive.org/web/20140201013717/http://forums.fofou.org:80/sumatrapdf/topic?id=2432337&comments=3
+    // NOLINTNEXTLINE(bugprone-branch-clone): homoglyph case is distinct from the empty-anchor fallback
     else if (searchTextLen > 0 && (firstChar == '-' || firstChar == '\'' || firstChar == '"')) {
         anchor = {};
     } else if (searchTextLen > 0) {
@@ -153,6 +174,79 @@ void TextSearch::SetMatchWholeWord(bool newMatchWholeWord) {
     markAllPagesNonSkip(pagesToSkip);
 }
 
+bool TextSearch::PageAllowed(int pageNo) const {
+    if (pageNo < 1 || pageNo > nPages) {
+        return false;
+    }
+    if (len(pageAllowed) == 0) {
+        return true;
+    }
+    if (pageNo > len(pageAllowed)) {
+        return false;
+    }
+    return pageAllowed[pageNo - 1];
+}
+
+int TextSearch::RestrictFirst() const {
+    if (len(pageAllowed) == 0) {
+        return 1;
+    }
+    int n = std::min(len(pageAllowed), nPages);
+    for (int i = 0; i < n; i++) {
+        if (pageAllowed[i]) {
+            return i + 1;
+        }
+    }
+    return 1;
+}
+
+int TextSearch::RestrictLast() const {
+    if (len(pageAllowed) == 0) {
+        return nPages;
+    }
+    int last = 0;
+    int n = std::min(len(pageAllowed), nPages);
+    for (int i = 0; i < n; i++) {
+        if (pageAllowed[i]) {
+            last = i + 1;
+        }
+    }
+    return last > 0 ? last : nPages;
+}
+
+void TextSearch::SetAllowedPages(const Vec<bool>& allowed) {
+    pageAllowed = allowed;
+    markAllPagesNonSkip(pagesToSkip);
+}
+
+void TextSearch::SetPageRange(int first, int last) {
+    if (first < 0) {
+        first = 0;
+    }
+    if (last < 0) {
+        last = 0;
+    }
+    if (first == 0 && last == 0) {
+        pageAllowed.Reset();
+        markAllPagesNonSkip(pagesToSkip);
+        return;
+    }
+    int lo = first > 0 ? first : 1;
+    int hi = last > 0 ? last : nPages;
+    if (lo > hi) {
+        int tmp = lo;
+        lo = hi;
+        hi = tmp;
+    }
+    Vec<bool> allowed;
+    VecResize(allowed, nPages);
+    for (int i = 0; i < nPages; i++) {
+        int page = i + 1;
+        allowed[i] = page >= lo && page <= hi;
+    }
+    SetAllowedPages(allowed);
+}
+
 void TextSearch::SetDirection(TextSearch::Direction direction) {
     bool fwd = TextSearch::Direction::Forward == direction;
     if (fwd == forward) {
@@ -184,6 +278,27 @@ void TextSearch::SetLastResult(TextSelection* sel) {
     forward = true;
 }
 
+#if !OS_WIN
+static int FoldCaseWCharPortable(int c) {
+    if (c >= L'A' && c <= L'Z') {
+        return c + 32;
+    }
+    if (c >= 0x00C0 && c <= 0x00DE && c != 0x00D7) {
+        return c + 32;
+    }
+    if (c >= 0x0410 && c <= 0x042F) {
+        return c + 32;
+    }
+    if (c == 0x0401) {
+        return 0x0451;
+    }
+    if ((c >= 0x0391 && c <= 0x03A1) || (c >= 0x03A3 && c <= 0x03AB)) {
+        return c + 32;
+    }
+    return (int)towlower((wint_t)c);
+}
+#endif
+
 // Locale-independent Unicode case folding for search. CharLowerW folds accented
 // letters (e.g. É->é, Ş->ş) regardless of the CRT locale, unlike towlower() or
 // the ASCII-only fast paths we used before.
@@ -197,7 +312,11 @@ static int FoldCaseForSearch(int c) {
         return L'i';
     }
     if (c > 0 && c <= 0xffff) {
+#if OS_WIN
         return (WCHAR)(uintptr_t)CharLowerW((LPWSTR)(uintptr_t)c);
+#else
+        return FoldCaseWCharPortable(c);
+#endif
     }
     return c;
 }
@@ -262,42 +381,6 @@ static bool MatchSearchUnit(Str h, int hLen, int hIdx, int hByteIdx, Str n, int 
     return false;
 }
 
-static bool StartsWithAtByte(Str text, int byteIdx, Str prefix) {
-    return text && prefix && byteIdx >= 0 && byteIdx + prefix.len <= text.len &&
-           memcmp(text.s + byteIdx, prefix.s, prefix.len) == 0;
-}
-
-// Fast paths using SIMD (SSE4.2 PCMPESTRI). Falls through to the full Unicode
-// fold-case / ß-equivalence logic when SIMD doesn't apply (multi-byte characters).
-
-static int StrStr(Str haystack, int haystackLen, int startOff, Str needle, int needleLen) {
-    if (!haystack || str::IsEmpty(needle)) {
-        return -1;
-    }
-    // Try SIMD fast path for ASCII-compatible strings (both needle and anchor
-    // are ASCII in the common case, e.g. "hello", "12345", etc.)
-    bool allAscii = true;
-    for (int i = 0; i < needleLen && i < 16; i++) {
-        if ((u8)needle.s[i] > 127) {
-            allAscii = false;
-            break;
-        }
-    }
-    if (allAscii) {
-        int res = StrStrSIMD(haystack, haystackLen, startOff, needle, needleLen);
-        if (res >= 0) return res;
-    }
-    // scalar fallback
-    int byteIdx = Utf8CodepointToByteIndex(haystack, startOff);
-    for (int i = startOff; i <= haystackLen - needleLen; i++) {
-        if (StartsWithAtByte(haystack, byteIdx, needle)) {
-            return i;
-        }
-        Utf8CodepointNext(haystack, byteIdx);
-    }
-    return -1;
-}
-
 static int StrStrFoldCase(Str haystack, int haystackLen, int startOff, Str needle, int needleLen) {
     if (!haystack || !needle) {
         return startOff;
@@ -352,6 +435,11 @@ static int StrStrFoldCase(Str haystack, int haystackLen, int startOff, Str needl
         Utf8CodepointNext(haystack, byteIdx);
     }
     return -1;
+}
+
+static bool StartsWithAtByte(Str text, int byteIdx, Str prefix) {
+    return text && prefix && byteIdx >= 0 && byteIdx + prefix.len <= text.len &&
+           memcmp(text.s + byteIdx, prefix.s, prefix.len) == 0;
 }
 
 static int StrRStr(Str text, int textLen, int endOff, Str needle, int needleLen) {
@@ -409,7 +497,6 @@ static int StrRStrFoldCase(Str text, int textLen, int endOff, Str needle, int ne
         int res = StrRStrFoldCaseSIMD(text, textLen, endOff, needle, needleLen);
         if (res >= 0) return res;
     }
-    // full Unicode fold-case fallback
     // ß <-> ss makes the matched length variable, so scan forward within
     // [start, end) and remember the last start position that matches.
     int result = -1;
@@ -514,6 +601,7 @@ TextSearch::PageAndOffset TextSearch::MatchEnd(int startOff) const {
                 }
             }
         }
+        // NOLINTNEXTLINE(bugprone-branch-clone): each empty branch documents a different normalization
         if (isMatch) {
             /* characters are identical */;
         } else if (str::IsWs((char)matchCh) && lookingAtWs) {
@@ -545,9 +633,17 @@ TextSearch::PageAndOffset TextSearch::MatchEnd(int startOff) const {
             endIdx += endAdv;
         } else {
             // ... or because we were looking at whitespace in the pattern and we were at a page break
-            // -> skip to next page
+            // -> skip to next page (but not past a restricted range)
             ++currentPage;
-            currentPageText = engine->GetTextForPage(currentPage, &currentPageTextLen);
+            if (!PageAllowed(currentPage)) {
+                return notFound;
+            }
+            bool abortSearch = false;
+            currentPageText =
+                GetTextForPageForSearch(engine, currentPage, &currentPageTextLen, progressCb, &abortSearch);
+            if (abortSearch) {
+                return notFound;
+            }
             endIdx = 0;
             endByteIdx = 0;
         }
@@ -561,10 +657,15 @@ TextSearch::PageAndOffset TextSearch::MatchEnd(int startOff) const {
                                        (lookingAtWs && str::IsWs((char)prevMatchCh)))) {
             SkipWhitespace(findText, findTextLen, matchIdx, matchByteIdx);
             SkipWhitespace(currentPageText, currentPageTextLen, endIdx, endByteIdx);
-            while (endIdx >= currentPageTextLen && currentPage < nPages) {
+            while (endIdx >= currentPageTextLen && PageAllowed(currentPage + 1)) {
                 // treat page break as whitespace, too
                 ++currentPage;
-                currentPageText = engine->GetTextForPage(currentPage, &currentPageTextLen);
+                bool abortSearch = false;
+                currentPageText =
+                    GetTextForPageForSearch(engine, currentPage, &currentPageTextLen, progressCb, &abortSearch);
+                if (abortSearch) {
+                    return notFound;
+                }
                 endIdx = 0;
                 endByteIdx = 0;
                 SkipWhitespace(currentPageText, currentPageTextLen, endIdx, endByteIdx);
@@ -584,6 +685,34 @@ TextSearch::PageAndOffset TextSearch::MatchEnd(int startOff) const {
     return {currentPage, endIdx};
 }
 
+static int StrStr(Str haystack, int haystackLen, int startOff, Str needle, int needleLen) {
+    if (!haystack || len(needle) == 0) {
+        return -1;
+    }
+    // Try SIMD fast path for ASCII-compatible strings (both needle and anchor
+    // are ASCII in the common case, e.g. "hello", "12345", etc.)
+    bool allAscii = true;
+    for (int i = 0; i < needleLen && i < 16; i++) {
+        if ((u8)needle.s[i] > 127) {
+            allAscii = false;
+            break;
+        }
+    }
+    if (allAscii) {
+        int res = StrStrSIMD(haystack, haystackLen, startOff, needle, needleLen);
+        if (res >= 0) return res;
+    }
+    // scalar fallback
+    int byteIdx = Utf8CodepointToByteIndex(haystack, startOff);
+    for (int i = startOff; i <= haystackLen - needleLen; i++) {
+        if (StartsWithAtByte(haystack, byteIdx, needle)) {
+            return i;
+        }
+        Utf8CodepointNext(haystack, byteIdx);
+    }
+    return -1;
+}
+
 static int GetNextIndex(int textLen, int offset, bool forward) {
     int idx = offset + (forward ? 0 : -1);
     if (idx < 0 || idx >= textLen) {
@@ -593,7 +722,7 @@ static int GetNextIndex(int textLen, int offset, bool forward) {
 }
 
 bool TextSearch::FindTextInPage(int pageNo, TextSearch::PageAndOffset* finalGlyph) {
-    if (str::IsEmpty(findText)) {
+    if (len(findText) == 0) {
         return false;
     }
     if (!pageNo) {
@@ -606,38 +735,43 @@ bool TextSearch::FindTextInPage(int pageNo, TextSearch::PageAndOffset* finalGlyp
 
     int found = -1;
     PageAndOffset fg;
-    do {
-        if (!anchor) {
-            found = GetNextIndex(pageTextLen, findIndex, forward);
-        } else if (forward) {
-            if (matchCase) {
-                found = StrStr(pageText, pageTextLen, findIndex, anchor, anchorLen);
-            } else {
-                found = StrStrFoldCase(pageText, pageTextLen, findIndex, anchor, anchorLen);
+    for (;;) {
+        do {
+            if (WasCanceled(progressCb)) {
+                return false;
             }
-        } else {
-            if (matchCase) {
-                found = StrRStr(pageText, pageTextLen, findIndex, anchor, anchorLen);
+            if (!anchor) {
+                found = GetNextIndex(pageTextLen, findIndex, forward);
+            } else if (forward) {
+                if (matchCase) {
+                    found = StrStr(pageText, pageTextLen, findIndex, anchor, anchorLen);
+                } else {
+                    found = StrStrFoldCase(pageText, pageTextLen, findIndex, anchor, anchorLen);
+                }
             } else {
-                found = StrRStrFoldCase(pageText, pageTextLen, findIndex, anchor, anchorLen);
+                if (matchCase) {
+                    found = StrRStr(pageText, pageTextLen, findIndex, anchor, anchorLen);
+                } else {
+                    found = StrRStrFoldCase(pageText, pageTextLen, findIndex, anchor, anchorLen);
+                }
             }
-        }
-        if (found < 0) {
-            return false;
-        }
-        findIndex = found + (forward ? 1 : 0);
-        fg = MatchEnd(found);
-    } while (fg.page <= 0);
+            if (found < 0) {
+                return false;
+            }
+            findIndex = found + (forward ? 1 : 0);
+            fg = MatchEnd(found);
+        } while (fg.page <= 0);
 
-    int offset = found;
-    searchHitStartAt = pageNo;
-    StartAt(pageNo, offset);
-    SelectUpTo(fg.page, fg.offset);
-    findIndex = forward ? fg.offset : offset;
+        int offset = found;
+        searchHitStartAt = pageNo;
+        StartAt(pageNo, offset);
+        SelectUpTo(fg.page, fg.offset);
+        findIndex = forward ? fg.offset : offset;
 
-    // try again if the found text is completely outside the page's mediabox
-    if (result.len == 0) {
-        return FindTextInPage(pageNo, finalGlyph);
+        // try again if the found text is completely outside the page's mediabox
+        if (result.len != 0) {
+            break;
+        }
     }
 
     if (finalGlyph) {
@@ -647,46 +781,63 @@ bool TextSearch::FindTextInPage(int pageNo, TextSearch::PageAndOffset* finalGlyp
 }
 
 bool TextSearch::FindStartingAtPage(int pageNo) {
-    if (str::IsEmpty(findText)) {
+    if (len(findText) == 0) {
         return false;
     }
 
+    int lo = RestrictFirst();
+    int hi = RestrictLast();
+    if (pageNo < lo) {
+        pageNo = forward ? lo : 0;
+    } else if (pageNo > hi) {
+        pageNo = forward ? nPages + 1 : hi;
+    }
+
     int next = forward ? 1 : -1;
-    while ((1 <= pageNo) && (pageNo <= nPages) && !WasCanceled(progressCb)) {
+    while ((lo <= pageNo) && (pageNo <= hi) && !WasCanceled(progressCb)) {
         UpdateProgress(progressCb, pageNo, nPages);
 
-        if (pagesToSkip[pageNo - 1]) {
+        if (!PageAllowed(pageNo) || pagesToSkip[pageNo - 1]) {
             pageNo += next;
             continue;
         }
 
         Reset();
 
-        pageText = engine->GetTextForPage(pageNo, &pageTextLen);
-        findIndex = pageTextLen;
-        if (pageText) {
-            if (forward) {
-                findIndex = 0;
-            }
-            PageAndOffset r;
-            if (FindTextInPage(pageNo, &r)) {
-                if (forward) {
-                    if (findPage != r.page) {
-                        findPage = r.page;
-                        pageText = engine->GetTextForPage(findPage, &pageTextLen);
-                    }
-                    findIndex = r.offset;
-                }
-                return true;
-            }
-            pagesToSkip[pageNo - 1] = true;
+        bool abortSearch = false;
+        pageText = GetTextForPageForSearch(engine, pageNo, &pageTextLen, progressCb, &abortSearch);
+        if (abortSearch) {
+            break;
         }
-
-        pageNo += next;
+        findIndex = pageTextLen;
+        if (!pageText) {
+            pageNo += next;
+            continue;
+        }
+        if (forward) {
+            findIndex = 0;
+        }
+        PageAndOffset r;
+        if (!FindTextInPage(pageNo, &r)) {
+            pagesToSkip[pageNo - 1] = true;
+            pageNo += next;
+            continue;
+        }
+        if (forward) {
+            if (findPage != r.page) {
+                findPage = r.page;
+                pageText = GetTextForPageForSearch(engine, findPage, &pageTextLen, progressCb, &abortSearch);
+                if (abortSearch) {
+                    break;
+                }
+            }
+            findIndex = r.offset;
+        }
+        return true;
     }
 
-    // allow for the first/last page to be included in the next search
-    searchHitStartAt = findPage = forward ? nPages + 1 : 0;
+    // allow for the first/last page of the (restricted) range to be included next
+    searchHitStartAt = findPage = forward ? hi + 1 : lo - 1;
 
     return false;
 }
@@ -702,13 +853,18 @@ TextSel* TextSearch::FindFirst(int page, Str text) {
 
 // search only `pageNo` (no wrapping to other pages), mirroring the per-page step
 // inside FindStartingAtPage. Used for page-constrained search (issue #3085)
+// like FindFirst but searches only the given page (issue #3085)
 TextSel* TextSearch::FindFirstOnPage(int pageNo, Str text) {
     SetText(text);
-    if (str::IsEmpty(findText) || pageNo < 1 || pageNo > nPages) {
+    if (len(findText) == 0 || pageNo < 1 || pageNo > nPages) {
         return nullptr;
     }
     Reset();
-    pageText = engine->GetTextForPage(pageNo, &pageTextLen);
+    bool abortSearch = false;
+    pageText = GetTextForPageForSearch(engine, pageNo, &pageTextLen, progressCb, &abortSearch);
+    if (abortSearch) {
+        return nullptr;
+    }
     findIndex = pageTextLen;
     if (!pageText) {
         return nullptr;
@@ -723,7 +879,10 @@ TextSel* TextSearch::FindFirstOnPage(int pageNo, Str text) {
     if (forward) {
         if (findPage != r.page) {
             findPage = r.page;
-            pageText = engine->GetTextForPage(findPage, &pageTextLen);
+            pageText = GetTextForPageForSearch(engine, findPage, &pageTextLen, progressCb, &abortSearch);
+            if (abortSearch) {
+                return nullptr;
+            }
         }
         findIndex = r.offset;
     }
@@ -746,7 +905,11 @@ TextSel* TextSearch::FindNext() {
         if (forward) {
             findPage = finalGlyph.page;
             findIndex = finalGlyph.offset;
-            pageText = engine->GetTextForPage(findPage, &pageTextLen);
+            bool abortSearch = false;
+            pageText = GetTextForPageForSearch(engine, findPage, &pageTextLen, progressCb, &abortSearch);
+            if (abortSearch) {
+                return nullptr;
+            }
         }
         return &result;
     }

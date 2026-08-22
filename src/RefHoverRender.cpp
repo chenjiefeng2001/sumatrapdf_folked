@@ -3,11 +3,10 @@
 
 #include "base/Base.h"
 #include "base/Pixmap.h"
-#include "base/Thread.h"
 #include "base/UITask.h"
 #include "base/Win.h"
 
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
 
 #include "DocController.h"
 #include "EngineBase.h"
@@ -47,8 +46,8 @@ static Pixmap* StackPixmapsVertically(Pixmap* top, Pixmap* bottom) {
     HGDIOBJ oldOut = outDC ? SelectObject(outDC, out->hbmp) : nullptr;
     if (outDC && oldOut) {
         RECT full{0, 0, w, h};
-        HBRUSH white = CreateSolidBrush(RGB(255, 255, 255));
-        FillRect(outDC, &full, white);
+        HBRUSH white = CreateSolidBrush(kColWhite);
+        HdcFillRect(outDC, ToRect(full), white);
         DeleteObject(white);
 
         if (top->hbmp) {
@@ -98,7 +97,7 @@ static void RefHoverRenderDone(RefHoverRenderJob* job) {
             s->displayed.region = job->req.region;
             RefHoverShowPopup(s, job->req.screenPt);
         } else {
-            InvalidateRect(s->hwndPopup, nullptr, TRUE);
+            HwndInvalidate(s->hwndPopup, true);
         }
     } else {
         FreePixmap(job->bmp);

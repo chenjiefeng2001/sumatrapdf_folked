@@ -65,8 +65,9 @@ struct Flags {
     bool invertColors = false;
     bool regress = false;
     bool tester = false;
-    // -new-window, if true and we're using tabs, opens
-    // the document in new window
+    // -new-window: open in a new window (not a tab of an existing one).
+    // With several file args, only the first file forces a new window; the
+    // rest open as tabs in that window (issue #5044).
     bool inNewWindow = false;
     Str search;
     Str password;
@@ -86,6 +87,14 @@ struct Flags {
     // -for-testing: for ad-hoc testing by humans or agents. Always starts
     // a new instance, doesn't restore session, doesn't save settings
     bool forTesting = false;
+    // -quicklook: chrome-less always-on-top preview window (Explorer Space)
+    bool quickLook = false;
+    // -quicklook-agent: hidden Space-bar hook for Explorer, no UI
+    bool quickLookAgent = false;
+    // -window-pos <width>x<height>@<x>x<y>: open every window exactly there,
+    // e.g. 960x540@960x0. Empty unless given. Meant for automated tests, where
+    // a window a quarter of the screen renders and captures four times faster
+    Rect windowPos;
     Str controlPipeName; // -dbg-control <named-pipe>
     bool testRenderPage = false;
     bool testExtractPage = false;
@@ -133,8 +142,10 @@ struct Flags {
     ~Flags() = default;
 };
 
+#if OS_WIN
 void ParseFlags(Arena* a, WStr cmdLine, Flags&, Str toolNames = {});
-void ShowPrintersDialog();
+#endif
+void ShowPrintersDialog(bool consoleOnly = false);
 
 bool IsValidPageRange(Str ranges);
 bool IsBenchPagesInfo(Str s);

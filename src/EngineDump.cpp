@@ -4,11 +4,11 @@
 #include "base/Base.h"
 #include "base/Pixmap.h"
 #include "base/File.h"
-#include "base/GdiPlus.h"
+#include "base/GdiPlusUtil.h"
 #include "base/TgaReader.h"
 #include "base/Win.h"
 
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
 
 #include "Settings.h"
 #include "Flags.h"
@@ -23,21 +23,11 @@ static void Out1(Str msg) {
 }
 
 static bool NeedsEscape(Str s) {
-    // TODO: optimize to do a single loop over s
-    if (str::ContainsChar(s, '<')) {
-        return true;
-    }
-    if (str::ContainsChar(s, '&')) {
-        return true;
-    }
-    if (str::ContainsChar(s, '"')) {
-        return true;
-    }
-    return false;
+    return str::ContainsCharAny(s, StrL("<&\""));
 }
 
 static TempStr EscapeTemp(Str str) {
-    if (str::IsEmpty(str)) {
+    if (len(str) == 0) {
         return {};
     }
 
@@ -71,51 +61,51 @@ static TempStr EscapeTemp(Str str) {
     return ToStrTemp(escaped);
 }
 
-void DumpProperties(EngineBase* engine, bool fullDump) {
+static void DumpProperties(EngineBase* engine, bool fullDump) {
     Out1("\t<Properties\n");
     TempStr str = EscapeTemp(engine->FilePath());
     Out("\t\tFilePath=\"%s\"\n", str.s);
-    str = EscapeTemp(engine->GetPropertyTemp(kPropTitle));
+    str = EscapeTemp(engine->GetPropertyTemp(DocProp::Title));
     if (str) {
         Out("\t\tTitle=\"%s\"\n", str.s);
     }
-    str = EscapeTemp(engine->GetPropertyTemp(kPropSubject));
+    str = EscapeTemp(engine->GetPropertyTemp(DocProp::Subject));
     if (str) {
         Out("\t\tSubject=\"%s\"\n", str.s);
     }
-    str = EscapeTemp(engine->GetPropertyTemp(kPropAuthor));
+    str = EscapeTemp(engine->GetPropertyTemp(DocProp::Author));
     if (str) {
         Out("\t\tAuthor=\"%s\"\n", str.s);
     }
-    str = EscapeTemp(engine->GetPropertyTemp(kPropCopyright));
+    str = EscapeTemp(engine->GetPropertyTemp(DocProp::Copyright));
     if (str) {
         Out("\t\tCopyright=\"%s\"\n", str.s);
     }
-    str = EscapeTemp(engine->GetPropertyTemp(kPropCreationDate));
+    str = EscapeTemp(engine->GetPropertyTemp(DocProp::CreationDate));
     if (str) {
         Out("\t\tCreationDate=\"%s\"\n", str.s);
     }
-    str = EscapeTemp(engine->GetPropertyTemp(kPropModificationDate));
+    str = EscapeTemp(engine->GetPropertyTemp(DocProp::ModificationDate));
     if (str) {
         Out("\t\tModDate=\"%s\"\n", str.s);
     }
-    str = EscapeTemp(engine->GetPropertyTemp(kPropCreatorApp));
+    str = EscapeTemp(engine->GetPropertyTemp(DocProp::CreatorApp));
     if (str) {
         Out("\t\tCreator=\"%s\"\n", str.s);
     }
-    str = EscapeTemp(engine->GetPropertyTemp(kPropPdfProducer));
+    str = EscapeTemp(engine->GetPropertyTemp(DocProp::PdfProducer));
     if (str) {
         Out("\t\tPdfProducer=\"%s\"\n", str.s);
     }
-    str = EscapeTemp(engine->GetPropertyTemp(kPropPdfVersion));
+    str = EscapeTemp(engine->GetPropertyTemp(DocProp::PdfVersion));
     if (str) {
         Out("\t\tPdfVersion=\"%s\"\n", str.s);
     }
-    str = EscapeTemp(engine->GetPropertyTemp(kPropPdfFileStructure));
+    str = EscapeTemp(engine->GetPropertyTemp(DocProp::PdfFileStructure));
     if (str) {
         Out("\t\tPdfFileStructure=\"%s\"\n", str.s);
     }
-    str = EscapeTemp(engine->GetPropertyTemp(kPropUnsupportedFeatures));
+    str = EscapeTemp(engine->GetPropertyTemp(DocProp::UnsupportedFeatures));
     if (str) {
         Out("\t\tUnsupportedFeatures=\"%s\"\n", str.s);
     }
@@ -138,7 +128,7 @@ void DumpProperties(EngineBase* engine, bool fullDump) {
     if (!fullDump) {
         return;
     }
-    TempStr fontlist = engine->GetPropertyTemp(kPropFontList);
+    TempStr fontlist = engine->GetPropertyTemp(DocProp::FontList);
     if (fontlist) {
         StrVec fonts;
         Split(&fonts, fontlist, "\n");
@@ -163,18 +153,18 @@ static TempStr DestRectToStrTemp(EngineBase* engine, IPageDestination* dest) {
         PointF pt = engine->Transform(rect.TL(), pageNo, 1.0, 0);
         return fmt("Point=\"%.0f %.0f\"", pt.x, pt.y);
     }
-    if (rect.dx != DEST_USE_DEFAULT && rect.dy != DEST_USE_DEFAULT) {
+    if (rect.dx != kDestUseDefault && rect.dy != kDestUseDefault) {
         Rect rc = engine->Transform(rect, pageNo, 1.0, 0).Round();
         return fmt("Rect=\"%d %d %d %d\"", rc.x, rc.y, rc.dx, rc.dy);
     }
-    if (rect.y != DEST_USE_DEFAULT) {
+    if (rect.y != kDestUseDefault) {
         PointF pt = engine->Transform(rect.TL(), pageNo, 1.0, 0);
         return fmt("Point=\"x %.0f\"", pt.y);
     }
     return nullptr;
 }
 
-void DumpTocItem(EngineBase* engine, TocItem* item, int level, int& idCounter) {
+static void DumpTocItem(EngineBase* engine, TocItem* item, int level, int& idCounter) {
     for (; item; item = item->next) {
         TempStr title = EscapeTemp(item->title);
         for (int i = 0; i < level; i++) {
@@ -217,7 +207,7 @@ void DumpTocItem(EngineBase* engine, TocItem* item, int level, int& idCounter) {
     }
 }
 
-void DumpToc(EngineBase* engine) {
+static void DumpToc(EngineBase* engine) {
     TocTree* tree = engine->GetToc();
     if (!tree) {
         return;
@@ -233,19 +223,19 @@ void DumpToc(EngineBase* engine) {
     }
 }
 
-Str ElementTypeToStr(IPageElement* el) {
+static Str ElementTypeToStr(IPageElement* el) {
     Kind kind = el->GetKind();
     if (kind) {
-        return Str(kind);
+        return {kind};
     }
     return StrL("unknown");
 }
 
-Str PageDestToStr(Kind kind) {
-    return Str(kind);
+__unused static Str PageDestToStr(Kind kind) {
+    return {kind};
 }
 
-void DumpPageContent(EngineBase* engine, int pageNo, bool fullDump) {
+static void DumpPageContent(EngineBase* engine, int pageNo, bool fullDump) {
     // ensure that the page is loaded
     engine->BenchLoadPage(pageNo);
 
@@ -312,14 +302,14 @@ void DumpPageContent(EngineBase* engine, int pageNo, bool fullDump) {
     Out1("\t</Page>\n");
 }
 
-void DumpThumbnail(EngineBase* engine) {
+static void DumpThumbnail(EngineBase* engine) {
     RectF rect = engine->Transform(engine->PageMediabox(1), 1, 1.0, 0);
     if (rect.IsEmpty()) {
         Out1("\t<Thumbnail />\n");
         return;
     }
 
-    float zoom = std::min(128 / (float)rect.dx, 128 / (float)rect.dy) - 0.001f;
+    float zoom = std::min(128 / rect.dx, 128 / rect.dy) - 0.001f;
     Rect thumb = RectF(0, 0, rect.dx * zoom, rect.dy * zoom).Round();
     rect = engine->Transform(ToRectF(thumb), 1, zoom, 0, true);
     RenderPageArgs args(1, zoom, 0, &rect);
@@ -329,7 +319,7 @@ void DumpThumbnail(EngineBase* engine) {
         return;
     }
 
-    Str imgData = tga::SerializeBitmap(bmp->hbmp);
+    Str imgData = tga::PixmapToTgaFormat(bmp);
     TempStr hexData = imgData.s ? str::MemToHexTemp(imgData) : Str{};
     if (hexData) {
         Out("\t<Thumbnail>\n\t\t%s\n\t</Thumbnail>\n", hexData.s);
@@ -337,10 +327,10 @@ void DumpThumbnail(EngineBase* engine) {
         Out1("\t<Thumbnail />\n");
     }
     str::Free(imgData);
-    delete bmp;
+    FreePixmap(bmp);
 }
 
-void DumpData(EngineBase* engine, bool fullDump) {
+__unused static void DumpData(EngineBase* engine, bool fullDump) {
     Out1(UTF8_BOM);
     Out1("<?xml version=\"1.0\"?>\n");
     Out1("<EngineDump>\n");
@@ -390,12 +380,12 @@ static bool CheckRenderPath(Str path) {
 }
 
 // static
-bool RenderDocument(EngineBase* engine, Str renderPath, float zoom = 1.f, bool silent = false) {
+__unused static bool RenderDocument(EngineBase* engine, Str renderPath, float zoom = 1.f, bool silent = false) {
     if (!CheckRenderPath(renderPath)) {
         return false;
     }
 
-    if (str::EndsWithI(renderPath, ".txt")) {
+    if (str::EndsWithI(renderPath, StrL(".txt"))) {
         str::Builder text(1024);
         for (int pageNo = 1; pageNo <= engine->PageCount(); pageNo++) {
             PageText pageText = engine->ExtractPageText(pageNo);
@@ -426,20 +416,21 @@ bool RenderDocument(EngineBase* engine, Str renderPath, float zoom = 1.f, bool s
             continue;
         }
         TempStr pageBmpPath = fmt(renderPath.s, pageNo);
-        if (str::EndsWithI(pageBmpPath, ".png")) {
+        if (str::EndsWithI(pageBmpPath, StrL(".png"))) {
             Gdiplus::Bitmap gbmp(bmp->hbmp, nullptr);
             CLSID pngEncId = GetGdiPlusEncoderClsid(L"image/png");
             WCHAR* pageBmpPathW = CWStrTemp(pageBmpPath);
             gbmp.Save(pageBmpPathW, &pngEncId, nullptr);
-        } else if (str::EndsWithI(pageBmpPath, ".bmp")) {
-            Str imgData = SerializeBitmap(bmp->hbmp);
-            if (!str::IsEmpty(imgData)) {
+        } else if (str::EndsWithI(pageBmpPath, StrL(".bmp"))) {
+            Str imgData = PixmapToBmpFormat(bmp);
+            if (len(imgData) > 0) {
                 file::WriteFile(pageBmpPath, imgData);
                 str::Free(imgData);
             }
         } else { // render as TGA for all other file extensions
-            Str imgData = tga::SerializeBitmap(bmp->hbmp);
-            if (!str::IsEmpty(imgData)) {
+            // a serialized TGA starts with a 0 byte
+            Str imgData = tga::PixmapToTgaFormat(bmp);
+            if (len(imgData) > 0) {
                 file::WriteFile(pageBmpPath, imgData);
                 str::Free(imgData);
             }
@@ -455,7 +446,9 @@ class PasswordHolder : public PasswordUI {
 
   public:
     explicit PasswordHolder(Str password) : password(password) {}
-    Str GetPassword(Str, u8*, __unused u8 decryptionKeyOut[32], bool*) override { return str::Dup(password); }
+    Str GetPassword(Str /*path*/, u8* /*fileDigest*/, __unused u8 decryptionKeyOut[32], bool* /*saveKey*/) override {
+        return str::Dup(password);
+    }
 };
 
 void EngineDump(const Flags& flags) {
@@ -481,28 +474,28 @@ void EngineDump(const Flags& flags) {
     bool loadOnly = false, silent = false;
 
     for (int i = 1; i < nArgs; i++) {
-        if (str::Eq(argList.at(i), "-pwd") && i + 1 < nArgs && !password) {
-            password = argList.at(++i);
-        } else if (str::Eq(argList.at(i), "-quick")) {
+        if (str::Eq(argList[i], StrL("-pwd")) && i + 1 < nArgs && !password) {
+            password = argList[++i];
+        } else if (str::Eq(argList[i], StrL("-quick"))) {
             fullDump = false;
-        } else if (str::Eq(argList.at(i), "-render") && i + 1 < nArgs && !renderPath) {
+        } else if (str::Eq(argList[i], StrL("-render")) && i + 1 < nArgs && !renderPath) {
             // optional zoom argument (e.g. -render 50% file.pdf)
             float zoom;
-            if (i + 2 < nArgs && !str::IsNull(str::Parse(argList.at(i + 1), "%f%%%$", &zoom)) && zoom > 0.f) {
+            if (i + 2 < nArgs && !str::IsNull(str::Parse(argList[i + 1], "%f%%%$", &zoom)) && zoom > 0.f) {
                 renderZoom = zoom / 100.f;
                 i++;
             }
-            renderPath = argList.at(++i);
-        } else if (str::Eq(argList.at(i), "-loadonly")) {
+            renderPath = argList[++i];
+        } else if (str::Eq(argList[i], StrL("-loadonly"))) {
             // -loadonly and -silent are only meant for profiling
             loadOnly = true;
-        } else if (str::Eq(argList.at(i), "-silent")) {
+        } else if (str::Eq(argList[i], StrL("-silent"))) {
             silent = true;
-        } else if (str::Eq(argList.at(i), "-full")) {
+        } else if (str::Eq(argList[i], StrL("-full"))) {
             // -full is for backward compatibility
             fullDump = true;
         } else if (!filePath) {
-            filePath = argList.at(i);
+            filePath = argList[i];
         } else {
             goto Usage;
         }
@@ -519,18 +512,14 @@ void EngineDump(const Flags& flags) {
 
 #if 0
     ScopedGdiPlus gdiPlus;
-    ScopedMui miniMui;
 
-    WIN32_FIND_DATA fdata;
-    WCHAR* pathW = CWStrTemp(filePath);
-    HANDLE hfind = FindFirstFileW(pathW, &fdata);
-    // embedded documents are referred to by an invalid path
-    // containing more information after a colon (e.g. "C:\file.pdf:3:0")
-    if (INVALID_HANDLE_VALUE != hfind) {
-        TempStr dir = path::GetDirTemp(filePath);
-        TempStr name = ToUtf8Temp(fdata.cFileName);
-        filePath = path::JoinTemp(dir, name);
-        FindClose(hfind);
+    // Normalize casing / short names when the path exists (embedded docs may use
+    // "C:\file.pdf:3:0" which does not exist as a real file path).
+    if (file::Exists(filePath)) {
+        TempStr norm = path::NormalizeTemp(filePath);
+        if (norm) {
+            filePath = norm;
+        }
     }
 
     PasswordHolder pwdUI(password);

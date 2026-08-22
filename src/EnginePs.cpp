@@ -8,14 +8,12 @@
 #include "base/GuessFileType.h"
 #include "base/Win.h"
 
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
 
 #include "DocProperties.h"
 #include "DocController.h"
 #include "EngineBase.h"
 #include "EngineAll.h"
-
-#include "base/Log.h"
 
 Kind kindEnginePostScript = "enginePostScript";
 
@@ -60,7 +58,7 @@ TryAgain64Bit:
     int nVers = len(versions);
     for (int i = nVers; i > 0; i--) {
         for (Str gsProd : gsProducts) {
-            Str ver = versions.At(i - 1);
+            Str ver = versions[i - 1];
             TempStr keyName = fmt("Software\\%s\\%s", gsProd, ver);
             TempStr gsDLL = ReadRegStrTemp(HKEY_LOCAL_MACHINE, keyName, "GS_DLL");
             if (!gsDLL) {
@@ -80,7 +78,7 @@ TryAgain64Bit:
 
     // if Ghostscript isn't found in the Registry, try finding it in the %PATH%
     DWORD size = GetEnvironmentVariableW(L"PATH", nullptr, 0);
-    TempWStr envpathW = WStr(AllocArrayTemp<WCHAR>(size + 1), (int)size + 1);
+    TempWStr envpathW = WStr(AllocArrayTemp<WCHAR>((int)size + 1), (int)size + 1);
     if (size == 0) {
         return {};
     }
@@ -117,7 +115,7 @@ struct AutoDeleteFile {
 static Rect ExtractDSCPageSize(const WCHAR* path) {
     char header[1024]{};
     file::ReadN(path, (u8*)header, sizeof(header) - 1);
-    if (!str::StartsWith((char*)header, "%!PS-Adobe-")) {
+    if (!str::StartsWith((char*)header, StrL("%!PS-Adobe-"))) {
         return {};
     }
 
@@ -128,7 +126,7 @@ static Rect ExtractDSCPageSize(const WCHAR* path) {
     char* nl = (char*)header;
     RectF bbox;
     while ((nl = strchr(nl + 1, '\n')) != nullptr && '%' == nl[1]) {
-        if (str::StartsWith(nl + 1, "%%BoundingBox:") &&
+        if (str::StartsWith(nl + 1, StrL("%%BoundingBox:")) &&
             str::Parse(nl + 1, "%%%%BoundingBox: 0 0 %f %f% ", &bbox.dx, &bbox.dy)) {
             return ToRect(bbox);
         }
@@ -183,19 +181,14 @@ static EngineBase* ps2pdf(Str path) {
     }
 
     Str pdfData = file::ReadFile(tmpFile);
-    if (str::IsEmpty(pdfData)) {
-        return nullptr;
-    }
-
-    IStream* strm = CreateStreamFromData(pdfData);
-    str::Free(pdfData);
-    ScopedComPtr<IStream> stream(strm);
-    if (!stream) {
+    if (len(pdfData) == 0) {
         return nullptr;
     }
 
     TempStr nameHint = str::JoinTemp(path, StrL(".pdf"));
-    return CreateEngineMupdfFromStream(stream, nameHint);
+    EngineBase* engine = CreateEngineMupdfFromData(pdfData, nameHint, nullptr);
+    str::Free(pdfData);
+    return engine;
 }
 
 static EngineBase* psgz2pdf(Str fileName) {
@@ -218,16 +211,27 @@ static EngineBase* psgz2pdf(Str fileName) {
         return nullptr;
     }
 
+    constexpr i64 kMaxUncompressedPostScriptSize = 512LL * 1024 * 1024;
+    i64 totalSize = 0;
+    bool ok = true;
     char buffer[12 * 1024];
     for (;;) {
-        int len = gzread(inFile, buffer, sizeof(buffer));
-        if (len <= 0) {
+        int n = gzread(inFile, buffer, sizeof(buffer));
+        if (n <= 0) {
+            ok = n == 0;
             break;
         }
-        fwrite(buffer, 1, len, outFile);
+        totalSize += n;
+        if (totalSize > kMaxUncompressedPostScriptSize || fwrite(buffer, 1, n, outFile) != (size_t)n) {
+            ok = false;
+            break;
+        }
     }
     fclose(outFile);
     gzclose(inFile);
+    if (!ok) {
+        return nullptr;
+    }
 
     return ps2pdf(tmpFile);
 }
@@ -286,23 +290,23 @@ class EnginePs : public EngineBase {
 
     bool HasClipOptimizations(int pageNo) override { return pdfEngine->HasClipOptimizations(pageNo); }
 
-    TempStr GetPropertyTemp(Str name) override {
+    TempStr GetPropertyTemp(DocProp prop) override {
         // omit properties created by Ghostscript
         if (!pdfEngine) {
             return {};
         }
-        static const Str toOmit[] = {kPropCreationDate, kPropModificationDate, kPropPdfVersion,
-                                     kPropPdfProducer,  kPropPdfFileStructure, Str()};
+        static const DocProp toOmit[] = {DocProp::CreationDate, DocProp::ModificationDate, DocProp::PdfVersion,
+                                         DocProp::PdfProducer,  DocProp::PdfFileStructure, DocProp::None};
 
-        for (Str omit : toOmit) {
-            if (!omit) {
+        for (DocProp omit : toOmit) {
+            if (omit == DocProp::None) {
                 break;
             }
-            if (str::Eq(omit, name)) {
+            if (omit == prop) {
                 return {};
             }
         }
-        return pdfEngine->GetPropertyTemp(name);
+        return pdfEngine->GetPropertyTemp(prop);
     }
 
     bool BenchLoadPage(int pageNo) override { return pdfEngine->BenchLoadPage(pageNo); }
@@ -338,7 +342,7 @@ class EnginePs : public EngineBase {
             return false;
         }
 
-        if (str::EndsWithI(FilePath(), ".eps")) {
+        if (str::EndsWithI(FilePath(), StrL(".eps"))) {
             defaultExt = str::Dup(StrL(".eps"));
         }
 
@@ -362,14 +366,15 @@ EngineBase* CreateEnginePsFromFile(Str fileName) {
     return engine;
 }
 
+/* EnginePs.cpp */
 bool IsEnginePsAvailable() {
     TempStr gswin32c = GetGhostscriptPathTemp();
-    return !str::IsEmpty(gswin32c);
+    return len(gswin32c) > 0;
 }
 
-bool IsEnginePsSupportedFileType(Kind kind) {
+bool IsEnginePsSupportedFileType(FileType kind) {
     if (!IsEnginePsAvailable()) {
         return false;
     }
-    return kind == kindFilePS;
+    return kind == FileType::PS;
 }

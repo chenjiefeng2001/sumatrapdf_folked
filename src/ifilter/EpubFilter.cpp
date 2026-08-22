@@ -4,24 +4,22 @@
 #include "base/Base.h"
 #include "base/ScopedWin.h"
 #include "base/Archive.h"
-#include "base/GdiPlus.h"
 #include "base/HtmlTags.h"
 #include "base/Win.h"
 
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
 
 #include "DocProperties.h"
 #include "DocController.h"
 #include "EngineBase.h"
 #include "EbookBase.h"
 #include "EbookDoc.h"
+#include "GumboHelpers.h"
 #include "GumboHtmlParser.h"
 
 #include "FilterBase.h"
 #include "RegistrySearchFilter.h"
 #include "EpubFilter.h"
-
-#include "base/Log.h"
 
 VOID EpubFilter::CleanUp() {
     log("EpubFilter::Cleanup()\n");
@@ -37,24 +35,10 @@ HRESULT EpubFilter::OnInit() {
 
     CleanUp();
 
-    // TODO: EpubDoc::CreateFromStream never returns with
-    //       m_pStream instead of a clone - why?
-
-    // load content of EPUB document into a seekable stream
-    HRESULT res;
-    Str data = GetDataFromStream(m_pStream, &res);
-    if (str::IsEmpty(data)) {
-        return res;
-    }
-
-    IStream* strm = CreateStreamFromData(data);
-    str::Free(data);
-    ScopedComPtr<IStream> stream(strm);
-    if (!stream) {
+    if (str::IsNull(m_data)) {
         return E_FAIL;
     }
-
-    m_epubDoc = EpubDoc::CreateFromStream(stream);
+    m_epubDoc = EpubDoc::CreateFromData(m_data);
     if (!m_epubDoc) {
         return E_FAIL;
     }
@@ -85,11 +69,11 @@ static bool IsoDateParse(Str isoDate, SYSTEMTIME* timeOut) {
 }
 
 static void TrimHtmlTextToken(Str& tokText) {
-    while (!str::IsEmpty(tokText) && str::IsWs(tokText.s[0])) {
+    while (len(tokText) > 0 && str::IsWs(tokText.s[0])) {
         tokText.s++;
         tokText.len--;
     }
-    while (!str::IsEmpty(tokText) && str::IsWs(tokText.s[tokText.len - 1])) {
+    while (len(tokText) > 0 && str::IsWs(tokText.s[tokText.len - 1])) {
         tokText.len--;
     }
 }
@@ -110,7 +94,7 @@ static WStr ExtractHtmlText(EpubDoc* doc) {
             // trim whitespace (TODO: also normalize within text?)
             Str tokText = t->s;
             TrimHtmlTextToken(tokText);
-            if (!str::IsEmpty(tokText)) {
+            if (len(tokText) > 0) {
                 TempStr s = ResolveHtmlEntitiesTemp(tokText);
                 text.Append(s);
                 text.AppendChar(' ');
@@ -156,8 +140,8 @@ HRESULT EpubFilter::GetNextChunkValue(ChunkValue& chunkValue) {
 
         case STATE_EPUB_AUTHOR:
             m_state = STATE_EPUB_TITLE;
-            str = m_epubDoc->GetPropertyTemp(kPropAuthor);
-            if (!str::IsEmpty(str)) {
+            str = m_epubDoc->GetPropertyTemp(DocProp::Author);
+            if (len(str) > 0) {
                 ws = ToWStrTemp(str);
                 chunkValue.SetTextValue(PKEY_Author, ws.s);
                 return S_OK;
@@ -166,11 +150,11 @@ HRESULT EpubFilter::GetNextChunkValue(ChunkValue& chunkValue) {
 
         case STATE_EPUB_TITLE:
             m_state = STATE_EPUB_DATE;
-            str = m_epubDoc->GetPropertyTemp(kPropTitle);
+            str = m_epubDoc->GetPropertyTemp(DocProp::Title);
             if (!str) {
-                str = m_epubDoc->GetPropertyTemp(kPropSubject);
+                str = m_epubDoc->GetPropertyTemp(DocProp::Subject);
             }
-            if (!str::IsEmpty(str)) {
+            if (len(str) > 0) {
                 ws = ToWStrTemp(str);
                 chunkValue.SetTextValue(PKEY_Title, ws.s);
                 return S_OK;
@@ -179,11 +163,11 @@ HRESULT EpubFilter::GetNextChunkValue(ChunkValue& chunkValue) {
 
         case STATE_EPUB_DATE:
             m_state = STATE_EPUB_CONTENT;
-            str = m_epubDoc->GetPropertyTemp(kPropModificationDate);
+            str = m_epubDoc->GetPropertyTemp(DocProp::ModificationDate);
             if (!str) {
-                str = m_epubDoc->GetPropertyTemp(kPropCreationDate);
+                str = m_epubDoc->GetPropertyTemp(DocProp::CreationDate);
             }
-            if (!str::IsEmpty(str)) {
+            if (len(str) > 0) {
                 SYSTEMTIME systime;
                 if (IsoDateParse(str, &systime)) {
                     FILETIME filetime;
@@ -197,7 +181,7 @@ HRESULT EpubFilter::GetNextChunkValue(ChunkValue& chunkValue) {
         case STATE_EPUB_CONTENT:
             m_state = STATE_EPUB_END;
             ws = ExtractHtmlText(m_epubDoc);
-            if (!wstr::IsEmpty(ws)) {
+            if (len(ws) > 0) {
                 chunkValue.SetTextValue(PKEY_Search_Contents, ws.s, CHUNK_TEXT);
                 wstr::Free(ws);
                 return S_OK;

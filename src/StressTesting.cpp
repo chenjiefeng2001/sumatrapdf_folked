@@ -3,14 +3,16 @@
 
 #include "base/Base.h"
 #include "base/Pixmap.h"
-#include "base/DirIter.h"
+#include "base/DirScan.h"
 #include "base/File.h"
 #include "base/GuessFileType.h"
 #include "base/Timer.h"
 #include "base/Win.h"
 #include "base/StrQueue.h"
 
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
+#include "gui/Layout.h"
+#include "gui/win/WinGui.h"
 
 #include "Settings.h"
 #include "DocProperties.h"
@@ -31,9 +33,11 @@
 #include "Flags.h"
 #include "SearchAndDDE.h"
 
-#include "base/Log.h"
-
 #define FIRST_STRESS_TIMER_ID 101
+
+constexpr int kStressTestMaxPagesPerFile = 16;
+constexpr int kStressTestMaxPagesSlowFile = 8;
+constexpr int kStressTestSlowPageMs = 4 * 1000;
 
 static bool gIsStressTesting = false;
 static int gCurrStressTimerId = FIRST_STRESS_TIMER_ID;
@@ -125,8 +129,8 @@ static void BenchFile(Str path, Str pagesSpec) {
     // using all text rendering methods, so that we can compare and find
     // docs that take a long time to load
 
-    Kind kind = GuessFileType(path, true);
-    if (!kind) {
+    FileType kind = GuessFileType(path, true);
+    if (kind == FileType::Unknown) {
         return;
     }
 
@@ -167,7 +171,7 @@ static void BenchFile(Str path, Str pagesSpec) {
     Vec<PageRange> ranges;
     if (ParsePageRanges(pagesSpec, ranges)) {
         for (int i = 0; i < len(ranges); i++) {
-            for (int j = ranges.at(i).start; j <= ranges.at(i).end; j++) {
+            for (int j = ranges[i].start; j <= ranges[i].end; j++) {
                 if (1 <= j && j <= pages) {
                     BenchLoadRender(engine, j);
                 }
@@ -181,7 +185,7 @@ static void BenchFile(Str path, Str pagesSpec) {
 }
 
 static bool IsFileToBench(Str path) {
-    Kind kind = GuessFileType(path, true);
+    FileType kind = GuessFileType(path, true);
     if (IsSupportedFileType(kind, true)) {
         return true;
     }
@@ -206,16 +210,16 @@ static void BenchDir(Str dir) {
     StrVec files;
     CollectFilesToBench(dir, files);
     for (int i = 0; i < len(files); i++) {
-        BenchFile(files.At(i), nullptr);
+        BenchFile(files[i], nullptr);
     }
 }
 
 void BenchFileOrDir(StrVec& pathsToBench) {
     int n = len(pathsToBench) / 2;
     for (int i = 0; i < n; i++) {
-        Str path = pathsToBench.At(2 * i);
+        Str path = pathsToBench[2 * i];
         if (file::Exists(path)) {
-            BenchFile(path, pathsToBench.At(2 * i + 1));
+            BenchFile(path, pathsToBench[(2 * i) + 1]);
         } else if (dir::Exists(path)) {
             BenchDir(path);
         } else {
@@ -241,8 +245,8 @@ static bool IsStressTestSupportedFile(Str filePath, Str filter) {
     if (filter && !path::Match(path::GetBaseNameTemp(filePath), filter)) {
         return false;
     }
-    Kind kind = GuessFileType(filePath, false);
-    if (!kind) {
+    FileType kind = GuessFileType(filePath, false);
+    if (kind == FileType::Unknown) {
         return false;
     }
     if (IsSupportedFileType(kind, true) || DocIsSupportedFileType(kind) || ChmModel::IsSupportedFileType(kind)) {
@@ -253,8 +257,8 @@ static bool IsStressTestSupportedFile(Str filePath, Str filter) {
     }
     // sniff the file's content if it matches the filter but
     // doesn't have a known extension
-    Kind kindSniffed = GuessFileType(filePath, true);
-    if (!kindSniffed || kindSniffed == kind) {
+    FileType kindSniffed = GuessFileType(filePath, true);
+    if (kindSniffed == FileType::Unknown || kindSniffed == kind) {
         return false;
     }
     if (IsSupportedFileType(kindSniffed, true)) {
@@ -310,6 +314,9 @@ static void FormatTime(int totalSecs, str::Builder* s) {
 
 static void MakeRandomSelection(MainWindow* win, int pageNo) {
     DisplayModel* dm = win->AsFixed();
+    if (!dm) {
+        return;
+    }
     if (!dm->ValidPageNo(pageNo)) {
         pageNo = 1;
     }
@@ -359,7 +366,7 @@ struct FilesProvider : TestFileProvider {
     FilesProvider(StrVec& filesIn, int n, int offset) {
         // get every n-th file starting at offset
         for (int i = offset; i < len(filesIn); i += n) {
-            Str f = filesIn.At(i);
+            Str f = filesIn[i];
             files.Append(f);
         }
         provided = 0;
@@ -373,7 +380,7 @@ struct FilesProvider : TestFileProvider {
         if (provided >= len(files)) {
             return {};
         }
-        TempStr res = files.At(provided++);
+        TempStr res = files[provided++];
         return res;
     }
 
@@ -393,7 +400,7 @@ struct DirFileProviderAsync : TestFileProvider {
 
     DirFileProviderAsync(Str path, Str filter, int max = 0, bool random = false) {
         startDir = str::Dup(path);
-        if (filter && !str::Eq(filter, "*")) {
+        if (filter && !str::Eq(filter, StrL("*"))) {
             fileFilter = str::Dup(filter);
         }
         this->max = max;
@@ -440,12 +447,10 @@ again:
         return path;
     }
     path = queue.PopFront();
-    if (queue.IsSentinel(path)) {
+    if (StrQueue::IsSentinel(path)) {
         return {};
     }
-    path = str::Dup(path);
     if (!IsStressTestSupportedFile(path, fileFilter)) {
-        str::Free(path);
         goto again;
     }
     AtomicIntInc(&nFiles);
@@ -466,7 +471,8 @@ struct StressTest {
     int maxFiles = 0;        // max files to process, 0 means no limit
     int timerId = 0;
     bool exitWhenDone = false;
-    int nSlowPages = 0;
+    int maxPagesForFile = kStressTestMaxPagesPerFile;
+    int nPagesRenderedThisFile = 0;
 
     SYSTEMTIME stressStartTime{};
     int cycles = 1;
@@ -490,6 +496,12 @@ T RemoveRandomElementFromVec(Vec<T>& v) {
     int idx = rand() % n;
     int res = v.PopAt(idx);
     return res;
+}
+
+static void LimitPagesToRender(Vec<int>& pages, int maxPages) {
+    while (len(pages) > maxPages) {
+        RemoveRandomElementFromVec(pages);
+    }
 }
 
 StressTest::StressTest(MainWindow* win, bool exitWhenDone) {
@@ -531,6 +543,7 @@ static void Finished(StressTest* st, bool success) {
         int secs = SecsSinceSystemTime(st->stressStartTime);
         TempStr tm = FormatTimeTemp(secs);
         TempStr s = fmt("Stress test complete, rendered %d files in %s", st->nFilesProcessed, tm);
+        logf("%s\n", s);
         printf("%s\n", s.s);
         fflush(stdout);
         NotificationCreateArgs args;
@@ -556,6 +569,7 @@ static void Start(StressTest* st, Str path, Str filter, Str ranges, int cycles) 
         Start(st, dirFileProvider, cycles);
     } else {
         TempStr s = fmt("Path '%s' doesn't exist", path);
+        logf("%s\n", s);
         NotificationCreateArgs args;
         args.hwndParent = st->win->hwndCanvas;
         args.msg = s;
@@ -603,7 +617,7 @@ static bool OpenFile(StressTest* st, Str fileName) {
     if (w != st->win) {
         if (st->win->IsDocLoaded()) {
             // try to provoke a crash in RenderCache cleanup code
-            Rect rect = ClientRect(st->win->hwndFrame);
+            Rect rect = HwndClientRect(st->win->hwndFrame);
             rect.Inflate(rand() % 10, rand() % 10);
             SendMessageW(st->win->hwndFrame, WM_SIZE, 0, MAKELONG(rect.dx, rect.dy));
             if (st->win->AsFixed()) {
@@ -627,20 +641,20 @@ static bool OpenFile(StressTest* st, Str fileName) {
     ctrl->SetDisplayMode(DisplayMode::Continuous);
     ctrl->SetZoomVirtual(kZoomFitPage, nullptr);
     ctrl->GoToFirstPage();
-    if (st->win->tocVisible || gGlobalPrefs->showFavorites) {
-        SetSidebarVisibility(st->win, st->win->tocVisible, gGlobalPrefs->showFavorites);
+    if (st->win->uiState.tocVisible || gGlobalPrefs->showFavorites) {
+        SetSidebarVisibility(st->win, st->win->uiState.tocVisible, gGlobalPrefs->showFavorites);
     }
 
-    st->nSlowPages = 0;
+    st->maxPagesForFile = kStressTestMaxPagesPerFile;
+    st->nPagesRenderedThisFile = 0;
     st->pagesToRender.Clear();
-    constexpr int nMaxPages = 32;
     int nPages = ctrl->PageCount();
     if (IsFullRange(st->pageRanges)) {
         Vec<int> allPages;
         for (int n = 1; n <= nPages; n++) {
             allPages.Append(n);
         }
-        while ((len(st->pagesToRender) < nMaxPages) && (len(allPages) > 0)) {
+        while ((len(st->pagesToRender) < kStressTestMaxPagesPerFile) && (len(allPages) > 0)) {
             int nRandom = RemoveRandomElementFromVec(allPages);
             st->pagesToRender.Append(nRandom);
         }
@@ -658,6 +672,7 @@ static bool OpenFile(StressTest* st, Str fileName) {
         if (len(st->pagesToRender) == 0) {
             return false;
         }
+        LimitPagesToRender(st->pagesToRender, kStressTestMaxPagesPerFile);
     }
 
     int randomPageIdx = rand() % len(st->pagesToRender);
@@ -671,7 +686,9 @@ static bool OpenFile(StressTest* st, Str fileName) {
     // search immediately in single page documents
     if (1 == st->pageForSearchStart) {
         // use text that is unlikely to be found, so that we search all pages
-        HwndSetText(st->win->hwndFindEdit, "!z_yt");
+        if (st->win->findEdit) {
+            st->win->findEdit->SetText(StrL("!z_yt"));
+        }
         FindTextOnThread(st->win, TextSearch::Direction::Forward, true);
     }
 
@@ -679,6 +696,7 @@ static bool OpenFile(StressTest* st, Str fileName) {
     TempStr tm = FormatTimeTemp(secs);
     int nTotalFiles = st->fileProvider->GetFilesCount();
     TempStr s = fmt("File %d (left: %d): %s, time: %s", st->nFilesProcessed, nTotalFiles, fileName, tm);
+    logf("%s\n", s);
     NotificationCreateArgs nargs;
     nargs.hwndParent = st->win->hwndCanvas;
     nargs.msg = s;
@@ -765,21 +783,20 @@ static bool GoToNextFile(StressTest* st) {
 static bool GoToNextPage(StressTest* st) {
     double pageRenderTime = TimeSinceInMs(st->currPageRenderTime);
     TempStr s = fmt("Page %d rendered in %d ms", st->currPageNo, (int)pageRenderTime);
+    logf("%s\n", s);
     NotificationCreateArgs args;
     args.hwndParent = st->win->hwndCanvas;
     args.msg = s;
     args.groupId = kNotifStressTestBenchmark;
     ShowNotification(args);
-    if (pageRenderTime > 700) {
-        st->nSlowPages += 1;
+    st->nPagesRenderedThisFile++;
+    if (pageRenderTime > kStressTestSlowPageMs) {
+        if (st->maxPagesForFile > kStressTestMaxPagesSlowFile) {
+            st->maxPagesForFile = kStressTestMaxPagesSlowFile;
+            logf("Slow page (%d ms), limiting file to %d pages\n", (int)pageRenderTime, st->maxPagesForFile);
+        }
     }
-    bool goToNextFile = len(st->pagesToRender) == 0;
-    if (st->nSlowPages >= 3) {
-        // some files are scanned .jpx images that are slow to render
-        // not much to learn from rendering them so we skip those if
-        // we see more than 3 slow pages
-        goToNextFile = true;
-    }
+    bool goToNextFile = len(st->pagesToRender) == 0 || st->nPagesRenderedThisFile >= st->maxPagesForFile;
     if (goToNextFile) {
         if (GoToNextFile(st)) {
             return true;
@@ -793,9 +810,9 @@ static bool GoToNextPage(StressTest* st) {
         // trigger getting toc and props
         st->gotToc = true;
         ctrl->GetToc();
-        for (int i = 0; gAllProps[i]; i++) {
-            Str prop = gAllProps[i];
-            if (str::Eq(prop, kPropFontList)) {
+        for (int i = 0; gAllProps[i] != DocProp::None; i++) {
+            DocProp prop = gAllProps[i];
+            if (prop == DocProp::FontList) {
                 // this can be expensive so skip
                 continue;
             }
@@ -815,12 +832,14 @@ static bool GoToNextPage(StressTest* st) {
     // current API doesn't make it easy
     if (st->currPageNo == st->pageForSearchStart) {
         // use text that is unlikely to be found, so that we search all pages
-        HwndSetText(st->win->hwndFindEdit, "!z_yt");
+        if (st->win->findEdit) {
+            st->win->findEdit->SetText(StrL("!z_yt"));
+        }
         FindTextOnThread(st->win, TextSearch::Direction::Forward, true);
     }
 
     if (1 == rand() % 3) {
-        Rect rect = ClientRect(st->win->hwndFrame);
+        Rect rect = HwndClientRect(st->win->hwndFrame);
         int deltaX = (rand() % 40) - 23;
         rect.dx += deltaX;
         if (rect.dx < 300) {
@@ -899,7 +918,7 @@ void GetStressTestInfo(str::Builder* s) {
     }
 
     for (int i = 0; i < len(gWindows); i++) {
-        MainWindow* w = gWindows.at(i);
+        MainWindow* w = gWindows[i];
         if (!w || !w->CurrentTab() || !w->CurrentTab()->filePath) {
             continue;
         }
@@ -977,6 +996,7 @@ void StartStressTest(Flags* i, MainWindow* win) {
 
         PositionStressWindows(windows, n);
 
+        logf("Scanning for files in directory %s\n", i->stressTestPath);
         printf("Scanning for files in directory %s\n", i->stressTestPath.s);
         fflush(stdout);
 
@@ -995,7 +1015,7 @@ void StartStressTest(Flags* i, MainWindow* win) {
             Start(dst, filesProvider, i->stressTestCycles);
         }
 
-        free(windows);
+        free((void*)windows);
     } else {
         PositionStressWindows(&win, 1);
         // dst will be deleted when the stress ends

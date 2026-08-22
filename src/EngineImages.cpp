@@ -3,58 +3,40 @@
 
 #include "base/Base.h"
 #include "base/Archive.h"
-#include "base/ScopedWin.h"
+#include "base/ByteReaderWriter.h"
+#include "base/Exif.h"
 #include "base/File.h"
 #include "base/GuessFileType.h"
 #include "base/Pixmap.h"
-#include "base/GdiPlus.h"
 #include "GumboHelpers.h"
 #include "base/JsonParser.h"
-#include "base/Win.h"
 #include "base/Timer.h"
-#include "base/DirIter.h"
+#include "base/DirScan.h"
 
-#include "wingui/UIModels.h"
+#if OS_WIN
+#include "base/Win.h"
+#include "base/GdiPlusUtil.h"
+#endif
 
 extern "C" {
 #include <mupdf/fitz.h>
 }
 
-#include "FzImgReader.h"
+#include "ImageReader.h"
 #include "DocProperties.h"
 #include "DocController.h"
+#include "gui/UIModels.h"
 #include "EngineBase.h"
-
-#include "base/Log.h"
-
-using Gdiplus::ARGB;
-using Gdiplus::Bitmap;
-using Gdiplus::Color;
-using Gdiplus::CompositingQualityHighQuality;
-using Gdiplus::FrameDimensionPage;
-using Gdiplus::FrameDimensionTime;
-using Gdiplus::Graphics;
-using Gdiplus::ImageAttributes;
-using Gdiplus::InterpolationModeHighQualityBilinear;
-using Gdiplus::Matrix;
-using Gdiplus::MatrixOrderAppend;
-using Gdiplus::Ok;
-using Gdiplus::OutOfMemory;
-using Gdiplus::PropertyItem;
-using Gdiplus::SmoothingModeAntiAlias;
-using Gdiplus::SolidBrush;
-using Gdiplus::Status;
-using Gdiplus::UnitPixel;
-using Gdiplus::WrapModeTileFlipXY;
+#include "EngineAll.h"
 
 Kind kindEngineImage = "engineImage";
 Kind kindEngineImageDir = "engineImageDir";
 Kind kindEngineComicBooks = "engineComicBooks";
 
-// number of decoded bitmaps to cache for quicker rendering.
+// number of decoded images to cache for quicker rendering.
 // Sized for multi-threaded prefetch: enough to hold a few visible pages,
 // the worker pool's in-flight pages, and a few prefetch slots without
-// thrashing. Each cached entry holds the decoded GDI+ Bitmap, so the
+// thrashing. Each cached entry holds the decoded Pixmap, so the
 // memory cost scales with image dimensions -- bump cautiously.
 #define MAX_IMAGE_PAGE_CACHE 32
 
@@ -66,14 +48,13 @@ struct ImagePage {
     // for RenderPage when available: each render decodes the JPEG at near-
     // target scale (DCT-domain 1/2, 1/4, 1/8 downsampling), so big images
     // displayed at small zooms cost only a fraction of a full-res decode.
-    // bmp (GDI+) is the fallback for paths that need GDI+ (multi-frame TIFF,
-    // or rotation/tile cases the mupdf render path doesn't handle yet).
-    Bitmap* bmp = nullptr;
+    // pixmap is the fallback for decoded frames and transformed renders.
+    Pixmap* pixmap = nullptr;
     fz_image* img = nullptr;
-    bool ownBmp = true;
+    bool ownPixmap = true;
     bool failedToLoad = false;
-    // true while LoadBitmapForPage / LoadFzPixmapForPage is running on a worker;
-    // concurrent GetPage callers wait on loadedEvent instead of serializing on cacheLock
+    // true while LoadPixmapForPage / LoadFzImageForPage is running on a worker;
+    // concurrent GetPage callers wait on loaded instead of serializing on cacheLock
     bool loading = false;
 
     // refcount: cache holds 1, every successful GetPage adds 1.
@@ -82,27 +63,18 @@ struct ImagePage {
     // because we need exclusion against eviction-in-progress.
     AtomicInt refs = 1;
 
-    // manual-reset event, signaled when loading transitions to false
-    HANDLE loadedEvent = nullptr;
+    Mutex loadLock;
+    ConditionVariable loaded;
 
-    // serializes GDI+ DrawImage calls against this->bmp -- a single Bitmap*
-    // is not safe to draw from multiple threads concurrently. Different pages
-    // have different drawLocks so they render in parallel.
-    // Not needed for the pix path: fz_pixmap is immutable after load and
-    // fz_scale_pixmap is safe to call concurrently.
-    CRITICAL_SECTION drawLock;
+    // Serializes lazy fallback pixmap decode for pages initially loaded as
+    // fz_image. Different pages have different locks so they render in parallel.
+    Mutex drawLock;
 
-    ImagePage(int pageNo, Bitmap* bmp) {
+    ImagePage(int pageNo, Pixmap* pixmap) {
         this->pageNo = pageNo;
-        this->bmp = bmp;
-        InitializeCriticalSection(&drawLock);
-        loadedEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        this->pixmap = pixmap;
     }
     ~ImagePage() {
-        DeleteCriticalSection(&drawLock);
-        if (loadedEvent) {
-            CloseHandle(loadedEvent);
-        }
         // img is dropped by DropPage before delete (it needs the engine's
         // per-thread fz_context to call into mupdf safely).
         ReportIf(img);
@@ -111,7 +83,9 @@ struct ImagePage {
 
 struct ImagePageInfo {
     Vec<IPageElement*> allElements;
-    RectF mediabox{};
+    PageElementImage imageElement;
+    bool hasImageElement = false;
+    RectF mediabox;
     PageInfoState state = PageInfoState::Unknown;
     // raw image bytes; populated lazily by GetImageData for file-backed
     // engines (EngineImage, EngineImageDir). Unused by EngineCbx (which
@@ -133,14 +107,15 @@ class EngineImages : public EngineBase {
     RectF Transform(const RectF& rect, int pageNo, float zoom, int rotation, bool inverse = false) override;
 
     Str GetFileData() override;
-    bool SaveFileAs(Str copyFileName) override;
-    PageText ExtractPageText(int) override { return {}; }
-    bool HasClipOptimizations(int) override { return false; }
+    bool SaveFileAs(Str dstPath) override;
+    PageText ExtractPageText(int /*pageNo*/) override { return {}; }
+    bool HasClipOptimizations(int /*pageNo*/) override { return false; }
 
     Vec<IPageElement*> GetElements(int pageNo) override;
     IPageElement* GetElementAtPos(int pageNo, PointF pt) override;
 
-    RenderedBitmap* GetImageForPageElement(IPageElement*) override;
+    RenderedBitmap* GetImageForPageElement(IPageElement* ipel) override;
+    Str GetImageDataForPageElement(IPageElement* ipel) override;
 
     bool BenchLoadPage(int pageNo) override {
         ImagePage* page = GetPage(pageNo);
@@ -150,11 +125,10 @@ class EngineImages : public EngineBase {
         return page != nullptr;
     }
 
-    ScopedComPtr<IStream> fileStream;
-
-    CRITICAL_SECTION cacheLock;
+    RecursiveMutex cacheLock;
     Vec<ImagePage*> pageCache;
     Vec<ImagePageInfo*> pageInfos;
+    Str sourceData;
 
     // root mupdf context. Each thread that calls into mupdf gets its own
     // cloned context via Ctx() -- mupdf's per-context setjmp/error stack
@@ -163,17 +137,17 @@ class EngineImages : public EngineBase {
     // contexts share the underlying allocator/store/etc via refcounts.
     fz_context* fz_ctx = nullptr;
     struct ThreadCtx {
-        DWORD threadID;
+        ThreadId threadID;
         fz_context* ctx;
     };
     Vec<ThreadCtx> threadCtxs;
-    CRITICAL_SECTION threadCtxsLock;
+    Mutex threadCtxsLock;
 
     fz_context* Ctx();
 
-    void GetTransform(Matrix& m, int pageNo, float zoom, int rotation);
+    PointF TransformPoint(PointF pt, int pageNo, float zoom, int rotation, bool inverse);
 
-    virtual Bitmap* LoadBitmapForPage(int pageNo, bool& deleteAfterUse) = 0;
+    virtual Pixmap* LoadPixmapForPage(int pageNo, bool& deleteAfterUse) = 0;
     // Optional: load the page as an fz_image (encoded form, lazy decode).
     // RenderPage then asks mupdf to decode the JPEG at near-target scale on
     // each render -- much cheaper than decoding at full resolution and
@@ -186,13 +160,15 @@ class EngineImages : public EngineBase {
     // Returns a non-owning view into engine-owned storage; the caller must
     // not free. Bytes stay valid until the engine is destroyed.
     virtual Str GetImageData(int pageNo) = 0;
-    virtual TempStr GetImagePathTemp(int pageNo) { return {}; }
+    virtual TempStr GetImagePathTemp(int /*pageNo*/) { return {}; }
+    // Uncompressed image bytes for pageNo when known without decoding (-1 unknown).
+    virtual i64 GetImageByteSize(int pageNo);
 
     ImagePage* GetPage(int pageNo, bool tryOnly = false);
     void DropPage(ImagePage* page, bool forceRemove);
 
-    RectF PageContentBox(int pageNo, RenderTarget) override;
-    void GetImageProperties(int pageNo, StrVec& keyValOut);
+    RectF PageContentBox(int pageNo, RenderTarget target) override;
+    void GetImageProperties(int pageNo, Props& propsOut);
 };
 
 EngineImages::EngineImages() {
@@ -202,15 +178,13 @@ EngineImages::EngineImages() {
     preferredLayout.nonContinuous = true;
     isImageCollection = true;
 
-    InitializeCriticalSection(&cacheLock);
-    InitializeCriticalSection(&threadCtxsLock);
     fz_ctx = fz_new_context_windows();
 }
 
 fz_context* EngineImages::Ctx() {
-    DWORD tid = GetCurrentThreadId();
+    ThreadId tid = GetCurrentThreadId();
     {
-        ScopedCritSec scope(&threadCtxsLock);
+        ScopedMutex scope(&threadCtxsLock);
         for (auto& tc : threadCtxs) {
             if (tc.threadID == tid) {
                 return tc.ctx;
@@ -224,43 +198,55 @@ fz_context* EngineImages::Ctx() {
         return fz_ctx; // last-resort fallback; caller will serialize on the root
     }
     {
-        ScopedCritSec scope(&threadCtxsLock);
+        ScopedMutex scope(&threadCtxsLock);
         threadCtxs.Append({tid, newCtx});
     }
     return newCtx;
 }
 
 EngineImages::~EngineImages() {
-    // drop per-thread cloned contexts BEFORE pages: workers are no longer
-    // running by the time we destruct, so this just releases their refcounts
-    // on the shared mupdf state. Pages then drop their pixmaps via the root
-    // ctx in DropPage.
-    for (auto& tc : threadCtxs) {
-        fz_drop_context(tc.ctx);
-    }
-    threadCtxs.Reset();
-
-    EnterCriticalSection(&cacheLock);
+    // logged so a leaked engine can be identified: its creation is logged by
+    // CreateEngineImageFromFile et al. but this line will be missing
+    logf("~EngineImages: '%s'\n", FilePath());
+    cacheLock.Lock();
     while (len(pageCache) > 0) {
         ImagePage* lastPage = pageCache.Last();
         ReportIf(lastPage->refs != 1);
         DropPage(lastPage, true);
     }
     DeleteVecMembers(pageInfos);
-    LeaveCriticalSection(&cacheLock);
-    DeleteCriticalSection(&cacheLock);
+    cacheLock.Unlock();
+
+    // Drop pages before per-thread contexts: DropPage() may need Ctx() to
+    // release a page's fz_image, and dropping clones first can make it create
+    // a replacement context during destruction.
+    for (auto& tc : threadCtxs) {
+        logf("EngineImages::~EngineImages: tc.ctx = %p\n", tc.ctx);
+        fz_drop_context(tc.ctx);
+    }
+    threadCtxs.Reset();
+
     if (fz_ctx) {
         fz_drop_context_windows(fz_ctx);
     }
-    DeleteCriticalSection(&threadCtxsLock);
+    str::Free(sourceData);
 }
 
 // Wrap the page's raw image bytes in an fz_image for lazy mupdf decoding.
 // The actual JPEG/PNG decode happens later in RenderPage at near-target
 // scale, much cheaper than decoding at full resolution up front.
 fz_image* EngineImages::LoadFzImageForPage(fz_context* ctx, int pageNo) {
+    // these are binary bytes and formats like JP2 legitimately start with a 0 byte
     Str data = GetImageData(pageNo);
-    if (str::IsEmpty(data)) {
+    if (len(data) == 0) {
+        return nullptr;
+    }
+    // Prefer PixmapFromData / LoadPixmapForPage over mupdf for formats where a
+    // dedicated path is faster and we do not need mupdf's scaled JPEG decode:
+    //   WebP     → libwebp (bench_image: faster than WIC)
+    //   HEIC/AVIF→ Debug: heicdec then WIC; Release: WIC then heicdec
+    FileType kind = GuessFileTypeFromData(data);
+    if (FileType::Webp == kind || FileType::Heic == kind || FileType::Avif == kind) {
         return nullptr;
     }
     fz_image* img = nullptr;
@@ -284,6 +270,72 @@ fz_image* EngineImages::LoadFzImageForPage(fz_context* ctx, int pageNo) {
     return img;
 }
 
+// partial: data is only the first kImageSizeFromDataPartialSize bytes of the
+// file, so only the header parse can work. The decoders below need the whole
+// image, and running them on a truncated buffer costs a full (failing) decode
+// attempt. Callers that pass partial=true fall back to a full read instead.
+static Size ImageSizeFromDataPortable(Str data, bool partial = false) {
+    if (len(data) == 0) {
+        return {};
+    }
+
+    // cheap: size parsed from image headers (orientation already applied);
+    // for multi-image files (animated GIF, multi-page TIFF) use the first
+    // image's size
+    FileTypeInfo fti = GuessFileInfoFromData(data);
+    Size headerSize;
+    if (fti.hasImageSize) {
+        headerSize = Size(fti.imageDx, fti.imageDy);
+    } else if (fti.imageSizes) {
+        headerSize = fti.imageSizes[0];
+    }
+    FreeFileTypeInfo(&fti);
+    if (!headerSize.IsEmpty()) {
+        return headerSize;
+    }
+    if (partial) {
+        return {};
+    }
+
+    Size res;
+    fz_context* ctx = fz_new_context_windows();
+    if (!ctx) {
+        return {};
+    }
+    fz_buffer* buf = nullptr;
+    fz_image* img = nullptr;
+    fz_var(buf);
+    fz_var(img);
+    fz_try(ctx) {
+        buf = fz_new_buffer_from_shared_data(ctx, (const u8*)data.s, (size_t)data.len);
+        img = fz_new_image_from_buffer(ctx, buf);
+        res = Size(img->w, img->h);
+        uint8_t orientation = img->orientation;
+        if (orientation != 0 && (orientation & 1) == 0) {
+            std::swap(res.dx, res.dy);
+        }
+    }
+    fz_always(ctx) {
+        fz_drop_image(ctx, img);
+        fz_drop_buffer(ctx, buf);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        res = {};
+    }
+    fz_drop_context_windows(ctx);
+    if (!res.IsEmpty()) {
+        return res;
+    }
+
+    Pixmap* pixmap = PixmapFromData(data);
+    if (pixmap) {
+        res = Size(pixmap->width, pixmap->height);
+        FreePixmap(pixmap);
+    }
+    return res;
+}
+
 RectF EngineImages::PageMediabox(int pageNo) {
     ReportIf((pageNo < 1) || (pageNo > pageCount));
     int n = pageNo - 1;
@@ -295,10 +347,7 @@ RectF EngineImages::PageMediabox(int pageNo) {
     return pi->mediabox;
 }
 
-// Wrap a fresh fz_pixmap into a RenderedBitmap (DIB section). Converts to
-// 32bpp BGRA which is the GDI-compatible layout. The pixmap argument is
-// not consumed; the caller keeps ownership and must drop it.
-static RenderedBitmap* FzPixmapToRenderedBitmap(fz_context* ctx, fz_pixmap* pixmap) {
+static Pixmap* FzPixmapToPixmap(fz_context* ctx, fz_pixmap* pixmap) {
     fz_pixmap* bgr = nullptr;
     fz_var(bgr);
     fz_try(ctx) {
@@ -318,53 +367,181 @@ static RenderedBitmap* FzPixmapToRenderedBitmap(fz_context* ctx, fz_pixmap* pixm
     int w = bgr->w;
     int h = bgr->h;
     int n = bgr->n;
-    int bitsCount = n * 8;
-    // DIB rows are DWORD-aligned. mupdf pixmap rows are tightly packed
-    // (stride = n * w). For 24bpp these often differ -- e.g. w=4001, n=3:
-    // dibStride = 12004, pixmap stride = 12003. A bulk memcpy then offsets
-    // every subsequent row by 1 byte and the image renders skewed.
-    int dibStride = ((w * bitsCount + 31) / 32) * 4;
-    int srcStride = (int)bgr->stride;
-    int rowBytes = w * n;
-    int imgSize = dibStride * h;
-
-    BITMAPINFO bmi{};
-    BITMAPINFOHEADER* bmih = &bmi.bmiHeader;
-    bmih->biSize = sizeof(*bmih);
-    bmih->biWidth = w;
-    bmih->biHeight = -h;
-    bmih->biPlanes = 1;
-    bmih->biCompression = BI_RGB;
-    bmih->biBitCount = bitsCount;
-    bmih->biSizeImage = imgSize;
-
-    void* data = nullptr;
-    HANDLE hMap = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, imgSize, nullptr);
-    HBITMAP hbmp = CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &data, hMap, 0);
-    if (data) {
-        u8* dst = (u8*)data;
-        u8* src = bgr->samples;
-        if (srcStride == dibStride) {
-            memcpy(dst, src, imgSize);
-        } else {
-            for (int y = 0; y < h; y++) {
-                memcpy(dst + (size_t)y * dibStride, src + (size_t)y * srcStride, rowBytes);
-            }
+    Pixmap* res = AllocPixmap(w, h, n == 3 ? PixmapFormat::BGR8 : PixmapFormat::BGRA8, n == 4);
+    if (res) {
+        res->xres = (float)bgr->xres;
+        res->yres = (float)bgr->yres;
+        int rowBytes = w * n;
+        for (int y = 0; y < h; y++) {
+            memcpy(res->data + ((size_t)y * res->stride), bgr->samples + ((size_t)y * bgr->stride), rowBytes);
         }
     }
     fz_drop_pixmap(ctx, bgr);
-    if (!hbmp) {
-        if (hMap) {
-            CloseHandle(hMap);
+    return res;
+}
+
+static bool FzImageTooBigToFullyDecode(const fz_image* img) {
+    if (!img || img->w <= 0 || img->h <= 0) {
+        return false;
+    }
+    int n = img->n > 0 ? img->n : 4;
+    return (i64)img->w * img->h * std::max(n, 4) > kMaxDecodedPixmapBytes;
+}
+
+// Shrink a get_pixmap CTM size so mupdf picks an l2factor whose decoded
+// RGB pixmap stays under FZ_MAX_SAMPLES and our BGRA budget. A 39137x22279
+// JPEG at 100% would otherwise decode full-res and throw "Overly large image".
+static void CapFzImageDecodeSize(const fz_image* img, int* w, int* h) {
+    if (!img || !w || !h || *w < 1 || *h < 1) {
+        return;
+    }
+    int n = img->n > 0 ? img->n : 3;
+    i64 maxBytes = kMaxDecodedPixmapBytes;
+    i64 maxSamples = std::min(maxBytes, (i64)(1 << 29));
+    i64 iw = img->w > 0 ? img->w : *w;
+    i64 ih = img->h > 0 ? img->h : *h;
+    int l2 = 0;
+    for (; l2 < 6; l2++) {
+        i64 dw = (iw + (1LL << l2) - 1) >> l2;
+        i64 dh = (ih + (1LL << l2) - 1) >> l2;
+        i64 rgb = dw * dh * n;
+        i64 bgra = dw * dh * 4;
+        if (rgb <= maxSamples && bgra <= maxBytes && dw * n < (INT_MAX / 2)) {
+            break;
         }
+    }
+    i64 maxW = (iw + (1LL << l2) - 1) >> l2;
+    i64 maxH = (ih + (1LL << l2) - 1) >> l2;
+    // mupdf increments l2 while img>>(l2+1) >= req+2, so leave slack
+    int capW = (int)std::max((i64)1, maxW - 4);
+    int capH = (int)std::max((i64)1, maxH - 4);
+    if (*w > capW) {
+        *w = capW;
+    }
+    if (*h > capH) {
+        *h = capH;
+    }
+}
+
+static Pixmap* FzImageToPixmap(fz_context* ctx, fz_image* img) {
+    if (FzImageTooBigToFullyDecode(img)) {
         return nullptr;
     }
-    return new RenderedBitmap(hbmp, Size(w, h), hMap);
+    fz_pixmap* pixmap = nullptr;
+    fz_var(pixmap);
+    fz_try(ctx) {
+        pixmap = fz_get_pixmap_from_image(ctx, img, nullptr, nullptr, nullptr, nullptr);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        return nullptr;
+    }
+    if (!pixmap) {
+        return nullptr;
+    }
+    Pixmap* res = FzPixmapToPixmap(ctx, pixmap);
+    fz_drop_pixmap(ctx, pixmap);
+    return res;
+}
+
+static inline int ClampInt(int v, int minVal, int maxVal) {
+    return std::min(std::max(v, minVal), maxVal);
+}
+
+static void GetPixmapPixelBgra(const Pixmap* pixmap, int x, int y, u8* bgra) {
+    int bpp = PixmapBytesPerPixel(pixmap->format);
+    const u8* src = pixmap->data + ((size_t)y * pixmap->stride) + ((size_t)x * bpp);
+    u8 r, g, b, a;
+    if (pixmap->format == PixmapFormat::RGBA8) {
+        r = src[0];
+        g = src[1];
+        b = src[2];
+        a = src[3];
+    } else {
+        b = src[0];
+        g = src[1];
+        r = src[2];
+        a = pixmap->format == PixmapFormat::BGR8 ? 255 : src[3];
+    }
+
+    if (a < 255) {
+        if (pixmap->premultiplied) {
+            b = (u8)std::min(255, b + (255 - a));
+            g = (u8)std::min(255, g + (255 - a));
+            r = (u8)std::min(255, r + (255 - a));
+        } else {
+            b = (u8)(((b * a) + (255 * (255 - a))) / 255);
+            g = (u8)(((g * a) + (255 * (255 - a))) / 255);
+            r = (u8)(((r * a) + (255 * (255 - a))) / 255);
+        }
+    }
+    bgra[0] = b;
+    bgra[1] = g;
+    bgra[2] = r;
+    bgra[3] = 255;
+}
+
+static uint32_t GetPixmapPixelRgbKey(const Pixmap* pixmap, int x, int y) {
+    u8 bgra[4];
+    GetPixmapPixelBgra(pixmap, x, y, bgra);
+    uint32_t rgb = (bgra[2] << 16) | (bgra[1] << 8) | bgra[0];
+    return rgb & (~0x070707U);
+}
+
+// Print and export targets have to be opaque - paper is white, and an exported
+// bitmap has nowhere to get a backdrop from - so their pages are composited onto
+// white here. Only the canvas asks for keepAlpha, because it paints the document
+// background (a colour, or the checkered pattern) before drawing the page over
+// it. mupdf's alpha is premultiplied, so over-white is c + (255 - a). (#5844)
+static Pixmap* FinishRenderedPage(Pixmap* pix, bool keepAlpha) {
+    if (!pix || keepAlpha || !pix->hasAlpha || pix->format != PixmapFormat::BGRA8 || !pix->data) {
+        return pix;
+    }
+    for (int y = 0; y < pix->height; y++) {
+        u8* d = pix->data + ((size_t)y * pix->stride);
+        for (int x = 0; x < pix->width; x++, d += 4) {
+            u8 a = d[3];
+            if (a == 255) {
+                continue;
+            }
+            if (pix->premultiplied) {
+                d[0] = (u8)std::min(255, d[0] + (255 - a));
+                d[1] = (u8)std::min(255, d[1] + (255 - a));
+                d[2] = (u8)std::min(255, d[2] + (255 - a));
+            } else {
+                d[0] = (u8)(((d[0] * a) + (255 * (255 - a))) / 255);
+                d[1] = (u8)(((d[1] * a) + (255 * (255 - a))) / 255);
+                d[2] = (u8)(((d[2] * a) + (255 * (255 - a))) / 255);
+            }
+            d[3] = 255;
+        }
+    }
+    pix->premultiplied = false;
+    pix->hasAlpha = false;
+    return pix;
+}
+
+// Like GetPixmapPixelBgra() but keeps the alpha instead of compositing onto
+// white, for the render path whose result is drawn over the page background.
+static void GetPixmapPixelBgraKeepAlpha(const Pixmap* pixmap, int x, int y, u8* bgra) {
+    int bpp = PixmapBytesPerPixel(pixmap->format);
+    const u8* src = pixmap->data + ((size_t)y * pixmap->stride) + ((size_t)x * bpp);
+    if (pixmap->format == PixmapFormat::RGBA8) {
+        bgra[0] = src[2];
+        bgra[1] = src[1];
+        bgra[2] = src[0];
+        bgra[3] = src[3];
+        return;
+    }
+    bgra[0] = src[0];
+    bgra[1] = src[1];
+    bgra[2] = src[2];
+    bgra[3] = pixmap->format == PixmapFormat::BGR8 ? 255 : src[3];
 }
 
 Pixmap* EngineImages::RenderPage(RenderPageArgs& args) {
     auto pageNo = args.pageNo;
-    auto pageRect = args.pageRect;
+    auto* pageRect = args.pageRect;
     auto zoom = args.zoom;
     auto rotation = args.rotation;
 
@@ -383,166 +560,254 @@ Pixmap* EngineImages::RenderPage(RenderPageArgs& args) {
 
     RectF mediabox = PageMediabox(pageNo);
     RectF pageRc = pageRect ? *pageRect : mediabox;
+    // Image page space is pixels. A selection that went through CvtFromScreen
+    // comes back ~0.499px off the grid, which enlarges the dest by 1px and
+    // shifts the sample by half a pixel (issue #3434).
+    if (pageRect) {
+        pageRc.x = floorf(pageRc.x + 0.5f);
+        pageRc.y = floorf(pageRc.y + 0.5f);
+        pageRc.dx = floorf(pageRc.dx + 0.5f);
+        pageRc.dy = floorf(pageRc.dy + 0.5f);
+        if (pageRc.dx < 0) {
+            pageRc.x += pageRc.dx;
+            pageRc.dx = -pageRc.dx;
+        }
+        if (pageRc.dy < 0) {
+            pageRc.y += pageRc.dy;
+            pageRc.dy = -pageRc.dy;
+        }
+    }
     Rect screen = Transform(pageRc, pageNo, zoom, rotation).Round();
+    if (screen.IsEmpty()) {
+        DropPage(page, false);
+        return nullptr;
+    }
 
-    // Mupdf fast path: rotation 0 + full-page render + cached fz_image available.
-    // Tiles (pageRect != mediabox) and rotations fall through to the GDI+ path.
-    // Images with EXIF orientation also use the GDI+ path, which applies it.
+    // Mupdf path: rotation 0 + cached fz_image. CTM is the *full page* at the
+    // current zoom (not the tile dest), so JPEG 1/2, 1/4, 1/8 downsampling
+    // kicks in. Tiles pass a subarea; huge images cap the request so a
+    // full-res pixmap cannot exceed FZ_MAX_SAMPLES ("Overly large image").
     uint8_t fzOrientation = page->img ? page->img->orientation : 0;
     bool needsExifOrientation = fzOrientation != 0 && fzOrientation != 1;
     if (page->img && rotation == 0 && !page->failedToLoad && !needsExifOrientation) {
         Rect mediaScreen = Transform(mediabox, pageNo, zoom, rotation).Round();
         bool isFullPage = (mediaScreen.dx == screen.dx && mediaScreen.dy == screen.dy);
-        if (isFullPage) {
-            // Per-thread cloned context lets multiple workers decode/scale concurrently.
-            fz_context* ctx = Ctx();
-            RenderedBitmap* result = nullptr;
-            fz_pixmap* decoded = nullptr;
-            fz_pixmap* scaled = nullptr;
-            fz_var(decoded);
-            fz_var(scaled);
-            // Build a CTM mapping the fz_image unit box (1x1) to target
-            // screen dimensions. mupdf reads |ctm| as the output pixel size
-            // (w = sqrt(ctm.a^2 + ctm.b^2)) and picks a JPEG decode scale
-            // (1, 1/2, 1/4, 1/8) so huge images at small zooms decode
-            // dramatically faster.
-            fz_matrix ctm = fz_scale((float)screen.dx, (float)screen.dy);
-            fz_try(ctx) {
-                int dw = 0, dh = 0;
-                decoded = fz_get_pixmap_from_image(ctx, page->img, nullptr, &ctm, &dw, &dh);
-                if (decoded && (decoded->w != screen.dx || decoded->h != screen.dy)) {
-                    // mupdf decoded at a JPEG-friendly scale that's >= target;
-                    // do the final exact-size scale on the much smaller pixmap.
-                    scaled = fz_scale_pixmap(ctx, decoded, 0, 0, (float)screen.dx, (float)screen.dy, nullptr);
-                }
+        fz_context* ctx = Ctx();
+        Pixmap* result = nullptr;
+        fz_pixmap* decoded = nullptr;
+        fz_pixmap* scaled = nullptr;
+        fz_var(decoded);
+        fz_var(scaled);
+        int reqW = mediaScreen.dx > 0 ? mediaScreen.dx : screen.dx;
+        int reqH = mediaScreen.dy > 0 ? mediaScreen.dy : screen.dy;
+        if (reqW < 1) {
+            reqW = 1;
+        }
+        if (reqH < 1) {
+            reqH = 1;
+        }
+        CapFzImageDecodeSize(page->img, &reqW, &reqH);
+        fz_matrix ctm = fz_scale((float)reqW, (float)reqH);
+        fz_irect subarea;
+        fz_irect* subPtr = nullptr;
+        if (!isFullPage && pageRect) {
+            subarea.x0 = pageRc.x;
+            subarea.y0 = pageRc.y;
+            subarea.x1 = pageRc.x + pageRc.dx;
+            subarea.y1 = pageRc.y + pageRc.dy;
+            if (subarea.x0 < 0) {
+                subarea.x0 = 0;
             }
-            fz_catch(ctx) {
-                fz_report_error(ctx);
+            if (subarea.y0 < 0) {
+                subarea.y0 = 0;
             }
-            fz_pixmap* final = scaled ? scaled : decoded;
-            if (final) {
-                result = FzPixmapToRenderedBitmap(ctx, final);
+            if (subarea.x1 > page->img->w) {
+                subarea.x1 = page->img->w;
             }
-            if (scaled) {
-                fz_drop_pixmap(ctx, scaled);
+            if (subarea.y1 > page->img->h) {
+                subarea.y1 = page->img->h;
             }
-            if (decoded) {
-                fz_drop_pixmap(ctx, decoded);
+            if (subarea.x1 > subarea.x0 && subarea.y1 > subarea.y0) {
+                subPtr = &subarea;
             }
+        }
+        fz_try(ctx) {
+            int dw = 0, dh = 0;
+            decoded = fz_get_pixmap_from_image(ctx, page->img, subPtr, &ctm, &dw, &dh);
+            if (decoded && (decoded->w != screen.dx || decoded->h != screen.dy)) {
+                scaled = fz_scale_pixmap(ctx, decoded, 0, 0, (float)screen.dx, (float)screen.dy, nullptr);
+            }
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+        }
+        fz_pixmap* final = scaled ? scaled : decoded;
+        if (final) {
+            result = FzPixmapToPixmap(ctx, final);
             if (result) {
-                DropPage(page, false);
-                return PixmapFromRenderedBitmap(result);
+                result->hasAlpha = result->format == PixmapFormat::BGRA8;
             }
-            // fall through to GDI+ on failure
+        }
+        if (scaled) {
+            fz_drop_pixmap(ctx, scaled);
+        }
+        if (decoded) {
+            fz_drop_pixmap(ctx, decoded);
+        }
+        if (result) {
+            DropPage(page, false);
+            return FinishRenderedPage(result, args.keepAlpha);
+        }
+        // Huge images cannot fall through to a full-res pixmap
+        if (FzImageTooBigToFullyDecode(page->img)) {
+            logf("EngineImages::RenderPage: scaled decode failed for huge image page %d\n", pageNo);
+            DropPage(page, false);
+            return nullptr;
         }
     }
 
-    // GDI+ path: needs page->bmp. If we only have img (subclass loaded via
-    // mupdf), lazy-load the GDI+ Bitmap on demand for this rare path
-    // (rotation, sub-rect tile, or mupdf decode/scale failure).
-    if (!page->bmp && !page->failedToLoad) {
-        ScopedCritSec scope(&page->drawLock);
-        if (!page->bmp) {
-            bool ownBmp = true;
-            page->bmp = LoadBitmapForPage(pageNo, ownBmp);
-            page->ownBmp = ownBmp;
+    // Pixmap path: needs page->pixmap. If we only have img (subclass loaded via
+    // mupdf), lazy-load/decode the Pixmap on demand for this rare path
+    // (rotation, or mupdf decode/scale failure on a small image).
+    if (!page->pixmap && !page->failedToLoad) {
+        ScopedMutex scope(&page->drawLock);
+        if (!page->pixmap) {
+            bool ownPixmap = true;
+            page->pixmap = LoadPixmapForPage(pageNo, ownPixmap);
+            page->ownPixmap = ownPixmap;
+            if (!page->pixmap && page->img && !FzImageTooBigToFullyDecode(page->img)) {
+                page->pixmap = FzImageToPixmap(Ctx(), page->img);
+                page->ownPixmap = true;
+            }
         }
     }
 
-    Point screenTL = screen.TL();
-    screen.Offset(-screen.x, -screen.y);
-
-    HANDLE hMap = nullptr;
-    HBITMAP hbmp = CreateMemoryBitmap(screen.Size(), &hMap);
-    if (!hbmp) {
+    Pixmap* src = page->pixmap;
+    if (page->failedToLoad || !src || !src->data) {
+        // the image in the archive is corrupt / of an unsupported format. Fail
+        // the render instead of handing back a blank page: the caller marks the
+        // page as failed and the canvas says "Couldn't render page N", where a
+        // blank page just looked like an empty (black) page of the comic (#2199)
+        logf("EngineImages::RenderPage: no image data for page %d, failing the render\n", pageNo);
         DropPage(page, false);
         return nullptr;
     }
-    HDC hDC = CreateCompatibleDC(nullptr);
-    DeleteObject(SelectObject(hDC, hbmp));
 
-    Graphics g(hDC);
-    g.SetCompositingQuality(CompositingQualityHighQuality);
-    if (this->disableAntiAlias) {
-        g.SetSmoothingMode(Gdiplus::SmoothingModeNone);
-        g.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);
-    } else {
-        g.SetSmoothingMode(SmoothingModeAntiAlias);
-        // HighQualityBilinear is several times faster than HighQualityBicubic
-        // and visually indistinguishable for typical photographic content,
-        // especially when downscaling (the common case for image viewing).
-        g.SetInterpolationMode(InterpolationModeHighQualityBilinear);
+#if OS_WIN
+    // read before DropPage() below, which can free page->pixmap, i.e. src
+    bool srcHasAlpha = src->format == PixmapFormat::BGRA8;
+
+    // High-quality scale via GDI+ bicubic. The old per-pixel nearest-neighbor
+    // path looked blocky for Pixmap-only formats (HEIC/AVIF/WebP/JXL) whenever
+    // zoom != 100%. Rotation still uses the fallback below (rare for images).
+    if (NormalizeRotation(rotation) == 0 && screen.dx > 0 && screen.dy > 0) {
+        Gdiplus::Bitmap* srcBmp = WrapPixmapGdiplus(src);
+        if (srcBmp) {
+            auto* dstBmp = new Gdiplus::Bitmap(screen.dx, screen.dy, PixelFormat32bppPARGB);
+            if (dstBmp && dstBmp->GetLastStatus() == Gdiplus::Ok) {
+                Gdiplus::Graphics g(dstBmp);
+                g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+                // HighQuality/Half offsets samples by -0.5px, so a 1:1 or
+                // integer-scaled image lands a half-pixel off and looks
+                // fuzzy (issue #3434). None keeps the image on the pixel grid.
+                g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeNone);
+                // start transparent, not white: the transparent parts of the
+                // image have to stay transparent so the canvas can put the
+                // document background behind them (#5844)
+                g.Clear(Gdiplus::Color(0, 0, 0, 0));
+                // pageRc is in page-pixel coords; screen is the zoomed dest size.
+                Gdiplus::RectF dest(0, 0, (float)screen.dx, (float)screen.dy);
+                g.DrawImage(srcBmp, dest, pageRc.x, pageRc.y, pageRc.dx, pageRc.dy, Gdiplus::UnitPixel);
+                Pixmap* result = PixmapFromGdiplus(dstBmp);
+                delete dstBmp;
+                delete srcBmp;
+                DropPage(page, false);
+                if (result) {
+                    // PixmapFromGdiplus reads back as straight (not premultiplied) ARGB
+                    result->premultiplied = false;
+                    result->hasAlpha = srcHasAlpha;
+                    return FinishRenderedPage(result, args.keepAlpha);
+                }
+            } else {
+                delete dstBmp;
+                delete srcBmp;
+            }
+        }
     }
-    g.SetPageUnit(UnitPixel);
+#endif
 
-    Color white(0xFF, 0xFF, 0xFF);
-    SolidBrush tmpBrush(white);
-    Gdiplus::Rect screenR = ToGdipRect(screen);
-    screenR.Inflate(1, 1);
-    g.FillRectangle(&tmpBrush, screenR);
-
-    if (page->failedToLoad) {
-        // draw error message for pages that failed to load
-        Gdiplus::Font font(L"Arial", 14.0f * zoom);
-        Color red(0xFF, 0xCC, 0x00, 0x00);
-        SolidBrush textBrush(red);
-        Gdiplus::StringFormat sf;
-        sf.SetAlignment(Gdiplus::StringAlignmentCenter);
-        sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-        Gdiplus::RectF layoutRect(0, 0, (float)screen.dx, (float)screen.dy);
-        TempStr msg = fmt("Failed to load page %d", pageNo);
-        WCHAR* msgW = CWStrTemp(msg);
-        g.DrawString(msgW, -1, &font, layoutRect, &sf, &textBrush);
+    // Fallback: nearest-neighbor (rotation, non-Windows, or GDI+ failure).
+    Pixmap* result = AllocPixmap(screen.dx, screen.dy, PixmapFormat::BGRA8, true);
+    if (!result) {
         DropPage(page, false);
-        DeleteDC(hDC);
-        return PixmapFromHBITMAP(hbmp, screen.Size(), hMap);
+        return nullptr;
     }
+    // start fully transparent: pixels outside the media box (a rotated page
+    // doesn't fill its bounding box) and the transparent parts of the image
+    // both have to let the document background through (#5844)
+    memset(result->data, 0, (size_t)result->stride * (size_t)result->height);
+    result->hasAlpha = true;
 
-    Matrix m;
-    GetTransform(m, pageNo, zoom, rotation);
-    m.Translate((float)-screenTL.x, (float)-screenTL.y, MatrixOrderAppend);
-    g.SetTransform(&m);
-
-    Rect pageRcI = PageMediabox(pageNo).Round();
-    ImageAttributes imgAttrs;
-    imgAttrs.SetWrapMode(WrapModeTileFlipXY);
-    Status ok;
-    {
-        // GDI+ Bitmap is not thread-safe; concurrent DrawImage on the same Bitmap
-        // from multiple threads causes InsufficientBuffer (status 4) errors.
-        // Per-page lock: different pages render in parallel, only repeated draws
-        // of the same page serialize.
-        ScopedCritSec scope(&page->drawLock);
-        ok = g.DrawImage(page->bmp, ToGdipRect(pageRcI), pageRcI.x, pageRcI.y, pageRcI.dx, pageRcI.dy, UnitPixel,
-                         &imgAttrs);
+    RectF mediaBox = PageMediabox(pageNo);
+    for (int y = 0; y < result->height; y++) {
+        u8* dst = result->data + ((size_t)y * result->stride);
+        for (int x = 0; x < result->width; x++) {
+            PointF devPt((float)(screen.x + x) + 0.5f, (float)(screen.y + y) + 0.5f);
+            PointF srcPt = TransformPoint(devPt, pageNo, zoom, rotation, true);
+            if (!mediaBox.Contains(srcPt)) {
+                dst += 4;
+                continue;
+            }
+            int sx = ClampInt((int)srcPt.x, 0, src->width - 1);
+            int sy = ClampInt((int)srcPt.y, 0, src->height - 1);
+            GetPixmapPixelBgraKeepAlpha(src, sx, sy, dst);
+            dst += 4;
+        }
     }
-
+    result->premultiplied = src->premultiplied;
     DropPage(page, false);
-    DeleteDC(hDC);
-
-    if (ok != Ok) {
-        DeleteObject(hbmp);
-        CloseHandle(hMap);
-        return nullptr;
-    }
-
-    return PixmapFromHBITMAP(hbmp, screen.Size(), hMap);
+    return FinishRenderedPage(result, args.keepAlpha);
 }
 
-void EngineImages::GetTransform(Matrix& m, int pageNo, float zoom, int rotation) {
-    GetBaseTransform(m, ToGdipRectF(PageMediabox(pageNo)), zoom, rotation);
+PointF EngineImages::TransformPoint(PointF pt, int pageNo, float zoom, int rotation, bool inverse) {
+    ReportIf(zoom <= 0);
+    if (zoom <= 0) {
+        return pt;
+    }
+    // Rotation 0 only scales. Don't force-load the media box: continuous
+    // fit-width used to call Transform for every page, and LoadMediabox on a
+    // comic archive extracts that page.
+    SizeF page;
+    if (NormalizeRotation(rotation) != 0) {
+        page = PageMediabox(pageNo).Size();
+    }
+    if (inverse) {
+        page.dx *= zoom;
+        page.dy *= zoom;
+        if (rotation % 180 != 0) {
+            std::swap(page.dx, page.dy);
+        }
+        rotation = -rotation;
+        zoom = 1.0f / zoom;
+    }
+    rotation = NormalizeRotation(rotation);
+    PointF res = pt;
+    if (rotation == 90) {
+        res = PointF(page.dy - pt.y, pt.x);
+    } else if (rotation == 180) {
+        res = PointF(page.dx - pt.x, page.dy - pt.y);
+    } else if (rotation == 270) {
+        res = PointF(pt.y, page.dx - pt.x);
+    }
+    res.x *= zoom;
+    res.y *= zoom;
+    return res;
 }
 
 RectF EngineImages::Transform(const RectF& rect, int pageNo, float zoom, int rotation, bool inverse) {
-    Gdiplus::PointF pts[2] = {Gdiplus::PointF((float)rect.x, (float)rect.y),
-                              Gdiplus::PointF((float)(rect.x + rect.dx), (float)(rect.y + rect.dy))};
-    Matrix m;
-    GetTransform(m, pageNo, zoom, rotation);
-    if (inverse) {
-        m.Invert();
-    }
-    m.TransformPoints(pts, 2);
-    RectF res = RectF::FromXY(pts[0].X, pts[0].Y, pts[1].X, pts[1].Y);
+    PointF tl = TransformPoint(rect.TL(), pageNo, zoom, rotation, inverse);
+    PointF br = TransformPoint(rect.BR(), pageNo, zoom, rotation, inverse);
+    RectF res = RectF::FromXY(tl, br);
     // try to undo rounding errors caused by a rotation
     // (necessary correction determined by experimentation)
     if (rotation != 0) {
@@ -551,27 +816,20 @@ RectF EngineImages::Transform(const RectF& rect, int pageNo, float zoom, int rot
     return res;
 }
 
-static IPageElement* NewImageElement(int pageNo, float dx, float dy) {
-    auto res = new PageElementImage();
-    res->pageNo = pageNo;
-    res->rect = RectF(0, 0, dx, dy);
-    res->imageID = pageNo;
-    return res;
-}
-
 // don't delete the result
 Vec<IPageElement*> EngineImages::GetElements(int pageNo) {
     ReportIf(pageNo < 1 || pageNo > pageCount);
     auto* pi = pageInfos[pageNo - 1];
-    if (len(pi->allElements) > 0) {
+    if (pi->hasImageElement) {
         return pi->allElements;
     }
     auto mbox = PageMediabox(pageNo);
 
-    float dx = mbox.dx;
-    float dy = mbox.dy;
-    auto el = NewImageElement(pageNo, dx, dy);
-    pi->allElements.Append(el);
+    pi->imageElement.pageNo = pageNo;
+    pi->imageElement.rect = RectF(0, 0, mbox.dx, mbox.dy);
+    pi->imageElement.imageID = pageNo;
+    pi->allElements.Append(&pi->imageElement);
+    pi->hasImageElement = true;
     return pi->allElements;
 }
 
@@ -589,10 +847,14 @@ IPageElement* EngineImages::GetElementAtPos(int pageNo, PointF pt) {
 }
 
 RenderedBitmap* EngineImages::GetImageForPageElement(IPageElement* pel) {
+#if !OS_WIN
+    (void)pel;
+    return nullptr;
+#else
     ReportIf(pel->GetKind() != kindPageElementImage);
-    auto ipel = (PageElementImage*)pel;
+    auto* ipel = (PageElementImage*)pel;
     int pageNo = ipel->pageNo;
-    auto page = GetPage(pageNo);
+    auto* page = GetPage(pageNo);
     if (!page || page->failedToLoad) {
         if (page) {
             DropPage(page, false);
@@ -600,50 +862,54 @@ RenderedBitmap* EngineImages::GetImageForPageElement(IPageElement* pel) {
         return nullptr;
     }
 
-    // mupdf fz_image path leaves page->bmp null; lazy-load the GDI+ Bitmap
-    if (!page->bmp && !page->failedToLoad) {
-        ScopedCritSec scope(&page->drawLock);
-        if (!page->bmp) {
-            bool ownBmp = true;
-            page->bmp = LoadBitmapForPage(pageNo, ownBmp);
-            page->ownBmp = ownBmp;
+    if (!page->pixmap && !page->failedToLoad) {
+        ScopedMutex scope(&page->drawLock);
+        if (!page->pixmap) {
+            bool ownPixmap = true;
+            page->pixmap = LoadPixmapForPage(pageNo, ownPixmap);
+            page->ownPixmap = ownPixmap;
+            if (!page->pixmap && page->img) {
+                page->pixmap = FzImageToPixmap(Ctx(), page->img);
+                page->ownPixmap = true;
+            }
         }
     }
-    if (!page->bmp) {
+    if (!page->pixmap) {
         DropPage(page, false);
         return nullptr;
     }
 
-    HBITMAP hbmp;
-    auto bmp = page->bmp;
-    int dx = bmp->GetWidth();
-    int dy = bmp->GetHeight();
-    Size s{dx, dy};
-    auto status = bmp->GetHBITMAP((ARGB)Color::White, &hbmp);
+    Pixmap* pixmap = ClonePixmap(page->pixmap);
     DropPage(page, false);
-    if (status != Ok) {
-        return nullptr;
+    return RenderedBitmapFromPixmap(pixmap);
+#endif
+}
+
+Str EngineImages::GetImageDataForPageElement(IPageElement* pel) {
+    if (!pel || pel->GetKind() != kindPageElementImage) {
+        return {};
     }
-    return new RenderedBitmap(hbmp, s);
+    return str::Dup(GetImageData(pel->GetPageNo()));
 }
 
 Str EngineImages::GetFileData() {
-    return GetStreamOrFileData(fileStream.Get(), FilePath());
+    Str path = FilePath();
+    if (path) {
+        return file::ReadFile(path);
+    }
+    return str::Dup(sourceData);
+}
+
+i64 EngineImages::GetImageByteSize(int pageNo) {
+    TempStr path = GetImagePathTemp(pageNo);
+    if (path && file::Exists(path)) {
+        return file::GetSize(path);
+    }
+    return -1;
 }
 
 bool EngineImages::SaveFileAs(Str dstPath) {
-    Str srcPath = FilePath();
-    if (srcPath) {
-        bool ok = file::Copy(dstPath, srcPath, false);
-        if (ok) {
-            return true;
-        }
-    }
-    Str d = GetFileData();
-    if (str::IsEmpty(d)) {
-        return false;
-    }
-    return file::WriteFile(dstPath, d);
+    return SaveFileOrData(FilePath(), sourceData, dstPath);
 }
 
 ImagePage* EngineImages::GetPage(int pageNo, bool tryOnly) {
@@ -652,11 +918,11 @@ ImagePage* EngineImages::GetPage(int pageNo, bool tryOnly) {
     bool waitForLoad = false;
 
     {
-        ScopedCritSec scope(&cacheLock);
+        ScopedRecursiveMutex scope(&cacheLock);
 
         for (int i = 0; i < len(pageCache); i++) {
-            if (pageCache.at(i)->pageNo == pageNo) {
-                result = pageCache.at(i);
+            if (pageCache[i]->pageNo == pageNo) {
+                result = pageCache[i];
                 break;
             }
         }
@@ -676,15 +942,13 @@ ImagePage* EngineImages::GetPage(int pageNo, bool tryOnly) {
             result->loading = true;
             pageCache.InsertAt(0, result);
             isLoader = true;
-        } else if (result != pageCache.at(0)) {
+        } else if (result != pageCache[0]) {
             // keep the list Most Recently Used first
             pageCache.Remove(result);
             pageCache.InsertAt(0, result);
         }
 
-        if (!isLoader && result->loading) {
-            waitForLoad = true;
-        }
+        waitForLoad = !isLoader;
         // ++ under lock: prevents racing with eviction that would otherwise
         // delete the page between our lookup and our ref bump.
         AtomicIntInc(&result->refs);
@@ -695,28 +959,34 @@ ImagePage* EngineImages::GetPage(int pageNo, bool tryOnly) {
         // (refs >= 2) so it can't be deleted under us, even if some other
         // thread evicts it from the cache while we're working.
         // Try the mupdf image path first (lazy decode at render time at near-
-        // target scale); fall back to GDI+ Bitmap if the subclass opts out
+        // target scale); fall back to Pixmap if the subclass opts out
         // or mupdf can't handle the format.
         fz_image* img = LoadFzImageForPage(Ctx(), pageNo);
-        Bitmap* bmp = nullptr;
-        bool ownBmp = true;
+        Pixmap* pixmap = nullptr;
+        bool ownPixmap = true;
         if (!img) {
-            bmp = LoadBitmapForPage(pageNo, ownBmp);
+            pixmap = LoadPixmapForPage(pageNo, ownPixmap);
         }
         {
-            ScopedCritSec scope(&cacheLock);
+            ScopedRecursiveMutex scope(&cacheLock);
             result->img = img;
-            result->bmp = bmp;
-            result->ownBmp = ownBmp;
-            if (!img && !bmp) {
+            result->pixmap = pixmap;
+            result->ownPixmap = ownPixmap;
+            if (!img && !pixmap) {
                 result->failedToLoad = true;
             }
-            result->loading = false;
         }
-        SetEvent(result->loadedEvent);
+        {
+            ScopedMutex scope(&result->loadLock);
+            result->loading = false;
+            result->loaded.WakeAll();
+        }
     } else if (waitForLoad) {
         // Another thread is decoding this same page; wait for it to finish.
-        WaitForSingleObject(result->loadedEvent, INFINITE);
+        ScopedMutex scope(&result->loadLock);
+        while (result->loading) {
+            result->loaded.Wait(&result->loadLock);
+        }
     }
 
     return result;
@@ -733,14 +1003,14 @@ void EngineImages::DropPage(ImagePage* page, bool forceRemove) {
     }
 
     {
-        ScopedCritSec scope(&cacheLock);
+        ScopedRecursiveMutex scope(&cacheLock);
         // pageCache.Remove is a no-op if the page was already evicted earlier
         pageCache.Remove(page);
     }
 
     if (newRefs == 0) {
-        if (page->ownBmp) {
-            delete page->bmp;
+        if (page->ownPixmap) {
+            FreePixmap(page->pixmap);
         }
         if (page->img) {
             // safe across threads: fz_drop_image uses our per-thread cloned
@@ -753,23 +1023,36 @@ void EngineImages::DropPage(ImagePage* page, bool forceRemove) {
 }
 
 // Get content box for image by cropping out margins of similar color
-RectF EngineImages::PageContentBox(int pageNo, RenderTarget target) {
+RectF EngineImages::PageContentBox(int pageNo, RenderTarget /*target*/) {
     // try to load bitmap for the image
-    auto page = GetPage(pageNo, true);
+    auto* page = GetPage(pageNo, true);
     if (!page) return RectF{};
     defer {
         DropPage(page, false);
     };
 
-    auto bmp = page->bmp;
-    if (!bmp) return RectF{};
+    if (!page->pixmap && !page->failedToLoad) {
+        ScopedMutex scope(&page->drawLock);
+        if (!page->pixmap) {
+            bool ownPixmap = true;
+            page->pixmap = LoadPixmapForPage(pageNo, ownPixmap);
+            page->ownPixmap = ownPixmap;
+            if (!page->pixmap && page->img) {
+                page->pixmap = FzImageToPixmap(Ctx(), page->img);
+                page->ownPixmap = true;
+            }
+        }
+    }
 
-    const int w = bmp->GetWidth(), h = bmp->GetHeight();
+    auto* pixmap = page->pixmap;
+    if (!pixmap || !pixmap->data) return RectF{};
+
+    const int w = pixmap->width, h = pixmap->height;
 
     // Handle degenerate cases where the image is too small for margin detection
     // Minimum sensible dimension for margin cropping is about 10 pixels
     if (w < 10 || h < 10) {
-        return RectF(0, 0, (float)w, (float)h);
+        return {0, 0, (float)w, (float)h};
     }
 
     // don't need pixel-perfect margin, so scan 200 points at most
@@ -777,34 +1060,9 @@ RectF EngineImages::PageContentBox(int pageNo, RenderTarget target) {
 
     Rect r(0, 0, w, h);
 
-    auto fmt = bmp->GetPixelFormat();
-    // getPixel can work with the following formats, otherwise convert it to 24bppRGB
-    switch (fmt) {
-        case PixelFormat24bppRGB:
-        case PixelFormat32bppRGB:
-        case PixelFormat32bppARGB:
-        case PixelFormat32bppPARGB:
-            break;
-        default:
-            fmt = PixelFormat24bppRGB;
-    }
-    const int bytesPerPixel = ((fmt >> 8) & 0xff) / 8; // either 3 or 4
-
-    Gdiplus::BitmapData bmpData;
-    // lock bitmap
-    {
-        Gdiplus::Rect bmpRect(0, 0, w, h);
-        Gdiplus::Status lock = bmp->LockBits(&bmpRect, Gdiplus::ImageLockModeRead, fmt, &bmpData);
-        if (lock != Gdiplus::Ok) return RectF{};
-    }
-
-    auto getPixel = [&bmpData, bytesPerPixel](int x, int y) -> uint32_t {
-        ReportIf(x < 0 || x >= (int)bmpData.Width || y < 0 || y >= (int)bmpData.Height);
-        auto data = static_cast<const uint8_t*>(bmpData.Scan0);
-        unsigned idx = bytesPerPixel * x + bmpData.Stride * y;
-        uint32_t rgb = (data[idx + 2] << 16) | (data[idx + 1] << 8) | data[idx];
-        // ignore the lowest 3 bits (7=0b111) of each color component
-        return rgb & (~0x070707U);
+    auto getPixel = [pixmap](int x, int y) -> uint32_t {
+        ReportIf(x < 0 || x >= pixmap->width || y < 0 || y >= pixmap->height);
+        return GetPixmapPixelRgbKey(pixmap, x, y);
     };
 
     uint32_t marginColor;
@@ -853,8 +1111,6 @@ RectF EngineImages::PageContentBox(int pageNo, RenderTarget target) {
         }
         if (!ok) break;
     }
-    bmp->UnlockBits(&bmpData);
-
     return ToRectF(r);
 }
 
@@ -867,26 +1123,26 @@ class EngineImage : public EngineImages {
 
     EngineBase* Clone() override;
 
-    TempStr GetPropertyTemp(Str name) override;
-    void GetProperties(StrVec& keyValOut) override;
-    void GetImageProperties(int pageNo, StrVec& keyValOut);
+    TempStr GetPropertyTemp(DocProp prop) override;
+    void GetProperties(Props& propsOut) override;
 
-    static EngineBase* CreateFromFile(Str fileName);
-    static EngineBase* CreateFromStream(IStream* stream);
+    static EngineBase* CreateFromFile(Str path);
+    static EngineBase* CreateFromData(Str data);
 
     // decoded frames: 1 for normal images, N for multi-page TIFF / animated GIF.
-    // owned by the engine; per-page Gdiplus::Bitmaps borrow these (WrapPixmapGdiplus).
+    // owned by the engine; per-page cache entries may borrow these.
     Vec<Pixmap*> frames;
-    Kind imageFormat = nullptr;
+    FileType imageFormat = FileType::Unknown;
 
-    bool LoadSingleFile(Str fileName);
-    bool LoadFromStream(IStream* stream);
-    bool FinishLoading();
+    bool LoadSingleFile(Str path);
+    bool LoadFromData(Str data);
+    bool FinishLoading(Size fallbackSize = {});
 
-    Bitmap* LoadBitmapForPage(int pageNo, bool& deleteAfterUse) override;
+    Pixmap* LoadPixmapForPage(int pageNo, bool& deleteAfterUse) override;
     fz_image* LoadFzImageForPage(fz_context* ctx, int pageNo) override;
     RectF LoadMediabox(int pageNo) override;
     Str GetImageData(int pageNo) override;
+    i64 GetImageByteSize(int pageNo) override;
 };
 
 EngineImage::EngineImage() {
@@ -900,8 +1156,8 @@ EngineImage::~EngineImage() {
 }
 
 EngineBase* EngineImage::Clone() {
-    if (frames.empty() || !frames[0]) {
-        logf("EngineImage::Clone() failed: no frames for '%s'\n", FilePath() ? FilePath() : StrL("(null)"));
+    if ((len(frames) == 0 || !frames[0]) && len(pageInfos) == 0) {
+        logf("EngineImage::Clone() failed: no image data for '%s'\n", FilePath() ? FilePath() : StrL("(null)"));
         return nullptr;
     }
 
@@ -910,13 +1166,15 @@ EngineBase* EngineImage::Clone() {
     clone->defaultExt = str::Dup(defaultExt);
     clone->imageFormat = imageFormat;
     clone->fileDPI = fileDPI;
-    if (fileStream) {
-        fileStream->Clone(&clone->fileStream);
-    }
+    clone->sourceData = str::Dup(sourceData);
     for (Pixmap* px : frames) {
         clone->frames.Append(ClonePixmap(px));
     }
-    clone->FinishLoading();
+    Size fallbackSize;
+    if (len(pageInfos) > 0) {
+        fallbackSize = PageMediabox(1).Round().Size();
+    }
+    clone->FinishLoading(fallbackSize);
 
     return clone;
 }
@@ -928,13 +1186,13 @@ bool EngineImage::LoadSingleFile(Str path) {
     SetFilePath(path);
 
     Str data = file::ReadFile(path);
-    imageFormat = GuessFileTypeFromContent(data);
-    if (imageFormat == nullptr) {
+    imageFormat = GuessFileTypeFromData(data);
+    if (imageFormat == FileType::Unknown) {
         imageFormat = GuessFileTypeFromName(path);
     }
-    if (imageFormat == nullptr) {
-        logfa("EngineImage::LoadSingleFile: '%s'\n", path);
-        ReportIf(imageFormat == nullptr);
+    if (imageFormat == FileType::Unknown) {
+        logf("EngineImage::LoadSingleFile: '%s'\n", path);
+        ReportIf(imageFormat == FileType::Unknown);
     }
 
     // TODO: maybe default to file extension and only use detected from content
@@ -943,7 +1201,7 @@ bool EngineImage::LoadSingleFile(Str path) {
     if (!fileExt) {
         // imageFormat already holds the Kind we resolved above; skip the
         // redundant GuessFileTypeFromName call.
-        fileExt = GfxFileExtFromKindTemp(imageFormat);
+        fileExt = GfxFileExtFromTypeTemp(imageFormat);
     }
     if (!fileExt) {
         fileExt = path::GetExtTemp(path);
@@ -952,8 +1210,16 @@ bool EngineImage::LoadSingleFile(Str path) {
         fileExt = StrL("");
     }
     SetDefaultExt(defaultExt, fileExt);
-    frames = PixmapsFromData(data);
-    bool ok = FinishLoading();
+    Size fallbackSize = ImageSizeFromDataPortable(data);
+    // Huge scans (e.g. 39137x22279 JPEG ≈ 3.5GB BGRA) must not be fully
+    // decoded on open. 3.5.2 kept a GDI+ Bitmap and drew it at window size;
+    // we keep the encoded bytes and let RenderPage decode at display scale.
+    if (!ImageDecodedPixmapWouldBeHuge(data)) {
+        frames = PixmapsFromData(data);
+    } else {
+        logf("EngineImage::LoadSingleFile: skip eager decode of %dx%d '%s'\n", fallbackSize.dx, fallbackSize.dy, path);
+    }
+    bool ok = FinishLoading(fallbackSize);
     if (ok) {
         pageInfos[0]->rawData = data;
     } else {
@@ -962,44 +1228,42 @@ bool EngineImage::LoadSingleFile(Str path) {
     return ok;
 }
 
-bool EngineImage::LoadFromStream(IStream* stream) {
-    if (!stream) {
+bool EngineImage::LoadFromData(Str data) {
+    if (len(data) == 0) {
         return false;
     }
-    fileStream = stream;
-    fileStream->AddRef();
+    sourceData = str::Dup(data);
 
-    Str fileExt;
-    u8 header[18];
-    if (ReadDataFromStream(stream, header, sizeof(header))) {
-        Str d = Str((char*)header, (int)sizeof(header));
-        fileExt = GfxFileExtFromDataTemp(d);
-    }
+    Str fileExt = GfxFileExtFromDataTemp(data);
     if (!fileExt) {
         return false;
     }
     SetDefaultExt(defaultExt, path::GetExtTemp(fileExt));
 
-    Str data = GetDataFromStream(stream, nullptr);
-    frames = PixmapsFromData(data);
-    bool ok = FinishLoading();
+    Size fallbackSize = ImageSizeFromDataPortable(data);
+    if (!ImageDecodedPixmapWouldBeHuge(data)) {
+        frames = PixmapsFromData(data);
+    }
+    bool ok = FinishLoading(fallbackSize);
     if (ok) {
-        pageInfos[0]->rawData = data;
-    } else {
-        str::Free(data);
+        pageInfos[0]->rawData = str::Dup(data);
     }
     return ok;
 }
 
-bool EngineImage::FinishLoading() {
-    if (frames.empty() || !frames[0]) {
+bool EngineImage::FinishLoading(Size fallbackSize) {
+    if ((len(frames) == 0 || !frames[0]) && fallbackSize.IsEmpty()) {
         return false;
     }
-    Pixmap* p0 = frames[0];
-    fileDPI = p0->xres;
+    Pixmap* p0 = len(frames) == 0 ? nullptr : frames[0];
+    if (p0) {
+        fileDPI = p0->xres;
+    }
 
-    auto pi = new ImagePageInfo();
-    pi->mediabox = RectF(0, 0, (float)p0->width, (float)p0->height);
+    auto* pi = new ImagePageInfo();
+    int w = p0 ? p0->width : fallbackSize.dx;
+    int h = p0 ? p0->height : fallbackSize.dy;
+    pi->mediabox = RectF(0, 0, (float)w, (float)h);
     pageInfos.Append(pi);
     pi->state = PageInfoState::Known;
 
@@ -1012,411 +1276,191 @@ bool EngineImage::FinishLoading() {
     return pageCount > 0;
 }
 
-#ifndef PropertyTagXPTitle
-#define PropertyTagXPTitle 0x9c9b
-#define PropertyTagXPComment 0x9c9c
-#define PropertyTagXPAuthor 0x9c9d
-#define PropertyTagXPKeywords 0x9c9e
-#define PropertyTagXPSubject 0x9c9f
-#endif
-
-static bool GetImagePropertyItem(Bitmap* bmp, PROPID id, PropertyItem** itemOut) {
-    uint size = bmp->GetPropertyItemSize(id);
-    if (size == 0) {
-        return false;
-    }
-    PropertyItem* item = (PropertyItem*)malloc(size);
-    if (!item) {
-        return false;
-    }
-    Status ok = bmp->GetPropertyItem(id, size, item);
-    if (ok != Ok) {
-        free(item);
-        return false;
-    }
-    *itemOut = item;
-    return true;
+static bool GetExifInt(const ExifParser& parser, ExifProp prop, i64& val) {
+    return parser.GetIntProp(prop, &val);
 }
 
-// get a rational property as numerator/denominator
-static bool GetImagePropertyRational(Bitmap* bmp, PROPID id, ULONG& num, ULONG& den) {
-    PropertyItem* item = nullptr;
-    if (!GetImagePropertyItem(bmp, id, &item)) {
-        return false;
-    }
-    bool ok = (item->type == PropertyTagTypeRational) && (item->length >= 8);
-    if (ok) {
-        num = ((ULONG*)item->value)[0];
-        den = ((ULONG*)item->value)[1];
-    }
-    free(item);
-    return ok;
+static bool GetExifFloat(const ExifParser& parser, ExifProp prop, double& val) {
+    return parser.GetFloatProp(prop, &val);
 }
 
-// get a short/long integer property
-static bool GetImagePropertyLong(Bitmap* bmp, PROPID id, ULONG& val) {
-    PropertyItem* item = nullptr;
-    if (!GetImagePropertyItem(bmp, id, &item)) {
-        return false;
+static void AddExifStringProp(Props& propsOut, DocProp docProp, const ExifParser& parser, ExifProp prop,
+                              ExifProp altProp = ExifProp::None) {
+    TempStr val = parser.GetStringProp(prop, altProp);
+    if (val) {
+        AddProp(propsOut, docProp, val);
     }
-    bool ok = false;
-    if (item->type == PropertyTagTypeShort && item->length >= 2) {
-        val = *(USHORT*)item->value;
-        ok = true;
-    } else if (item->type == PropertyTagTypeLong && item->length >= 4) {
-        val = *(ULONG*)item->value;
-        ok = true;
-    }
-    free(item);
-    return ok;
 }
 
-static TempStr GetImagePropertyTemp(Bitmap* bmp, PROPID id, PROPID altId = 0) {
-    TempStr value = nullptr;
-    uint size = bmp->GetPropertyItemSize(id);
-    if (size == 0) {
-        return altId == 0 ? nullptr : GetImagePropertyTemp(bmp, altId);
-    }
-    PropertyItem* item = (PropertyItem*)AllocArrayTemp<u8>((int)size);
-    if (!item) return {};
-    Status ok = bmp->GetPropertyItem(id, size, item);
-    if (Ok != ok) {
-        /* property didn't exist */;
-        return altId == 0 ? nullptr : GetImagePropertyTemp(bmp, altId);
-    } else if (PropertyTagTypeASCII == item->type) {
-        value = strconv::AnsiToUtf8Temp(Str((char*)(item->value), (int)(size)));
-    } else if (PropertyTagTypeByte == item->type && item->length > 0 && 0 == (item->length % 2) &&
-               !((WCHAR*)item->value)[item->length / 2 - 1]) {
-        value = ToUtf8Temp((WCHAR*)item->value);
-    }
-    if (str::IsEmptyOrWhiteSpace(value)) {
-        return altId == 0 ? nullptr : GetImagePropertyTemp(bmp, altId);
-    }
-    return value;
-}
-
-// load bitmap using GDI+ Bitmap::FromStream which preserves EXIF metadata
-// PixmapFromData() uses WIC which decodes to raw pixels, losing EXIF
-static Bitmap* BitmapWithExifFromData(Str data) {
-    if (str::IsEmpty(data)) {
+TempStr EngineImage::GetPropertyTemp(DocProp prop) {
+    Str data = file::ReadFile(FilePath());
+    if (len(data) == 0) {
         return nullptr;
     }
-    IStream* strm = CreateStreamFromData(data);
-    if (!strm) {
-        return nullptr;
-    }
-    Bitmap* bmp = Gdiplus::Bitmap::FromStream(strm);
-    strm->Release();
-    if (bmp && bmp->GetLastStatus() != Ok) {
-        delete bmp;
-        return nullptr;
-    }
-    return bmp;
-}
 
-static Bitmap* BitmapWithExifFromFile(Str path) {
-    if (!path) {
-        return nullptr;
-    }
-    Str data = file::ReadFile(path);
-    Bitmap* bmp = BitmapWithExifFromData(data);
-    str::Free(data);
-    return bmp;
-}
-
-TempStr EngineImage::GetPropertyTemp(Str name) {
-    Bitmap* bmp = BitmapWithExifFromFile(FilePath());
+    ExifParser parser;
     TempStr res = nullptr;
-    if (bmp) {
-        if (str::Eq(name, kPropTitle)) {
-            res = GetImagePropertyTemp(bmp, PropertyTagImageDescription, PropertyTagXPTitle);
-        } else if (str::Eq(name, kPropSubject)) {
-            res = GetImagePropertyTemp(bmp, PropertyTagXPSubject);
-        } else if (str::Eq(name, kPropAuthor)) {
-            res = GetImagePropertyTemp(bmp, PropertyTagArtist, PropertyTagXPAuthor);
-        } else if (str::Eq(name, kPropCopyright)) {
-            res = GetImagePropertyTemp(bmp, PropertyTagCopyright);
-        } else if (str::Eq(name, kPropCreationDate)) {
-            res = GetImagePropertyTemp(bmp, PropertyTagDateTime, PropertyTagExifDTDigitized);
-        } else if (str::Eq(name, kPropCreatorApp)) {
-            res = GetImagePropertyTemp(bmp, PropertyTagSoftwareUsed);
+    if (parser.Parse(data)) {
+        if (prop == DocProp::Title) {
+            res = parser.GetStringProp(ExifProp::ImageDescription, ExifProp::XPTitle);
+        } else if (prop == DocProp::Subject) {
+            res = parser.GetStringProp(ExifProp::XPSubject);
+        } else if (prop == DocProp::Author) {
+            res = parser.GetStringProp(ExifProp::Artist, ExifProp::XPAuthor);
+        } else if (prop == DocProp::Copyright) {
+            res = parser.GetStringProp(ExifProp::Copyright);
+        } else if (prop == DocProp::CreationDate) {
+            res = parser.GetStringProp(ExifProp::DateTime, ExifProp::DateTimeDigitized);
+        } else if (prop == DocProp::CreatorApp) {
+            res = parser.GetStringProp(ExifProp::Software);
         }
-        delete bmp;
     }
+    str::Free(data);
     return res;
 }
 
-static void GetBitmapExifProperties(Bitmap* bmp, StrVec& keyValOut) {
+static void AddParsedExifProperties(Str data, const ExifParser& parser, Props& propsOut) {
     TempStr val;
+    i64 intVal;
+    double fVal;
 
-    // image dimensions
-    uint w = bmp->GetWidth();
-    uint h = bmp->GetHeight();
-    if (w > 0 && h > 0) {
-        val = fmt("%u x %u", w, h);
-        AddProp(keyValOut, kPropImageSize, val);
+    Size imgSize = ImageSizeFromDataPortable(data);
+    if (!imgSize.IsEmpty()) {
+        AddProp(propsOut, DocProp::ImageSize, fmt("%d x %d", imgSize.dx, imgSize.dy));
+    } else {
+        i64 w = 0, h = 0;
+        if ((!GetExifInt(parser, ExifProp::ExifImageWidth, w) && !GetExifInt(parser, ExifProp::ImageWidth, w)) ||
+            (!GetExifInt(parser, ExifProp::ExifImageLength, h) && !GetExifInt(parser, ExifProp::ImageLength, h))) {
+            w = h = 0;
+        }
+        if (w > 0 && h > 0) {
+            AddProp(propsOut, DocProp::ImageSize, fmt("%d x %d", (int)w, (int)h));
+        }
     }
 
-    // DPI
-    float dpiX = bmp->GetHorizontalResolution();
-    float dpiY = bmp->GetVerticalResolution();
-    if (dpiX > 0 && dpiY > 0) {
+    double dpiX = 0;
+    double dpiY = 0;
+    if (GetExifFloat(parser, ExifProp::XResolution, dpiX) && GetExifFloat(parser, ExifProp::YResolution, dpiY) &&
+        dpiX > 0 && dpiY > 0) {
         if (dpiX == dpiY) {
-            val = fmt("%.0f", dpiX);
+            AddProp(propsOut, DocProp::Dpi, fmt("%.0f", dpiX));
         } else {
-            val = fmt("%.0f x %.0f", dpiX, dpiY);
-        }
-        AddProp(keyValOut, kPropDpi, val);
-    }
-
-    // keywords
-    val = GetImagePropertyTemp(bmp, PropertyTagXPKeywords);
-    if (val) {
-        AddProp(keyValOut, kPropKeywords, val);
-    }
-
-    // comment
-    val = GetImagePropertyTemp(bmp, PropertyTagXPComment);
-    if (val) {
-        AddProp(keyValOut, kPropComment, val);
-    }
-
-    // camera make and model
-    val = GetImagePropertyTemp(bmp, PropertyTagEquipMake);
-    if (val) {
-        AddProp(keyValOut, kPropCameraMake, val);
-    }
-    val = GetImagePropertyTemp(bmp, PropertyTagEquipModel);
-    if (val) {
-        AddProp(keyValOut, kPropCameraModel, val);
-    }
-
-    // date original
-    val = GetImagePropertyTemp(bmp, PropertyTagExifDTOrig);
-    if (val) {
-        AddProp(keyValOut, kPropDateOriginal, val);
-    }
-
-    // exposure time
-    ULONG num, den;
-    if (GetImagePropertyRational(bmp, PropertyTagExifExposureTime, num, den)) {
-        if (den > 0 && num > 0) {
-            if (num == 1) {
-                val = fmt("1/%u s", den);
-            } else {
-                val = fmt("%u/%u s", num, den);
-            }
-            AddProp(keyValOut, kPropExposureTime, val);
+            AddProp(propsOut, DocProp::Dpi, fmt("%.0f x %.0f", dpiX, dpiY));
         }
     }
 
-    // f-number
-    if (GetImagePropertyRational(bmp, PropertyTagExifFNumber, num, den)) {
-        if (den > 0) {
-            float fNum = (float)num / (float)den;
-            val = fmt("f/%.1f", fNum);
-            AddProp(keyValOut, kPropFNumber, val);
+    AddExifStringProp(propsOut, DocProp::Keywords, parser, ExifProp::XPKeywords);
+    AddExifStringProp(propsOut, DocProp::Comment, parser, ExifProp::XPComment);
+    AddExifStringProp(propsOut, DocProp::CameraMake, parser, ExifProp::Make);
+    AddExifStringProp(propsOut, DocProp::CameraModel, parser, ExifProp::Model);
+    AddExifStringProp(propsOut, DocProp::DateOriginal, parser, ExifProp::DateTimeOriginal);
+
+    ExifRational rat;
+    if (parser.GetRationalProp(ExifProp::ExposureTime, &rat) && rat.den > 0 && rat.num > 0) {
+        if (rat.num == 1) {
+            AddProp(propsOut, DocProp::ExposureTime, fmt("1/%u s", (u32)rat.den));
+        } else {
+            AddProp(propsOut, DocProp::ExposureTime, fmt("%u/%u s", (u32)rat.num, (u32)rat.den));
         }
     }
 
-    // ISO speed
-    ULONG isoVal;
-    if (GetImagePropertyLong(bmp, PropertyTagExifISOSpeed, isoVal)) {
-        val = fmt("ISO %u", isoVal);
-        AddProp(keyValOut, kPropIsoSpeed, val);
+    if (GetExifFloat(parser, ExifProp::FNumber, fVal) && fVal > 0) {
+        AddProp(propsOut, DocProp::FNumber, fmt("f/%.1f", fVal));
     }
 
-    // focal length
-    if (GetImagePropertyRational(bmp, PropertyTagExifFocalLength, num, den)) {
-        if (den > 0) {
-            float fl = (float)num / (float)den;
-            val = fmt("%.1f mm", fl);
-            AddProp(keyValOut, kPropFocalLength, val);
-        }
+    if (GetExifInt(parser, ExifProp::ISOSpeed, intVal)) {
+        AddProp(propsOut, DocProp::IsoSpeed, fmt("ISO %u", (u32)intVal));
     }
 
-    // focal length in 35mm equivalent
-    ULONG fl35;
-    if (GetImagePropertyLong(bmp, PropertyTagExifFocalLengthIn35mmFilm, fl35)) {
-        val = fmt("%u mm", fl35);
-        AddProp(keyValOut, kPropFocalLength35mm, val);
+    if (GetExifFloat(parser, ExifProp::FocalLength, fVal) && fVal > 0) {
+        AddProp(propsOut, DocProp::FocalLength, fmt("%.1f mm", fVal));
     }
 
-    // flash
-    ULONG flashVal;
-    if (GetImagePropertyLong(bmp, PropertyTagExifFlash, flashVal)) {
-        Str flashStr = (flashVal & 1) ? StrL("Yes") : StrL("No");
-        AddProp(keyValOut, kPropFlash, flashStr);
+    if (GetExifInt(parser, ExifProp::FocalLengthIn35mmFilm, intVal)) {
+        AddProp(propsOut, DocProp::FocalLength35mm, fmt("%u mm", (u32)intVal));
     }
 
-    // orientation
-    ULONG orient;
-    if (GetImagePropertyLong(bmp, PropertyTagOrientation, orient)) {
-        val = fmt("%u", orient);
-        AddProp(keyValOut, kPropOrientation, val);
+    if (GetExifInt(parser, ExifProp::Flash, intVal)) {
+        AddProp(propsOut, DocProp::Flash, (intVal & 1) ? StrL("Yes") : StrL("No"));
     }
 
-    // exposure program
-    ULONG expProg;
-    if (GetImagePropertyLong(bmp, PropertyTagExifExposureProg, expProg)) {
-        // clang-format off
+    if (GetExifInt(parser, ExifProp::Orientation, intVal)) {
+        AddProp(propsOut, DocProp::Orientation, fmt("%u", (u32)intVal));
+    }
+
+    if (GetExifInt(parser, ExifProp::ExposureProgram, intVal)) {
         static const Str exposurePrograms[] = {
-            StrL("Not defined"),     StrL("Manual"),           StrL("Normal program"),
+            StrL("Not defined"),       StrL("Manual"),           StrL("Normal program"),
             StrL("Aperture priority"), StrL("Shutter priority"), StrL("Creative program"),
-            StrL("Action program"),  StrL("Portrait mode"),    StrL("Landscape mode"),
+            StrL("Action program"),    StrL("Portrait mode"),    StrL("Landscape mode"),
         };
-        // clang-format on
-        if (expProg < dimof(exposurePrograms)) {
-            AddProp(keyValOut, kPropExposureProgram, exposurePrograms[expProg]);
+        if (intVal >= 0 && intVal < dimof(exposurePrograms)) {
+            AddProp(propsOut, DocProp::ExposureProgram, exposurePrograms[intVal]);
         }
     }
 
-    // metering mode
-    ULONG metering;
-    if (GetImagePropertyLong(bmp, PropertyTagExifMeteringMode, metering)) {
-        // clang-format off
-        static const Str meteringModes[] = {
-            StrL("Unknown"), StrL("Average"), StrL("Center Weighted Average"), StrL("Spot"),
-            StrL("Multi Spot"), StrL("Pattern"), StrL("Partial"),
-        };
-        // clang-format on
-        if (metering < dimof(meteringModes)) {
-            AddProp(keyValOut, kPropMeteringMode, meteringModes[metering]);
+    if (GetExifInt(parser, ExifProp::MeteringMode, intVal)) {
+        static const Str meteringModes[] = {StrL("Unknown"), StrL("Average"),    StrL("Center Weighted Average"),
+                                            StrL("Spot"),    StrL("Multi Spot"), StrL("Pattern"),
+                                            StrL("Partial")};
+        if (intVal >= 0 && intVal < dimof(meteringModes)) {
+            AddProp(propsOut, DocProp::MeteringMode, meteringModes[intVal]);
         }
     }
 
-    // white balance
-    ULONG wb;
-    if (GetImagePropertyLong(bmp, PropertyTagExifWhiteBalance, wb)) {
-        AddProp(keyValOut, kPropWhiteBalance, wb == 0 ? StrL("Auto") : StrL("Manual"));
+    if (GetExifInt(parser, ExifProp::WhiteBalance, intVal)) {
+        AddProp(propsOut, DocProp::WhiteBalance, intVal == 0 ? StrL("Auto") : StrL("Manual"));
     }
 
-    // exposure bias
-    if (GetImagePropertyRational(bmp, PropertyTagExifExposureBias, num, den)) {
-        if (den > 0) {
-            float bias = (float)(LONG)num / (float)(LONG)den;
-            val = fmt("%+.1f EV", bias);
-            AddProp(keyValOut, kPropExposureBias, val);
-        }
+    if (GetExifFloat(parser, ExifProp::ExposureBiasValue, fVal)) {
+        AddProp(propsOut, DocProp::ExposureBias, fmt("%+.1f EV", fVal));
     }
 
-    // bits per sample
-    ULONG bps;
-    if (GetImagePropertyLong(bmp, PropertyTagBitsPerSample, bps)) {
-        val = fmt("%u", bps);
-        AddProp(keyValOut, kPropBitsPerSample, val);
+    if (GetExifInt(parser, ExifProp::BitsPerSample, intVal)) {
+        AddProp(propsOut, DocProp::BitsPerSample, fmt("%u", (u32)intVal));
     }
 
-    // resolution unit
-    ULONG resUnit;
-    if (GetImagePropertyLong(bmp, PropertyTagResolutionUnit, resUnit)) {
-        // clang-format off
-        Str unitStr;
-        if (resUnit == 2) {
+    if (GetExifInt(parser, ExifProp::ResolutionUnit, intVal)) {
+        Str unitStr = StrL("unknown");
+        if (intVal == 2) {
             unitStr = StrL("inches");
-        } else if (resUnit == 3) {
+        } else if (intVal == 3) {
             unitStr = StrL("centimeters");
+        }
+        AddProp(propsOut, DocProp::ResolutionUnit, unitStr);
+    }
+
+    AddExifStringProp(propsOut, DocProp::Software, parser, ExifProp::Software);
+    AddExifStringProp(propsOut, DocProp::DateTime, parser, ExifProp::DateTime);
+
+    if (GetExifInt(parser, ExifProp::YCbCrPositioning, intVal)) {
+        AddProp(propsOut, DocProp::YCbCrPositioning, intVal == 1 ? StrL("centered") : StrL("co-sited"));
+    }
+
+    AddExifStringProp(propsOut, DocProp::ExifVersion, parser, ExifProp::ExifVersion);
+    AddExifStringProp(propsOut, DocProp::DateTimeDigitized, parser, ExifProp::DateTimeDigitized);
+
+    val = parser.GetFormattedPropTemp(ExifProp::ComponentsConfiguration);
+    if (val) {
+        AddProp(propsOut, DocProp::ComponentsConfig, val);
+    }
+
+    if (parser.GetRationalProp(ExifProp::CompressedBitsPerPixel, &rat) && rat.den > 0) {
+        double cbpp = (double)rat.num / (double)rat.den;
+        if (rat.den == 1) {
+            AddProp(propsOut, DocProp::CompressedBpp, fmt("%u", (u32)rat.num));
         } else {
-            unitStr = StrL("unknown");
-        }
-        // clang-format on
-        AddProp(keyValOut, kPropResolutionUnit, unitStr);
-    }
-
-    // software
-    val = GetImagePropertyTemp(bmp, PropertyTagSoftwareUsed);
-    if (val) {
-        AddProp(keyValOut, kPropSoftware, val);
-    }
-
-    // date/time
-    val = GetImagePropertyTemp(bmp, PropertyTagDateTime);
-    if (val) {
-        AddProp(keyValOut, kPropDateTime, val);
-    }
-
-    // YCbCr positioning
-    ULONG ycbcrPos;
-    if (GetImagePropertyLong(bmp, PropertyTagYCbCrPositioning, ycbcrPos)) {
-        Str posStr = (ycbcrPos == 1) ? StrL("centered") : StrL("co-sited");
-        AddProp(keyValOut, kPropYCbCrPositioning, posStr);
-    }
-
-    // exif version
-    {
-        PropertyItem* item = nullptr;
-        if (GetImagePropertyItem(bmp, PropertyTagExifVer, &item)) {
-            if (item->length >= 4) {
-                Str exifVer = Str((char*)(item->value), (int)(item->length));
-                val = str::DupTemp(exifVer);
-                AddProp(keyValOut, kPropExifVersion, val);
-            }
-            free(item);
+            AddProp(propsOut, DocProp::CompressedBpp, fmt("%.2f", cbpp));
         }
     }
 
-    // date/time digitized
-    val = GetImagePropertyTemp(bmp, PropertyTagExifDTDigitized);
-    if (val) {
-        AddProp(keyValOut, kPropDateTimeDigitized, val);
+    if (GetExifFloat(parser, ExifProp::MaxApertureValue, fVal)) {
+        AddProp(propsOut, DocProp::MaxAperture, fmt("%.2f", fVal));
     }
 
-    // components configuration
-    {
-        PropertyItem* item = nullptr;
-        if (GetImagePropertyItem(bmp, PropertyTagExifCompConfig, &item)) {
-            // each byte: 0=does not exist, 1=Y, 2=Cb, 3=Cr, 4=R, 5=G, 6=B
-            static const Str compNames[] = {StrL(""),  StrL("Y"), StrL("Cb"), StrL("Cr"),
-                                            StrL("R"), StrL("G"), StrL("B")};
-            str::Builder s;
-            u8* data = (u8*)item->value;
-            for (ULONG i = 0; i < item->length; i++) {
-                u8 c = data[i];
-                if (c == 0) {
-                    break;
-                }
-                if (len(s) > 0) {
-                    s.Append(", ");
-                }
-                if (c < dimof(compNames)) {
-                    s.Append(compNames[c]);
-                }
-            }
-            if (len(s) > 0) {
-                AddProp(keyValOut, kPropComponentsConfig, ToStr(s));
-            }
-            free(item);
-        }
-    }
-
-    // compressed bits per pixel
-    if (GetImagePropertyRational(bmp, PropertyTagExifCompBPP, num, den)) {
-        if (den > 0) {
-            float cbpp = (float)num / (float)den;
-            if (den == 1) {
-                val = fmt("%u", num);
-            } else {
-                val = fmt("%.2f", cbpp);
-            }
-            AddProp(keyValOut, kPropCompressedBpp, val);
-        }
-    }
-
-    // max aperture value
-    if (GetImagePropertyRational(bmp, PropertyTagExifAperture, num, den)) {
-        if (den > 0) {
-            float aperture = (float)num / (float)den;
-            val = fmt("%.2f", aperture);
-            AddProp(keyValOut, kPropMaxAperture, val);
-        }
-    }
-
-    // light source
-    ULONG lightSrc;
-    if (GetImagePropertyLong(bmp, PropertyTagExifLightSource, lightSrc)) {
-        // clang-format off
+    if (GetExifInt(parser, ExifProp::LightSource, intVal)) {
         Str lightStr;
-        switch (lightSrc) {
+        switch (intVal) {
             case 0:
                 lightStr = StrL("Unknown");
                 break;
@@ -1457,156 +1501,235 @@ static void GetBitmapExifProperties(Bitmap* bmp, StrVec& keyValOut) {
                 lightStr = StrL("Unknown");
                 break;
         }
-        // clang-format on
-        AddProp(keyValOut, kPropLightSource, lightStr);
+        AddProp(propsOut, DocProp::LightSource, lightStr);
     }
 
-    // user comment
-    {
-        PropertyItem* item = nullptr;
-        if (GetImagePropertyItem(bmp, PropertyTagExifUserComment, &item)) {
-            // first 8 bytes are character code identifier
-            if (item->length > 8) {
-                Str commentData = Str((char*)((u8*)item->value + 8), (int)(item->length - 8));
-                // check if it's ASCII
-                if (memcmp(item->value, "ASCII\0\0\0", 8) == 0) {
-                    val = str::DupTemp(commentData);
-                    if (val && !str::IsEmpty(val)) {
-                        AddProp(keyValOut, kPropUserComment, val);
-                    }
-                }
-                // Unicode
-                else if (memcmp(item->value, "UNICODE\0", 8) == 0) {
-                    val = ToUtf8Temp(WStr((WCHAR*)commentData.s, commentData.len / 2));
-                    if (val && !str::IsEmpty(val)) {
-                        AddProp(keyValOut, kPropUserComment, val);
-                    }
-                }
-            }
-            free(item);
+    AddExifStringProp(propsOut, DocProp::UserComment, parser, ExifProp::UserComment);
+    AddExifStringProp(propsOut, DocProp::FlashpixVersion, parser, ExifProp::FlashpixVersion);
+
+    if (GetExifInt(parser, ExifProp::ColorSpace, intVal)) {
+        Str csStr = StrL("Unknown");
+        if (intVal == 1) {
+            csStr = StrL("sRGB");
+        } else if (intVal == 0xFFFF) {
+            csStr = StrL("Uncalibrated");
         }
+        AddProp(propsOut, DocProp::ColorSpace, csStr);
     }
 
-    // flashpix version
-    {
-        PropertyItem* item = nullptr;
-        if (GetImagePropertyItem(bmp, PropertyTagExifFPXVer, &item)) {
-            if (item->length >= 4) {
-                Str fpVer = Str((char*)(item->value), (int)(item->length));
-                val = str::DupTemp(fpVer);
-                AddProp(keyValOut, kPropFlashpixVersion, val);
-            }
-            free(item);
-        }
+    if (GetExifInt(parser, ExifProp::ExifImageWidth, intVal)) {
+        AddProp(propsOut, DocProp::PixelXDimension, fmt("%u", (u32)intVal));
+    }
+    if (GetExifInt(parser, ExifProp::ExifImageLength, intVal)) {
+        AddProp(propsOut, DocProp::PixelYDimension, fmt("%u", (u32)intVal));
     }
 
-    // color space
-    ULONG cs;
-    if (GetImagePropertyLong(bmp, PropertyTagExifColorSpace, cs)) {
-        Str csStr = (cs == 1) ? StrL("sRGB") : (cs == 0xFFFF) ? StrL("Uncalibrated") : StrL("Unknown");
-        AddProp(keyValOut, kPropColorSpace, csStr);
+    if (GetExifInt(parser, ExifProp::FileSource, intVal) && intVal == 3) {
+        AddProp(propsOut, DocProp::FileSource, StrL("DSC"));
     }
 
-    // pixel X dimension
-    ULONG pixX;
-    if (GetImagePropertyLong(bmp, PropertyTagExifPixXDim, pixX)) {
-        val = fmt("%u", pixX);
-        AddProp(keyValOut, kPropPixelXDimension, val);
-    }
-
-    // pixel Y dimension
-    ULONG pixY;
-    if (GetImagePropertyLong(bmp, PropertyTagExifPixYDim, pixY)) {
-        val = fmt("%u", pixY);
-        AddProp(keyValOut, kPropPixelYDimension, val);
-    }
-
-    // file source
-    {
-        PropertyItem* item = nullptr;
-        if (GetImagePropertyItem(bmp, PropertyTagExifFileSource, &item)) {
-            if (item->length >= 1) {
-                u8 src = *(u8*)item->value;
-                if (src == 3) {
-                    AddProp(keyValOut, kPropFileSource, StrL("DSC"));
-                }
-            }
-            free(item);
-        }
-    }
-
-    // scene type
-    {
-        PropertyItem* item = nullptr;
-        if (GetImagePropertyItem(bmp, PropertyTagExifSceneType, &item)) {
-            if (item->length >= 1) {
-                u8 scene = *(u8*)item->value;
-                if (scene == 1) {
-                    AddProp(keyValOut, kPropSceneType, StrL("A directly photographed image"));
-                }
-            }
-            free(item);
-        }
+    if (GetExifInt(parser, ExifProp::SceneType, intVal) && intVal == 1) {
+        AddProp(propsOut, DocProp::SceneType, StrL("A directly photographed image"));
     }
 }
 
-// decode image data with GDI+ (preserving EXIF), extract properties, add file size
-static void GetExifPropertiesFromData(Str data, StrVec& keyValOut) {
-    if (str::IsEmpty(data)) {
+static void AddDpiIfMissing(Props& propsOut, float dpiX, float dpiY) {
+    if (dpiX < 1 || dpiY < 1) {
         return;
     }
-    TempStr sizeStr = fmt("%d", (int)data.len);
-    AddProp(keyValOut, kPropImageFileSize, sizeStr);
-    Bitmap* bmp = BitmapWithExifFromData(data);
-    if (bmp) {
-        GetBitmapExifProperties(bmp, keyValOut);
-        delete bmp;
+    if (GetPropIdx(propsOut, DocProp::Dpi) >= 0) {
+        return;
+    }
+    if (fabsf(dpiX - dpiY) < 0.5f) {
+        AddProp(propsOut, DocProp::Dpi, fmt("%.0f", dpiX));
+    } else {
+        AddProp(propsOut, DocProp::Dpi, fmt("%.0f x %.0f", dpiX, dpiY));
     }
 }
 
-void EngineImage::GetProperties(StrVec& keyValOut) {
-    EngineBase::GetProperties(keyValOut);
+// PNG pHYs (pixels/meter) and JPEG JFIF density. Used when there is no EXIF
+// resolution — most PNGs have none, but they still have a size and often pHYs.
+static bool ImageDpiFromData(Str data, float& dpiX, float& dpiY) {
+    dpiX = dpiY = 0;
+    if (len(data) < 16) {
+        return false;
+    }
+    const u8* d = (const u8*)data.s;
+    int n = data.len;
+
+    static const u8 kPngSig[8] = {137, 80, 78, 71, 13, 10, 26, 10};
+    if (n >= 8 && MemEq(d, kPngSig, 8)) {
+        int idx = 8;
+        while (idx + 12 <= n) {
+            u32 chunkLen = UInt32BE(d + idx);
+            const u8* type = d + idx + 4;
+            if (MemEq(type, "pHYs", 4) && chunkLen >= 9 && idx + 17 <= n) {
+                const u8* p = d + idx + 8;
+                u32 x = UInt32BE(p);
+                u32 y = UInt32BE(p + 4);
+                // unit 1 = meter; 0 is only an aspect ratio
+                if (p[8] == 1 && x > 0 && y > 0) {
+                    dpiX = (float)x * 0.0254f;
+                    dpiY = (float)y * 0.0254f;
+                    return true;
+                }
+                return false;
+            }
+            if (MemEq(type, "IEND", 4)) {
+                break;
+            }
+            if (chunkLen > (u32)(n - idx)) {
+                break;
+            }
+            idx += 12 + (int)chunkLen;
+        }
+        return false;
+    }
+
+    if (d[0] == 0xFF && d[1] == 0xD8) {
+        int i = 2;
+        while (i + 4 <= n) {
+            if (d[i] != 0xFF) {
+                break;
+            }
+            while (i < n && d[i] == 0xFF) {
+                i++;
+            }
+            if (i >= n) {
+                break;
+            }
+            u8 marker = d[i++];
+            if (marker == 0xD8 || marker == 0xD9 || (marker >= 0xD0 && marker <= 0xD7)) {
+                continue;
+            }
+            if (i + 2 > n) {
+                break;
+            }
+            int seglen = (d[i] << 8) | d[i + 1];
+            if (seglen < 2 || i + seglen > n) {
+                break;
+            }
+            if (marker == 0xE0 && seglen >= 16 && MemEq(d + i + 2, "JFIF", 4)) {
+                u8 units = d[i + 9];
+                u32 x = (u32)((d[i + 10] << 8) | d[i + 11]);
+                u32 y = (u32)((d[i + 12] << 8) | d[i + 13]);
+                if (x > 0 && y > 0) {
+                    if (units == 1) {
+                        dpiX = (float)x;
+                        dpiY = (float)y;
+                        return true;
+                    }
+                    if (units == 2) {
+                        dpiX = (float)x * 2.54f;
+                        dpiY = (float)y * 2.54f;
+                        return true;
+                    }
+                }
+                return false;
+            }
+            if (marker == 0xDA) {
+                break;
+            }
+            i += seglen;
+        }
+    }
+    return false;
 }
 
-void EngineImages::GetImageProperties(int pageNo, StrVec& keyValOut) {
+static void GetExifPropertiesFromData(Str data, Props& propsOut) {
+    if (len(data) == 0) {
+        return;
+    }
+    AddProp(propsOut, DocProp::ImageFileSize, fmt("%d", (int)data.len));
+
+    // Size lives in the image header (IHDR / SOF / …), not in EXIF. Gating
+    // it on ExifParser left PNG and other EXIF-less files with no size.
+    Size imgSize = ImageSizeFromDataPortable(data);
+    if (!imgSize.IsEmpty()) {
+        AddProp(propsOut, DocProp::ImageSize, fmt("%d x %d", imgSize.dx, imgSize.dy));
+    }
+
+    ExifParser parser;
+    if (parser.Parse(data)) {
+        AddParsedExifProperties(data, parser, propsOut);
+    }
+
+    float dpiX = 0, dpiY = 0;
+    if (ImageDpiFromData(data, dpiX, dpiY)) {
+        AddDpiIfMissing(propsOut, dpiX, dpiY);
+    }
+}
+
+void EngineImage::GetProperties(Props& propsOut) {
+    EngineBase::GetProperties(propsOut);
+}
+
+void EngineImages::GetImageProperties(int pageNo, Props& propsOut) {
     TempStr imgPath = GetImagePathTemp(pageNo);
     if (imgPath) {
-        AddProp(keyValOut, kPropImagePath, imgPath);
+        AddProp(propsOut, DocProp::ImagePath, imgPath);
     }
     Str data = GetImageData(pageNo);
-    GetExifPropertiesFromData(data, keyValOut);
+    GetExifPropertiesFromData(data, propsOut);
+    if (GetPropIdx(propsOut, DocProp::ImageSize) < 0) {
+        RectF box = PageMediabox(pageNo);
+        if (box.dx > 0 && box.dy > 0) {
+            AddProp(propsOut, DocProp::ImageSize, fmt("%d x %d", (int)box.dx, (int)box.dy));
+        }
+    }
+    // Already-decoded frames (EngineImage) have WIC/GDI+ resolution, which is
+    // what we used to show even when the file has no EXIF / pHYs.
+    if (GetPropIdx(propsOut, DocProp::Dpi) < 0 && kind == kindEngineImage) {
+        auto* img = (EngineImage*)this;
+        int idx = pageNo - 1;
+        if (idx >= 0 && idx < len(img->frames) && img->frames[idx]) {
+            AddDpiIfMissing(propsOut, img->frames[idx]->xres, img->frames[idx]->yres);
+        }
+    }
 }
 
-void EngineImage::GetImageProperties(int pageNo, StrVec& keyValOut) {
-    Str data = file::ReadFile(FilePath());
-    GetExifPropertiesFromData(data, keyValOut);
-    str::Free(data);
-}
-
-Bitmap* EngineImage::LoadBitmapForPage(int pageNo, bool& deleteAfterUse) {
+Pixmap* EngineImage::LoadPixmapForPage(int pageNo, bool& deleteAfterUse) {
     int idx = pageNo - 1;
     if (idx < 0 || idx >= len(frames)) {
-        return nullptr;
+        Str data = GetImageData(pageNo);
+        deleteAfterUse = true;
+        return PixmapFromData(data);
     }
-    // zero-copy: borrow the frame's pixels. The Pixmap stays owned by `frames`;
-    // the caller deletes this wrapper (deleteAfterUse) without freeing the buffer.
-    deleteAfterUse = true;
-    return WrapPixmapGdiplus(frames[idx]);
+    deleteAfterUse = false;
+    return frames[idx];
 }
 
-Str EngineImage::GetImageData(int) {
-    ScopedCritSec scope(&cacheLock);
-    auto pi = pageInfos[0];
-    if (str::IsEmpty(pi->rawData)) {
-        pi->rawData = file::ReadFile(FilePath());
+Str EngineImage::GetImageData(int /*pageNo*/) {
+    ScopedRecursiveMutex scope(&cacheLock);
+    auto* pi = pageInfos[0];
+    if (len(pi->rawData) == 0) {
+        Str path = FilePath();
+        pi->rawData = path ? file::ReadFile(path) : str::Dup(sourceData);
     }
     return pi->rawData;
+}
+
+i64 EngineImage::GetImageByteSize(int /*pageNo*/) {
+    Str path = FilePath();
+    if (path) {
+        i64 n = file::GetSize(path);
+        if (n >= 0) {
+            return n;
+        }
+    }
+    if (len(sourceData) > 0) {
+        return sourceData.len;
+    }
+    if (len(pageInfos) > 0 && len(pageInfos[0]->rawData) > 0) {
+        return pageInfos[0]->rawData.len;
+    }
+    return -1;
 }
 
 fz_image* EngineImage::LoadFzImageForPage(fz_context* ctx, int pageNo) {
     // mupdf decodes the file's first frame lazily at render scale. Additional
     // frames of multi-page TIFFs / animated GIFs come from the pre-decoded
-    // `frames` list via LoadBitmapForPage, so opt out of the mupdf path for them.
+    // `frames` list via LoadPixmapForPage, so opt out of the mupdf path for them.
     if (pageNo != 1) {
         return nullptr;
     }
@@ -1616,9 +1739,9 @@ fz_image* EngineImage::LoadFzImageForPage(fz_context* ctx, int pageNo) {
 RectF EngineImage::LoadMediabox(int pageNo) {
     int idx = pageNo - 1;
     if (idx >= 0 && idx < len(frames) && frames[idx]) {
-        return RectF(0, 0, (float)frames[idx]->width, (float)frames[idx]->height);
+        return {0, 0, (float)frames[idx]->width, (float)frames[idx]->height};
     }
-    return RectF();
+    return {};
 }
 
 EngineBase* EngineImage::CreateFromFile(Str path) {
@@ -1627,7 +1750,9 @@ EngineBase* EngineImage::CreateFromFile(Str path) {
     bool ok = engine->LoadSingleFile(path);
     // decoding might run a 3rd-party WIC codec (e.g. CopyTrans HEIC) that
     // unmasks fp exceptions on this thread, which would crash later float math
+#if OS_WIN
     MaskFpExceptions();
+#endif
     if (!ok) {
         SafeEngineRelease(&engine);
         return nullptr;
@@ -1635,10 +1760,12 @@ EngineBase* EngineImage::CreateFromFile(Str path) {
     return engine;
 }
 
-EngineBase* EngineImage::CreateFromStream(IStream* stream) {
+EngineBase* EngineImage::CreateFromData(Str data) {
     EngineImage* engine = new EngineImage();
-    bool ok = engine->LoadFromStream(stream);
+    bool ok = engine->LoadFromData(data);
+#if OS_WIN
     MaskFpExceptions();
+#endif
     if (!ok) {
         SafeEngineRelease(&engine);
         return nullptr;
@@ -1647,19 +1774,19 @@ EngineBase* EngineImage::CreateFromStream(IStream* stream) {
 }
 
 // clang-format off
-static Kind imageEngineKinds[] = {
-    kindFilePng,  kindFileJpeg, kindFileGif,
-    kindFileTiff, kindFileBmp,  kindFileTga,
-    kindFileJxr,  kindFileHdp,  kindFileWdp,
-    kindFileWebp, kindFileJp2,  kindFileHeic,
-    kindFileAvif, kindFileJxl
+static FileType imageEngineTypes[] = {
+    FileType::Png,  FileType::Jpeg, FileType::Gif,
+    FileType::Tiff, FileType::Bmp,  FileType::Tga,
+    FileType::Jxr,  FileType::Hdp,  FileType::Wdp,
+    FileType::Webp, FileType::Jp2,  FileType::Heic,
+    FileType::Avif, FileType::Jxl
 };
 // clang-format on
 
-bool IsEngineImageSupportedFileType(Kind kind) {
+bool IsEngineImageSupportedFileType(FileType kind) {
     // logf("IsEngineImageSupportedFileType(%s)\n", kind);
-    int n = (int)dimof(imageEngineKinds);
-    return KindIndexOf(imageEngineKinds, n, kind) >= 0;
+    int n = dimofi(imageEngineTypes);
+    return FileTypeIndexOf(imageEngineTypes, n, kind) >= 0;
 }
 
 EngineBase* CreateEngineImageFromFile(Str path) {
@@ -1667,9 +1794,9 @@ EngineBase* CreateEngineImageFromFile(Str path) {
     return EngineImage::CreateFromFile(path);
 }
 
-EngineBase* CreateEngineImageFromStream(IStream* stream) {
-    log("CreateEngineImageFromStream\n");
-    return EngineImage::CreateFromStream(stream);
+EngineBase* CreateEngineImageFromData(Str data) {
+    log("CreateEngineImageFromData\n");
+    return EngineImage::CreateFromData(data);
 }
 
 ///// ImageDirEngine handles a directory full of image files /////
@@ -1696,23 +1823,23 @@ class EngineImageDir : public EngineImages {
     }
 
     Str GetFileData() override { return {}; }
-    bool SaveFileAs(Str copyFileName) override;
+    bool SaveFileAs(Str dstPath) override;
 
-    TempStr GetPropertyTemp(Str) override { return nullptr; }
+    TempStr GetPropertyTemp(DocProp /*prop*/) override { return nullptr; }
 
     TempStr GetPageLabeTemp(int pageNo) const override;
     int GetPageByLabel(Str label) const override;
 
     TocTree* GetToc() override;
 
-    static EngineBase* CreateFromFile(Str fileName);
+    static EngineBase* CreateFromFile(Str path);
 
     // protected:
 
-    Bitmap* LoadBitmapForPage(int pageNo, bool& deleteAfterUse) override;
+    Pixmap* LoadPixmapForPage(int pageNo, bool& deleteAfterUse) override;
     RectF LoadMediabox(int pageNo) override;
     Str GetImageData(int pageNo) override;
-    TempStr GetImagePathTemp(int pageNo) override { return str::DupTemp(pageFileNames.At(pageNo - 1)); }
+    TempStr GetImagePathTemp(int pageNo) override { return str::DupTemp(pageFileNames[pageNo - 1]); }
 
     StrVec pageFileNames;
     TocTree* tocTree = nullptr;
@@ -1722,9 +1849,13 @@ static bool LoadImageDir(EngineImageDir* e, Str dir) {
     e->SetFilePath(dir);
 
     DirIter di{dir};
+    bool notDir = true;
     for (DirIterEntry* de : di) {
+        if (de->isDir) {
+            continue;
+        }
         auto path = de->filePath;
-        Kind kind = GuessFileTypeFromName(path);
+        FileType kind = GuessFileTypeFromName(path, notDir);
         if (IsEngineImageSupportedFileType(kind)) {
             e->pageFileNames.Append(path);
         }
@@ -1747,8 +1878,8 @@ static bool LoadImageDir(EngineImageDir* e, Str dir) {
     // TODO: better handle the case where images have different resolutions
     ImagePage* page = e->GetPage(1);
     if (page) {
-        if (page->bmp) {
-            e->fileDPI = page->bmp->GetHorizontalResolution();
+        if (page->pixmap) {
+            e->fileDPI = page->pixmap->xres;
         }
         e->DropPage(page, false);
     }
@@ -1760,7 +1891,7 @@ TempStr EngineImageDir::GetPageLabeTemp(int pageNo) const {
         return EngineBase::GetPageLabeTemp(pageNo);
     }
 
-    Str path = pageFileNames.At(pageNo - 1);
+    Str path = pageFileNames[pageNo - 1];
     TempStr fileName = path::GetBaseNameTemp(path);
     TempStr ext = path::GetExtTemp(fileName);
     if (!ext) {
@@ -1774,16 +1905,15 @@ TempStr EngineImageDir::GetPageLabeTemp(int pageNo) const {
 }
 
 int EngineImageDir::GetPageByLabel(Str label) const {
-    int nLabel = len(label);
     for (int i = 0; i < len(pageFileNames); i++) {
         Str pagePath = pageFileNames[i];
         TempStr fileName = path::GetBaseNameTemp(pagePath);
         TempStr ext = path::GetExtTemp(fileName);
-        if (!str::StartsWith(fileName, label)) {
+        Str maybeExt = fileName;
+        if (!str::TrimPrefix(maybeExt, label)) {
             continue;
         }
-        Str maybeExt(fileName.s + nLabel, fileName.len - nLabel);
-        if (str::Eq(maybeExt, ext) || nLabel == fileName.len) {
+        if (str::Eq(maybeExt, ext) || !maybeExt) {
             return i + 1;
         }
     }
@@ -1792,7 +1922,9 @@ int EngineImageDir::GetPageByLabel(Str label) const {
 }
 
 static TocItem* newImageDirTocItem(TocItem* parent, Str title, int pageNo) {
-    return new TocItem(parent, title, pageNo);
+    auto* res = AllocTocItem(nullptr, title, pageNo);
+    res->parent = parent;
+    return res;
 };
 
 TocTree* EngineImageDir::GetToc() {
@@ -1808,7 +1940,7 @@ TocTree* EngineImageDir::GetToc() {
         item->id = i;
         root->AddSiblingAtEnd(item);
     }
-    auto realRoot = new TocItem();
+    auto* realRoot = AllocTocItem(nullptr, {}, 0);
     realRoot->child = root;
     tocTree = new TocTree(realRoot);
     return tocTree;
@@ -1828,50 +1960,68 @@ bool EngineImageDir::SaveFileAs(Str dstPath) {
     return ok;
 }
 
-Bitmap* EngineImageDir::LoadBitmapForPage(int pageNo, bool& deleteAfterUse) {
-    Str path = pageFileNames.At(pageNo - 1);
+Pixmap* EngineImageDir::LoadPixmapForPage(int pageNo, bool& deleteAfterUse) {
+    Str path = pageFileNames[pageNo - 1];
     Str bmpData = file::ReadFile(path);
     if (!bmpData) {
         return nullptr;
     }
     deleteAfterUse = true;
-    Bitmap* res = NewGdiplusBitmapFromPixmap(PixmapFromData(bmpData));
+    Pixmap* res = PixmapFromData(bmpData);
     str::Free(bmpData);
     return res;
 }
 
 Str EngineImageDir::GetImageData(int pageNo) {
-    ScopedCritSec scope(&cacheLock);
-    auto pi = pageInfos[pageNo - 1];
-    if (str::IsEmpty(pi->rawData)) {
-        Str path = pageFileNames.At(pageNo - 1);
+    ScopedRecursiveMutex scope(&cacheLock);
+    auto* pi = pageInfos[pageNo - 1];
+    if (len(pi->rawData) == 0) {
+        Str path = pageFileNames[pageNo - 1];
         pi->rawData = file::ReadFile(path);
     }
     return pi->rawData;
 }
 
 RectF EngineImageDir::LoadMediabox(int pageNo) {
-    Str path = pageFileNames.At(pageNo - 1);
+    Str path = pageFileNames[pageNo - 1];
+
+    // the size lives in the header, so read just the front of the file: images
+    // in a dir are often multi-MB scans and this runs for every page on open.
+    // The header buffer is scratch: give it back to the temp arena on the way
+    // out so opening a big dir doesn't grow the arena by 64 KB per page.
+    AutoArenaSavepoint scratch;
+    u8* buf = AllocArrayTemp<u8>(kImageSizeFromDataPartialSize);
+    if (buf) {
+        int nRead = file::ReadN(path, buf, (size_t)kImageSizeFromDataPartialSize);
+        if (nRead > 0) {
+            Size size = ImageSizeFromDataPortable(Str((char*)buf, nRead), true);
+            if (!size.IsEmpty()) {
+                return {0, 0, (float)size.dx, (float)size.dy};
+            }
+        }
+    }
+
+    // header didn't have it (or the file is odd): fall back to the full image
     Str bmpData = file::ReadFile(path);
     if (bmpData) {
-        Size size = ImageSizeFromData(bmpData);
+        Size size = ImageSizeFromDataPortable(bmpData);
         str::Free(bmpData);
-        return RectF(0, 0, (float)size.dx, (float)size.dy);
+        return {0, 0, (float)size.dx, (float)size.dy};
     }
-    return RectF();
+    return {};
 }
 
-EngineBase* EngineImageDir::CreateFromFile(Str fileName) {
-    ReportIf(!dir::Exists(fileName));
+EngineBase* EngineImageDir::CreateFromFile(Str path) {
+    ReportIf(!dir::Exists(path));
     EngineImageDir* engine = new EngineImageDir();
-    if (!LoadImageDir(engine, fileName)) {
+    if (!LoadImageDir(engine, path)) {
         SafeEngineRelease(&engine);
         return nullptr;
     }
     return engine;
 }
 
-bool IsEngineImageDirSupportedFile(Str fileName, bool) {
+bool IsEngineImageDirSupportedFile(Str fileName, bool /*sniff*/) {
     // whether it actually contains images will be checked in LoadImageDir
     return dir::Exists(fileName);
 }
@@ -1882,7 +2032,7 @@ EngineBase* CreateEngineImageDirFromFile(Str fileName) {
 
 ///// CbxEngine handles comic book files (either .cbz, .cbr, .cb7 or .cbt) /////
 
-struct ComicInfoParser : json::ValueVisitor {
+struct ComicInfoParser {
     // extracted metadata
     Str propTitle;
     StrVec propAuthors;
@@ -1897,7 +2047,7 @@ struct ComicInfoParser : json::ValueVisitor {
     Vec<int> bookmarkImageIdx;
     StrVec bookmarkTitles;
 
-    ~ComicInfoParser() override {
+    ~ComicInfoParser() {
         str::Free(propTitle);
         str::Free(propDate);
         str::Free(propModDate);
@@ -1906,12 +2056,20 @@ struct ComicInfoParser : json::ValueVisitor {
         str::Free(propAuthorTmp);
     }
 
-    // json::ValueVisitor
-    bool Visit(Str path, Str value, json::Type type) override;
+    // used for ComicBookInfo JSON and ComicInfo.xml field mapping
+    void Visit(json::Value* v);
 
     void Parse(Str xmlData);
     void AddBookmark(int imageIdx, Str title);
 };
+
+static void ComicInfoVisit(ComicInfoParser* cip, StrNode* path, Str value, json::Type type) {
+    json::Value v;
+    v.path = path;
+    v.value = value;
+    v.type = type;
+    cip->Visit(&v);
+}
 
 void ComicInfoParser::AddBookmark(int imageIdx, Str title) {
     if (!title || imageIdx < 0) {
@@ -1935,34 +2093,49 @@ static void ComicInfoVisitNode(ComicInfoParser* cip, const GumboNode* root) {
             if (GumboTagNameIs(node, "Title")) {
                 TempStr v = GumboTextContentTemp(node);
                 if (v) {
-                    cip->Visit("/ComicBookInfo/1.0/title", v, json::Type::String);
+                    ComicInfoVisit(cip, json::PathBuildTemp(StrL("/ComicBookInfo/1.0"), StrL("/title")), v,
+                                   json::Type::String);
                 }
             } else if (GumboTagNameIs(node, "Year")) {
                 TempStr v = GumboTextContentTemp(node);
                 if (v) {
-                    cip->Visit("/ComicBookInfo/1.0/publicationYear", v, json::Type::Number);
+                    ComicInfoVisit(cip, json::PathBuildTemp(StrL("/ComicBookInfo/1.0"), StrL("/publicationYear")), v,
+                                   json::Type::Number);
                 }
             } else if (GumboTagNameIs(node, "Month")) {
                 TempStr v = GumboTextContentTemp(node);
                 if (v) {
-                    cip->Visit("/ComicBookInfo/1.0/publicationMonth", v, json::Type::Number);
+                    ComicInfoVisit(cip, json::PathBuildTemp(StrL("/ComicBookInfo/1.0"), StrL("/publicationMonth")), v,
+                                   json::Type::Number);
                 }
             } else if (GumboTagNameIs(node, "Summary")) {
                 TempStr v = GumboTextContentTemp(node);
                 if (v) {
-                    cip->Visit("/X-summary", v, json::Type::String);
+                    ComicInfoVisit(cip, json::PathBuildTemp(StrL("/X-summary")), v, json::Type::String);
                 }
             } else if (GumboTagNameIs(node, "Writer")) {
                 TempStr v = GumboTextContentTemp(node);
                 if (v) {
-                    cip->Visit("/ComicBookInfo/1.0/credits[0]/person", v, json::Type::String);
-                    cip->Visit("/ComicBookInfo/1.0/credits[0]/primary", "true", json::Type::Bool);
+                    ComicInfoVisit(
+                        cip,
+                        json::PathBuildTemp(StrL("/ComicBookInfo/1.0"), StrL("/credits"), StrL("i0"), StrL("/person")),
+                        v, json::Type::String);
+                    ComicInfoVisit(
+                        cip,
+                        json::PathBuildTemp(StrL("/ComicBookInfo/1.0"), StrL("/credits"), StrL("i0"), StrL("/primary")),
+                        "true", json::Type::Bool);
                 }
             } else if (GumboTagNameIs(node, "Penciller")) {
                 TempStr v = GumboTextContentTemp(node);
                 if (v) {
-                    cip->Visit("/ComicBookInfo/1.0/credits[1]/person", v, json::Type::String);
-                    cip->Visit("/ComicBookInfo/1.0/credits[1]/primary", "true", json::Type::Bool);
+                    ComicInfoVisit(
+                        cip,
+                        json::PathBuildTemp(StrL("/ComicBookInfo/1.0"), StrL("/credits"), StrL("i1"), StrL("/person")),
+                        v, json::Type::String);
+                    ComicInfoVisit(
+                        cip,
+                        json::PathBuildTemp(StrL("/ComicBookInfo/1.0"), StrL("/credits"), StrL("i1"), StrL("/primary")),
+                        "true", json::Type::Bool);
                 }
             } else if (GumboTagNameIs(node, "Page")) {
                 const GumboAttribute* imageAttr = gumbo_get_attribute(&node->v.element.attributes, "Image");
@@ -1987,7 +2160,7 @@ static void ComicInfoVisitNode(ComicInfoParser* cip, const GumboNode* root) {
 // extract ComicInfo.xml metadata
 // cf. http://comicrack.cyolito.com/downloads/comicrack/ComicRack/Support-Files/ComicInfoSchema.zip/
 void ComicInfoParser::Parse(Str xmlData) {
-    if (str::IsEmpty(xmlData)) {
+    if (len(xmlData) == 0) {
         return;
     }
     // Detect the encoding from a leading BOM and produce UTF-8 (gumbo expects
@@ -2010,80 +2183,86 @@ void ComicInfoParser::Parse(Str xmlData) {
 
 // extract ComicBookInfo metadata
 // https://code.google.com/archive/p/comicbookinfo/
-bool ComicInfoParser::Visit(Str path, Str value, json::Type type) {
-    if (json::Type::String == type && str::Eq(path, "/ComicBookInfo/1.0/title")) {
+void ComicInfoParser::Visit(json::Value* v) {
+    StrNode* path = v->path;
+    Str value = v->value;
+    json::Type type = v->type;
+    if (json::Type::String == type && json::PathMatch(path, StrL("/ComicBookInfo/1.0"), StrL("/title"))) {
         str::Free(propTitle);
         propTitle = str::Dup(value);
-    } else if (json::Type::Number == type && str::Eq(path, "/ComicBookInfo/1.0/publicationYear")) {
-        Str newDate = str::Dup(fmt("%s/%d", str::IsEmpty(propDate) ? "" : propDate, ParseInt(value)));
+    } else if (json::Type::Number == type &&
+               json::PathMatch(path, StrL("/ComicBookInfo/1.0"), StrL("/publicationYear"))) {
+        Str newDate = str::Dup(fmt("%s/%d", len(propDate) == 0 ? "" : propDate, ParseInt(value)));
         str::Free(propDate);
         propDate = newDate;
-    } else if (json::Type::Number == type && str::Eq(path, "/ComicBookInfo/1.0/publicationMonth")) {
-        Str newDate = str::Dup(fmt("%d%s", ParseInt(value), str::IsEmpty(propDate) ? "" : propDate));
+    } else if (json::Type::Number == type &&
+               json::PathMatch(path, StrL("/ComicBookInfo/1.0"), StrL("/publicationMonth"))) {
+        Str newDate = str::Dup(fmt("%d%s", ParseInt(value), len(propDate) == 0 ? "" : propDate));
         str::Free(propDate);
         propDate = newDate;
-    } else if (json::Type::String == type && str::Eq(path, "/appID")) {
+    } else if (json::Type::String == type && json::PathMatch(path, StrL("/appID"))) {
         str::Free(propCreator);
         propCreator = str::Dup(value);
-    } else if (json::Type::String == type && str::Eq(path, "/lastModified")) {
+    } else if (json::Type::String == type && json::PathMatch(path, StrL("/lastModified"))) {
         str::Free(propModDate);
         propModDate = str::Dup(value);
-    } else if (json::Type::String == type && str::Eq(path, "/X-summary")) {
+    } else if (json::Type::String == type && json::PathMatch(path, StrL("/X-summary"))) {
         str::Free(propSummary);
         propSummary = str::Dup(value);
-    } else if (str::StartsWith(path, "/ComicBookInfo/1.0/credits[")) {
-        int idx = -1;
-        Str prop = str::Parse(path, "/ComicBookInfo/1.0/credits[%d]/", &idx);
-        if (prop) {
-            if (json::Type::String == type && str::Eq(prop, "person")) {
-                str::Free(propAuthorTmp);
-                propAuthorTmp = str::Dup(value);
-            } else if (json::Type::Bool == type && str::Eq(prop, "primary") && !str::IsEmpty(propAuthorTmp) &&
-                       !propAuthors.Contains(propAuthorTmp)) {
-                propAuthors.Append(propAuthorTmp);
-            }
+    } else if (json::PathMatch(path, StrL("/ComicBookInfo/1.0"), StrL("/credits"), StrL("*"), StrL("/person"))) {
+        if (json::Type::String == type) {
+            str::Free(propAuthorTmp);
+            propAuthorTmp = str::Dup(value);
         }
-        return true;
+        return;
+    } else if (json::PathMatch(path, StrL("/ComicBookInfo/1.0"), StrL("/credits"), StrL("*"), StrL("/primary"))) {
+        if (json::Type::Bool == type && len(propAuthorTmp) > 0 && !propAuthors.Contains(propAuthorTmp)) {
+            propAuthors.Append(propAuthorTmp);
+        }
+        return;
     }
     // stop parsing once we have all desired information
     Str dateStr = propDate;
     int slash = str::IndexOfChar(dateStr, '/');
-    return str::IsEmpty(propTitle) || len(propAuthors) == 0 || str::IsEmpty(propCreator) || str::IsEmpty(propDate) ||
-           slash <= 0;
+    bool cont =
+        len(propTitle) == 0 || len(propAuthors) == 0 || len(propCreator) == 0 || len(propDate) == 0 || slash <= 0;
+    v->stop = !cont;
 }
 
 class EngineCbx : public EngineImages {
   public:
-    explicit EngineCbx(MultiFormatArchive* arch);
+    explicit EngineCbx(Archive* arch);
     ~EngineCbx() override;
 
     EngineBase* Clone() override;
 
-    TempStr GetPropertyTemp(Str name) override;
-    void GetProperties(StrVec& keyValOut) override;
+    TempStr GetPropertyTemp(DocProp prop) override;
+    void GetProperties(Props& propsOut) override;
 
     TocTree* GetToc() override;
 
     // realPath: when non-null we actually open the archive from this
     // (local) path but still report `path` via FilePath() so callers
     // (file history, bookmarks, etc.) see the user's original file.
-    static EngineBase* CreateFromFile(Str path, Str password = {}, MultiFormatArchive::Format* formatOut = nullptr,
-                                      bool* isEncryptedOut = nullptr, Kind hintKind = nullptr, Str realPath = {});
-    static EngineBase* CreateFromStream(IStream* stream);
+    static EngineBase* CreateFromFile(Str path, Str password = {}, Archive::Format* formatOut = nullptr,
+                                      bool* isEncryptedOut = nullptr, FileType hintType = FileType::Unknown,
+                                      Str realPath = {});
+    static EngineBase* CreateFromData(Str data);
 
   protected:
-    Bitmap* LoadBitmapForPage(int pageNo, bool& deleteAfterUse) override;
+    Pixmap* LoadPixmapForPage(int pageNo, bool& deleteAfterUse) override;
     RectF LoadMediabox(int pageNo) override;
     Str GetImageData(int pageNo) override;
     TempStr GetImagePathTemp(int pageNo) override { return str::DupTemp(files[pageNo - 1]->name); }
+    i64 GetImageByteSize(int pageNo) override;
 
     bool LoadFromFile(Str fileName);
-    bool LoadFromStream(IStream* stream);
+    bool LoadFromData(Str data);
     bool FinishLoading();
 
     // access to cbxFile must be protected after initialization (with cacheLock)
-    MultiFormatArchive* cbxArchive = nullptr;
-    Vec<MultiFormatArchive::FileInfo*> files;
+    Archive* cbxArchive = nullptr;
+    Vec<Archive::FileInfo*> files;
     TocTree* tocTree = nullptr;
 
     // When set, the archive was actually opened from this local path (e.g.
@@ -2096,7 +2275,7 @@ class EngineCbx : public EngineImages {
 };
 
 // TODO: refactor so that doesn't have to keep <arch>
-EngineCbx::EngineCbx(MultiFormatArchive* archive) {
+EngineCbx::EngineCbx(Archive* archive) {
     cbxArchive = archive;
     kind = kindEngineComicBooks;
 }
@@ -2108,21 +2287,17 @@ EngineCbx::~EngineCbx() {
 }
 
 EngineBase* EngineCbx::Clone() {
-    if (fileStream) {
-        ScopedComPtr<IStream> stm;
-        HRESULT res = fileStream->Clone(&stm);
-        if (SUCCEEDED(res)) {
-            auto clone = CreateFromStream(stm);
-            if (!clone) {
-                logf("EngineCbx::Clone() failed: CreateFromStream() failed\n");
-            }
-            return clone;
+    if (sourceData) {
+        auto* clone = CreateFromData(sourceData);
+        if (!clone) {
+            log("EngineCbx::Clone() failed: CreateFromData() failed\n");
         }
+        return clone;
     }
     Str path = FilePath();
     if (path) {
         // keep the cached-local-copy in play on the clone too
-        auto clone = CreateFromFile(path, {}, nullptr, nullptr, nullptr, physicalPath);
+        auto* clone = CreateFromFile(path, {}, nullptr, nullptr, FileType::Unknown, physicalPath);
         if (!clone) {
             logf("EngineCbx::Clone() failed: CreateFromFile('%s') failed\n", path);
         }
@@ -2140,35 +2315,145 @@ bool EngineCbx::LoadFromFile(Str file) {
     return FinishLoading();
 }
 
-bool EngineCbx::LoadFromStream(IStream* stream) {
-    if (!stream) {
+bool EngineCbx::LoadFromData(Str data) {
+    if (len(data) == 0) {
         return false;
     }
-    fileStream = stream;
-    fileStream->AddRef();
+    sourceData = str::Dup(data);
 
     return FinishLoading();
 }
 
-static bool cmpArchFileInfoByName(MultiFormatArchive::FileInfo* f1, MultiFormatArchive::FileInfo* f2) {
+static bool cmpArchFileInfoByName(Archive::FileInfo* f1, Archive::FileInfo* f2) {
     return str::CmpNatural(f1->name, f2->name) < 0;
 }
 
-static Str GetExtFromArchiveType(MultiFormatArchive* cbxFile) {
+static Str GetExtFromArchiveType(Archive* cbxFile) {
     switch (cbxFile->format) {
-        case MultiFormatArchive::Format::Zip:
+        case Archive::Format::Zip:
             return ".cbz";
-        case MultiFormatArchive::Format::Rar:
+        case Archive::Format::Rar:
             return ".cbr";
-        case MultiFormatArchive::Format::SevenZip:
+        case Archive::Format::SevenZip:
             return ".cb7";
-        case MultiFormatArchive::Format::Tar:
+        case Archive::Format::Tar:
             return ".cbt";
-        case MultiFormatArchive::Format::Unknown:
+        case Archive::Format::Unknown:
             break;
     }
     ReportIf(true);
     return {};
+}
+
+constexpr int kMaxArchivePathParts = 32;
+
+// Split an archive member path on / or \. Skips empty, ".", and ".." parts.
+static int SplitArchivePath(Str path, Str* parts, int maxParts) {
+    int n = 0;
+    int i = 0;
+    while (i < path.len && n < maxParts) {
+        while (i < path.len && path::IsSep(path.s[i])) {
+            i++;
+        }
+        int start = i;
+        while (i < path.len && !path::IsSep(path.s[i])) {
+            i++;
+        }
+        if (i == start) {
+            break;
+        }
+        Str part(path.s + start, i - start);
+        if (str::Eq(part, StrL(".")) || str::Eq(part, StrL(".."))) {
+            continue;
+        }
+        parts[n++] = part;
+    }
+    return n;
+}
+
+static void TocAppendChild(TocItem* parent, TocItem* child) {
+    child->parent = parent;
+    if (!parent->child) {
+        parent->child = child;
+        return;
+    }
+    parent->child->AddSiblingAtEnd(child);
+}
+
+// Folder-aware ToC from archive member paths (issue #5317). A directory
+// shared by every file (e.g. all images in "images/") is stripped so a
+// single-folder comic stays a flat list. Remaining chapter folders become
+// tree nodes; clicking a folder goes to its first page.
+static TocItem* BuildCbxFolderToc(const Vec<Archive::FileInfo*>& files) {
+    int nFiles = len(files);
+    if (nFiles <= 0) {
+        return nullptr;
+    }
+
+    Str firstParts[kMaxArchivePathParts];
+    int firstN = SplitArchivePath(files[0]->name, firstParts, kMaxArchivePathParts);
+    int common = firstN > 0 ? firstN - 1 : 0;
+    bool anyFolder = false;
+    for (int i = 0; i < nFiles; i++) {
+        Str parts[kMaxArchivePathParts];
+        int n = SplitArchivePath(files[i]->name, parts, kMaxArchivePathParts);
+        int nDir = n > 0 ? n - 1 : 0;
+        int m = common < nDir ? common : nDir;
+        for (int k = 0; k < m; k++) {
+            if (!str::Eq(firstParts[k], parts[k])) {
+                m = k;
+                break;
+            }
+        }
+        common = m;
+        if (nDir > common) {
+            anyFolder = true;
+        }
+    }
+    if (!anyFolder) {
+        return nullptr;
+    }
+
+    auto* realRoot = AllocTocItem(nullptr, {}, 0);
+    Vec<TocItem*> stack;
+    Vec<Str> stackNames;
+    int idCounter = 0;
+
+    for (int i = 0; i < nFiles; i++) {
+        Str parts[kMaxArchivePathParts];
+        int n = SplitArchivePath(files[i]->name, parts, kMaxArchivePathParts);
+        if (n <= common) {
+            continue;
+        }
+        int nDir = n - 1;
+        int match = 0;
+        while (match < len(stack) && (common + match) < nDir && str::Eq(stackNames[match], parts[common + match])) {
+            match++;
+        }
+        stack.RemoveAt(match, len(stack) - match);
+        stackNames.RemoveAt(match, len(stackNames) - match);
+
+        for (int k = common + match; k < nDir; k++) {
+            TocItem* parent = len(stack) == 0 ? realRoot : stack.Last();
+            TocItem* folder = AllocTocItem(nullptr, parts[k], i + 1);
+            folder->isOpenDefault = true;
+            folder->id = ++idCounter;
+            TocAppendChild(parent, folder);
+            stack.Append(folder);
+            stackNames.Append(parts[k]);
+        }
+
+        TocItem* parent = len(stack) == 0 ? realRoot : stack.Last();
+        TocItem* leaf = AllocTocItem(nullptr, parts[n - 1], i + 1);
+        leaf->id = ++idCounter;
+        TocAppendChild(parent, leaf);
+    }
+
+    if (!realRoot->child) {
+        FreeTocItemRec(nullptr, realRoot);
+        return nullptr;
+    }
+    return realRoot;
 }
 
 bool EngineCbx::FinishLoading() {
@@ -2192,39 +2477,49 @@ bool EngineCbx::FinishLoading() {
     Str ext = GetExtFromArchiveType(cbxArchive);
     SetDefaultExt(defaultExt, ext);
 
-    Vec<MultiFormatArchive::FileInfo*> pageFiles;
+    Vec<Archive::FileInfo*> pageFiles;
 
-    auto& fileInfos = cbxArchive->GetFileInfos();
+    const auto& fileInfos = cbxArchive->GetFileInfos();
     int n = len(fileInfos);
-    for (size_t i = 0; i < n; i++) {
+    for (int i = 0; i < n; i++) {
         auto* fileInfo = fileInfos[i];
         Str fileName = fileInfo->name;
         if (!fileName) {
             continue;
         }
-        if (MultiFormatArchive::Format::Zip == cbxArchive->format && str::StartsWithI(fileName, "_rels/.rels")) {
+        if (Archive::Format::Zip == cbxArchive->format && str::StartsWithI(fileName, StrL("_rels/.rels"))) {
             // bail, if we accidentally try to load an XPS file
             return false;
         }
 
-        Kind kind = GuessFileTypeFromName(fileName);
+        // an archive member name, not a path on disk: nothing to probe
+        FileType kind = GuessFileTypeFromName(fileName, true);
         if (IsEngineImageSupportedFileType(kind) &&
             // OS X occasionally leaves metadata with image extensions
-            !str::StartsWith(path::GetBaseNameTemp(fileName), ".")) {
+            !str::StartsWith(path::GetBaseNameTemp(fileName), StrL("."))) {
             pageFiles.Append(fileInfo);
         }
     }
 
-    auto* metadataFi = cbxArchive->GetFileDataByName("ComicInfo.xml");
+    constexpr int kMaxComicInfoSize = 4 * 1024 * 1024;
+    Archive::FileInfo* metadataFi = nullptr;
+    int metadataId = cbxArchive->GetFileId("ComicInfo.xml");
+    if (metadataId >= 0) {
+        auto* fi = fileInfos[metadataId];
+        if (fi->fileSizeUncompressed >= 0 && fi->fileSizeUncompressed <= kMaxComicInfoSize) {
+            metadataFi = cbxArchive->GetFileDataById(metadataId);
+        }
+    }
     if (metadataFi && metadataFi->data) {
-        Str metadata = Str((char*)(metadataFi->data), (int)(metadataFi->fileSizeUncompressed));
+        Str metadata = Str(metadataFi->data, metadataFi->fileSizeUncompressed);
         cip.Parse(metadata);
     }
+#if 0
     Str comment = cbxArchive->GetComment();
     if (comment) {
-        json::Parse(comment, &cip);
+        json::Parse(comment, MkMethod1<ComicInfoParser, json::Value*, &ComicInfoParser::Visit>(&cip));
     }
-
+#endif
     int nFiles = len(pageFiles);
     if (nFiles == 0) {
         delete cbxArchive;
@@ -2241,7 +2536,7 @@ bool EngineCbx::FinishLoading() {
 
     // verify password by trying to extract the smallest file
     if (cbxArchive->isEncrypted && cbxArchive->password) {
-        MultiFormatArchive::FileInfo* smallest = pageFiles[0];
+        Archive::FileInfo* smallest = pageFiles[0];
         for (int i = 1; i < nFiles; i++) {
             if (pageFiles[i]->fileSizeUncompressed < smallest->fileSizeUncompressed) {
                 smallest = pageFiles[i];
@@ -2259,7 +2554,7 @@ bool EngineCbx::FinishLoading() {
     std::sort(pageFiles.begin(), pageFiles.end(), cmpArchFileInfoByName);
 
     for (int i = 0; i < nFiles; i++) {
-        auto pi = new ImagePageInfo();
+        auto* pi = new ImagePageInfo();
         pageInfos.Append(pi);
     }
     files = std::move(pageFiles);
@@ -2268,7 +2563,7 @@ bool EngineCbx::FinishLoading() {
     TocItem* tocBuildRoot = nullptr;
     TocItem* tocBuildCurr = nullptr;
     auto addTocItem = [&](Str title, int pageNo) {
-        TocItem* ti = new TocItem(nullptr, title, pageNo);
+        TocItem* ti = AllocTocItem(nullptr, title, pageNo);
         if (!tocBuildRoot) {
             tocBuildRoot = ti;
         } else if (tocBuildCurr) {
@@ -2293,17 +2588,27 @@ bool EngineCbx::FinishLoading() {
             }
             addTocItem(cip.bookmarkTitles[bi], pageNo);
         }
-    } else {
-        for (int i = 0; i < pageCount; i++) {
-            Str fname = files[i]->name;
-            TempStr baseName = path::GetBaseNameTemp(fname);
-            addTocItem(baseName, i + 1);
+        if (tocBuildRoot) {
+            auto* realRoot = AllocTocItem(nullptr, {}, 0);
+            realRoot->child = tocBuildRoot;
+            tocTree = new TocTree(realRoot);
         }
-    }
-    if (tocBuildRoot) {
-        auto realRoot = new TocItem();
-        realRoot->child = tocBuildRoot;
-        tocTree = new TocTree(realRoot);
+    } else {
+        TocItem* folderRoot = BuildCbxFolderToc(files);
+        if (folderRoot) {
+            tocTree = new TocTree(folderRoot);
+        } else {
+            for (int i = 0; i < pageCount; i++) {
+                Str fname = files[i]->name;
+                TempStr baseName = path::GetBaseNameTemp(fname);
+                addTocItem(baseName, i + 1);
+            }
+            if (tocBuildRoot) {
+                auto* realRoot = AllocTocItem(nullptr, {}, 0);
+                realRoot->child = tocBuildRoot;
+                tocTree = new TocTree(realRoot);
+            }
+        }
     }
 
     return true;
@@ -2315,36 +2620,43 @@ TocTree* EngineCbx::GetToc() {
 
 Str EngineCbx::GetImageData(int pageNo) {
     ReportIf((pageNo < 1) || (pageNo > PageCount()));
-    size_t fileId = files[pageNo - 1]->fileId;
+    int fileId = files[pageNo - 1]->fileId;
     auto* fi = cbxArchive->GetFileDataById(fileId);
     if (!fi || !fi->data) {
         return {};
     }
-    return Str((char*)(fi->data), (int)(fi->fileSizeUncompressed));
+    return Str(fi->data, fi->fileSizeUncompressed);
 }
 
-TempStr EngineCbx::GetPropertyTemp(Str name) {
-    if (str::Eq(name, kPropTitle)) {
+i64 EngineCbx::GetImageByteSize(int pageNo) {
+    if ((pageNo < 1) || (pageNo > PageCount())) {
+        return -1;
+    }
+    return files[pageNo - 1]->fileSizeUncompressed;
+}
+
+TempStr EngineCbx::GetPropertyTemp(DocProp prop) {
+    if (prop == DocProp::Title) {
         return cip.propTitle;
     }
 
-    if (str::Eq(name, kPropAuthor)) {
+    if (prop == DocProp::Author) {
         if (len(cip.propAuthors) == 0) {
             return {};
         }
         return JoinTemp(&cip.propAuthors, ", ");
     }
 
-    if (str::Eq(name, kPropCreationDate)) {
+    if (prop == DocProp::CreationDate) {
         return cip.propDate;
     }
-    if (str::Eq(name, kPropModificationDate)) {
+    if (prop == DocProp::ModificationDate) {
         return cip.propModDate;
     }
-    if (str::Eq(name, kPropCreatorApp)) {
+    if (prop == DocProp::CreatorApp) {
         return cip.propCreator;
     }
-    if (str::Eq(name, kPropSubject)) {
+    if (prop == DocProp::Subject) {
         // TODO: replace with Prop_Summary
         return cip.propSummary;
     }
@@ -2352,15 +2664,24 @@ TempStr EngineCbx::GetPropertyTemp(Str name) {
     return {};
 }
 
-void EngineCbx::GetProperties(StrVec& keyValOut) {
-    EngineBase::GetProperties(keyValOut);
+// like AppTools' FormatFileSizeTransTemp ("6.20 MB (6,501,436 Bytes)") but with
+// untranslated units: this file is also built into PdfPreview, which has
+// neither AppTools nor translations
+static TempStr FormatFileSizeTemp(i64 size) {
+    TempStr n1 = str::FormatSizeShortTemp(size);
+    TempStr n2 = str::FormatNumWithThousandSepTemp(size);
+    return fmt("%s (%s Bytes)", n1, n2);
+}
+
+void EngineCbx::GetProperties(Props& propsOut) {
+    EngineBase::GetProperties(propsOut);
 
     str::Builder filesStr;
-    auto& fileInfos = cbxArchive->GetFileInfos();
+    const auto& fileInfos = cbxArchive->GetFileInfos();
     int n = len(fileInfos);
-    for (size_t i = 0; i < n; i++) {
+    for (int i = 0; i < n; i++) {
         auto* fi = fileInfos[i];
-        if (str::IsEmpty(fi->name)) {
+        if (len(fi->name) == 0) {
             continue;
         }
         if (fi->isDir) {
@@ -2368,46 +2689,51 @@ void EngineCbx::GetProperties(StrVec& keyValOut) {
         }
         filesStr.AppendChar('\n');
         filesStr.Append(fi->name);
+        if (fi->fileSizeUncompressed > 0) {
+            filesStr.Append(StrL("  "));
+            filesStr.Append(FormatFileSizeTemp(fi->fileSizeUncompressed));
+        }
     }
     // show paths in Windows style (#5543)
-    str::TransCharsInPlace(ToStr(filesStr), StrL("/"), StrL("\\"));
-    AddProp(keyValOut, kPropFiles, ToStr(filesStr));
+    Str filesStrView = ToStr(filesStr);
+    str::TransCharsInPlace(filesStrView, StrL("/"), StrL("\\"));
+    AddProp(propsOut, DocProp::Files, str::DupTemp(filesStrView));
 }
 
-Bitmap* EngineCbx::LoadBitmapForPage(int pageNo, bool& deleteAfterUse) {
+Pixmap* EngineCbx::LoadPixmapForPage(int pageNo, bool& deleteAfterUse) {
     auto timeStart = TimeGet();
     defer{};
     Str img = GetImageData(pageNo);
-    if (str::IsEmpty(img)) {
-        logf("EngineCbx::LoadBitmapForPage(page: %d) failed\n", pageNo);
+    if (len(img) == 0) {
+        logf("EngineCbx::LoadPixmapForPage(page: %d) failed\n", pageNo);
         return nullptr;
     }
     deleteAfterUse = true;
-    auto res = NewGdiplusBitmapFromPixmap(PixmapFromData(img));
+    auto* res = PixmapFromData(img);
     auto dur = TimeSinceInMs(timeStart);
-    logf("EngineCbx::LoadBitmapForPage(page: %d) took %.2f ms\n", pageNo, dur);
+    logf("EngineCbx::LoadPixmapForPage(page: %d) took %.2f ms\n", pageNo, dur);
     return res;
 }
 
 RectF EngineCbx::LoadMediabox(int pageNo) {
-    size_t fileId = files[pageNo - 1]->fileId;
+    int fileId = files[pageNo - 1]->fileId;
 
     // try to get image size from just the file header (first 1024 bytes)
     Str header = cbxArchive->GetFileDataPartById(fileId, 1024);
-    if (!str::IsEmpty(header)) {
-        Size size = ImageSizeFromHeader(header);
+    if (len(header) > 0) {
+        Size size = ImageSizeFromDataPortable(header, true);
         str::Free(header);
         if (!size.IsEmpty()) {
-            return RectF(0, 0, (float)size.dx, (float)size.dy);
+            return {0, 0, (float)size.dx, (float)size.dy};
         }
     }
 
     // fall back to getting the full image data
     Str img = GetImageData(pageNo);
-    if (!str::IsEmpty(img)) {
-        Size size = ImageSizeFromData(img);
+    if (len(img) > 0) {
+        Size size = ImageSizeFromDataPortable(img);
         if (!size.IsEmpty()) {
-            return RectF(0, 0, (float)size.dx, (float)size.dy);
+            return {0, 0, (float)size.dx, (float)size.dy};
         }
         // partial/corrupt header (e.g. dx>0 but dy==0) -- don't return that;
         // fall through to GetPage so we can use the actual decoded dimensions
@@ -2427,31 +2753,31 @@ RectF EngineCbx::LoadMediabox(int pageNo) {
             if (orientation != 0 && (orientation & 1) == 0) {
                 std::swap(w, h);
             }
-        } else if (page->bmp) {
-            w = (int)page->bmp->GetWidth();
-            h = (int)page->bmp->GetHeight();
+        } else if (page->pixmap) {
+            w = page->pixmap->width;
+            h = page->pixmap->height;
         }
         DropPage(page, false);
         if (w > 0 && h > 0) {
-            return RectF(0, 0, (float)w, (float)h);
+            return {0, 0, (float)w, (float)h};
         }
     }
 
     // use A4-like dimensions (at 96 DPI) as fallback for failed pages.
     // Important: this MUST be non-empty -- DisplayModel::CalcZoomReal divides
     // by the mediabox, and a zero-area box trips a debug-break assertion.
-    return RectF(0, 0, 595, 842);
+    return {0, 0, 595, 842};
 }
 
-EngineBase* EngineCbx::CreateFromFile(Str path, Str password, MultiFormatArchive::Format* formatOut,
-                                      bool* isEncryptedOut, Kind hintKind, Str realPath) {
+EngineBase* EngineCbx::CreateFromFile(Str path, Str password, Archive::Format* formatOut, bool* isEncryptedOut,
+                                      FileType hintType, Str realPath) {
     auto timeStart = TimeGet();
     // we sniff the type from content first because the
     // files can be mis-named e.g. .cbr archive with .cbz ext
     // we only need the archive format (zip/rar/7z), not the sub-type
     // (epub/xps/fb2z), so use the Str overload to avoid
     // opening a full archive just for type detection
-    MultiFormatArchive* archive = new MultiFormatArchive();
+    Archive* archive = new Archive();
     archive->password = str::Dup(password);
 
     // realPath is a local copy of a file that lives on a slow drive (see
@@ -2459,13 +2785,9 @@ EngineBase* EngineCbx::CreateFromFile(Str path, Str password, MultiFormatArchive
     // still surface `path` as the logical file path.
     Str openPath = realPath ? realPath : path;
 
-    // eagerly decompress small archives up front so we don't have to
-    // re-open the file for each page's image data.
-    constexpr i64 kMaxEagerLoadSize = 32 * 1024 * 1024;
-    i64 fileSize = file::GetSize(openPath);
-    bool eagerLoad = fileSize > 0 && fileSize < kMaxEagerLoadSize;
-
-    if (!archive->Open(openPath, eagerLoad, hintKind, gArchiveProgressCb)) {
+    // The compressed file size does not bound the memory needed to expand it.
+    // Load individual pages on demand instead.
+    if (!archive->Open(openPath, /*eagerLoad=*/false, hintType, gArchiveProgressCb)) {
         delete archive;
         return nullptr;
     }
@@ -2488,35 +2810,36 @@ EngineBase* EngineCbx::CreateFromFile(Str path, Str password, MultiFormatArchive
     return nullptr;
 }
 
-EngineBase* EngineCbx::CreateFromStream(IStream* stream) {
-    // libarchive inside OpenArchiveFromStream tries every container it
-    // knows (zip/rar/7z/tar/...) in one pass, so a single call replaces
-    // the old try-each-format cascade.
-    MultiFormatArchive* archive = OpenArchiveFromStream(stream);
-    if (!archive) {
+EngineBase* EngineCbx::CreateFromData(Str data) {
+    // libarchive auto-detects the container. Keep the compressed bytes and
+    // extract pages on demand — uncompressed size can far exceed the file.
+    Archive* archive = new Archive();
+    if (!archive->OpenFromData(data, /*eagerLoad=*/false)) {
+        delete archive;
         return nullptr;
     }
     EngineCbx* engine = new EngineCbx(archive);
-    if (engine->LoadFromStream(stream)) {
+    if (engine->LoadFromData(data)) {
         return engine;
     }
     SafeEngineRelease(&engine);
     return nullptr;
 }
 
-static Kind cbxKinds[] = {
-    kindFileCbz, kindFileCbr, kindFileCb7, kindFileCbt, kindFileZip, kindFileRar, kindFile7Z, kindFileTar,
+static FileType cbxTypes[] = {
+    FileType::Cbz, FileType::Cbr, FileType::Cb7,    FileType::Cbt,
+    FileType::Zip, FileType::Rar, FileType::SevenZ, FileType::Tar,
 };
 
-bool IsEngineCbxSupportedFileType(Kind kind) {
-    int n = dimof(cbxKinds);
-    return KindIndexOf(cbxKinds, n, kind) >= 0;
+bool IsEngineCbxSupportedFileType(FileType kind) {
+    int n = dimof(cbxTypes);
+    return FileTypeIndexOf(cbxTypes, n, kind) >= 0;
 }
 
-EngineBase* CreateEngineCbxFromFile(Str path, PasswordUI* pwdUI, Kind hintKind, Str realPath) {
-    MultiFormatArchive::Format fmt = MultiFormatArchive::Format::Unknown;
+EngineBase* CreateEngineCbxFromFile(Str path, PasswordUI* pwdUI, FileType hintType, Str realPath) {
+    Archive::Format fmt = Archive::Format::Unknown;
     bool isEncrypted = false;
-    EngineBase* engine = EngineCbx::CreateFromFile(path, {}, &fmt, &isEncrypted, hintKind, realPath);
+    EngineBase* engine = EngineCbx::CreateFromFile(path, {}, &fmt, &isEncrypted, hintType, realPath);
     if (engine || !pwdUI) {
         return engine;
     }
@@ -2524,7 +2847,7 @@ EngineBase* CreateEngineCbxFromFile(Str path, PasswordUI* pwdUI, Kind hintKind, 
         return nullptr;
     }
     // libarchive can't decrypt 7z archives, so don't prompt for password
-    if (fmt == MultiFormatArchive::Format::SevenZip || fmt == MultiFormatArchive::Format::Unknown) {
+    if (fmt == Archive::Format::SevenZip || fmt == Archive::Format::Unknown) {
         logf("CreateEngineCbxFromFile: encrypted 7z/unknown not supported\n");
         return nullptr;
     }
@@ -2536,7 +2859,7 @@ EngineBase* CreateEngineCbxFromFile(Str path, PasswordUI* pwdUI, Kind hintKind, 
         if (!pwd) {
             return {}; // user cancelled
         }
-        engine = EngineCbx::CreateFromFile(path, pwd, nullptr, nullptr, hintKind, realPath);
+        engine = EngineCbx::CreateFromFile(path, pwd, nullptr, nullptr, hintType, realPath);
         str::Free(pwd);
         if (engine) {
             return engine;
@@ -2544,8 +2867,8 @@ EngineBase* CreateEngineCbxFromFile(Str path, PasswordUI* pwdUI, Kind hintKind, 
     }
 }
 
-EngineBase* CreateEngineCbxFromStream(IStream* stream) {
-    return EngineCbx::CreateFromStream(stream);
+EngineBase* CreateEngineCbxFromData(Str data) {
+    return EngineCbx::CreateFromData(data);
 }
 
 bool IsEngineImages(EngineBase* engine) {
@@ -2556,9 +2879,38 @@ bool IsEngineImages(EngineBase* engine) {
            IsOfKind(engine, kindEngineComicBooks);
 }
 
-void EngineImagesGetImageProperties(EngineBase* engine, int pageNo, StrVec& keyValOut) {
+void EngineImagesGetImageProperties(EngineBase* engine, int pageNo, Props& propsOut) {
     if (!IsEngineImages(engine)) {
         return;
     }
-    ((EngineImages*)engine)->GetImageProperties(pageNo, keyValOut);
+    ((EngineImages*)engine)->GetImageProperties(pageNo, propsOut);
+}
+
+// Image base name and uncompressed size for page-info tip; does not decode.
+// Returns false when engine is not an image collection or pageNo is invalid.
+bool EngineImagesGetPageFileInfo(EngineBase* engine, int pageNo, TempStr* nameOut, i64* sizeOut) {
+    if (!IsEngineImages(engine) || pageNo < 1 || pageNo > engine->PageCount()) {
+        return false;
+    }
+    auto* e = (EngineImages*)engine;
+    if (nameOut) {
+        TempStr pathOrName = e->GetImagePathTemp(pageNo);
+        *nameOut = pathOrName ? path::GetBaseNameTemp(pathOrName) : TempStr{};
+        // single-image engine: path is the document itself; still report the base name
+        if (!*nameOut) {
+            Str fp = engine->FilePath();
+            *nameOut = fp ? path::GetBaseNameTemp(fp) : TempStr{};
+        }
+    }
+    if (sizeOut) {
+        *sizeOut = e->GetImageByteSize(pageNo);
+    }
+    return true;
+}
+
+Str EngineImagesGetImageData(EngineBase* engine, int pageNo) {
+    if (!IsEngineImages(engine) || pageNo < 1 || pageNo > engine->PageCount()) {
+        return {};
+    }
+    return ((EngineImages*)engine)->GetImageData(pageNo);
 }

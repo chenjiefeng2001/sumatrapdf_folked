@@ -2,17 +2,16 @@
    License: GPLv3 */
 
 #include "base/Base.h"
-#include "base/Dpi.h"
+#include "gui/Dpi.h"
 #include "base/File.h"
 #include "base/Win.h"
-#include "base/Thread.h"
 #include "base/UITask.h"
-#include "base/Log.h"
 
-#include "wingui/UIModels.h"
-#include "wingui/Layout.h"
-#include "wingui/WinGui.h"
-#include "wingui/WebView.h"
+#include "gui/UIModels.h"
+#include "gui/Layout.h"
+#include "gui/PlatformFont.h"
+#include "gui/win/WinGui.h"
+#include "gui/win/WebView.h"
 
 #include "Settings.h"
 #include "DocController.h"
@@ -23,6 +22,7 @@
 #include "WindowTab.h"
 #include "SumatraPDF.h"
 #include "Translations.h"
+#include "Theme.h"
 
 #include "base/GuessFileType.h"
 
@@ -30,25 +30,22 @@
 #include "EngineAll.h"
 
 bool IsAIChatAvailable() {
-#ifdef _MSC_VER
-    return IsWindows10OrGreater();
-#else
-    return false;
-#endif
+    // the chat UI is a WebView
+    return HasWebView();
 }
 
 bool IsAIChatSupportedForFile(Str filePath, Kind engineKind) {
     if (!filePath) {
         return false;
     }
-    if (engineKind == kindEngineComicBooks || engineKind == kindEngineImageDir) {
+    // Comics, image folders, single images, and DjVu have no useful text/agent
+    // payload for chat (menu/context hide these via IsAIChatSupportedForTab).
+    if (engineKind == kindEngineComicBooks || engineKind == kindEngineImageDir || engineKind == kindEngineImage ||
+        engineKind == kindEngineDjVu) {
         return false;
     }
-    Kind kind = GuessFileTypeFromName(filePath);
-    if (kind == kindFilePDF) {
-        return true;
-    }
-    return IsEngineImageSupportedFileType(kind);
+    FileType kind = GuessFileTypeFromName(filePath);
+    return kind == FileType::PDF;
 }
 
 bool IsAIChatSupportedForTab(WindowTab* tab) {
@@ -160,10 +157,25 @@ i64 AIChatFileTimeToMs(const FILETIME& ft) {
     return (i64)(uli.QuadPart / 10000);
 }
 
+// In-memory record of the most recent chat traffic (sent commands + received
+// stream), for post-mortem debugging when a chat fails. Fed from AIChatLog, so
+// every ">>>"/"<<<" line the app already logs is captured here too. Bounded: the
+// whole buffer is dropped once it grows past the cap.
+static Mutex gAIChatDbgMu;
+static str::Builder gAIChatDbgLog;
+constexpr int kAIChatDbgMaxBytes = 256 * 1024;
+
+void AIChatDebugReset() {
+    ScopedMutex lk(&gAIChatDbgMu);
+    gAIChatDbgLog.Reset();
+}
+
+TempStr AIChatDebugGetTemp() {
+    ScopedMutex lk(&gAIChatDbgMu);
+    return str::DupTemp(ToStr(gAIChatDbgLog));
+}
+
 void AIChatLog(AIChatLogger* logger, Str direction, Str text) {
-    if (!logger) {
-        return;
-    }
     if (!text) {
         text = "";
     }
@@ -178,11 +190,22 @@ void AIChatLog(AIChatLogger* logger, Str direction, Str text) {
         entry.AppendChar('\n');
     }
 
-    if (logger->logTag) {
-        logfa("%s %s: %s", logger->logTag, direction, text);
+    {
+        ScopedMutex lk(&gAIChatDbgMu);
+        if (len(gAIChatDbgLog) > kAIChatDbgMaxBytes) {
+            gAIChatDbgLog.Reset();
+        }
+        gAIChatDbgLog.Append(ToStr(entry));
     }
 
-    TempStr dir = GetNotImportantDataDirTemp();
+    if (!logger) {
+        return;
+    }
+    if (logger->logTag) {
+        logf("%s %s: %s", logger->logTag, direction, text);
+    }
+
+    TempStr dir = GetSumatraDataDirTemp();
     if (!dir || !logger->logFileName) {
         return;
     }
@@ -203,7 +226,7 @@ void AIChatLog(AIChatLogger* logger, Str direction, Str text) {
 
 constexpr int kBtnIdAIChatLearnMore = 100;
 
-static HRESULT CALLBACK AIChatNotInstalledDialogCallback(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+static HRESULT CALLBACK AIChatNotInstalledDialogCallback(HWND /*hwnd*/, UINT msg, WPARAM wParam, LPARAM /*lParam*/,
                                                          LONG_PTR lpRefData) {
     Str docUri = lpRefData ? *(Str*)lpRefData : Str{};
     switch (msg) {
@@ -222,7 +245,8 @@ static HRESULT CALLBACK AIChatNotInstalledDialogCallback(HWND hwnd, UINT msg, WP
 
 void AIChatShowNotInstalledDialog(const AIChatNotInstalledDialogArgs& args) {
     Str linkLabel = _TRA("AI Chat documentation");
-    TempStr content = fmt(_TRA("See <a href=\"#\">%s</a> for setup instructions.").s, linkLabel);
+    TempStr link = fmt(R"(<a href="#">%s</a>)", linkLabel);
+    TempStr content = fmt(_TRA("See %s for setup instructions.").s, link);
 
     TASKDIALOG_BUTTON buttons[2];
     buttons[0].nButtonID = IDOK;
@@ -240,7 +264,7 @@ void AIChatShowNotInstalledDialog(const AIChatNotInstalledDialogArgs& args) {
     dialogConfig.pszMainInstruction = CWStrTemp(args.mainInstruction);
     dialogConfig.pszContent = CWStrTemp(content);
     dialogConfig.nDefaultButton = IDOK;
-    dialogConfig.dwFlags = flags;
+    dialogConfig.dwFlags = (TASKDIALOG_FLAGS)flags;
     dialogConfig.pfCallback = AIChatNotInstalledDialogCallback;
     dialogConfig.lpCallbackData = (LONG_PTR)&args.docUri;
     dialogConfig.pButtons = buttons;
@@ -253,10 +277,10 @@ void AIChatShowNotInstalledDialog(const AIChatNotInstalledDialogArgs& args) {
 TempStr AIChatFindExecutableTemp(const StrVec& fullPathCandidates, WStr searchExeName, WStr searchNameNoExt) {
 #ifdef _MSC_VER
     for (int i = 0; i < len(fullPathCandidates); i++) {
-        if (file::Exists(fullPathCandidates.At(i))) {
+        if (file::Exists(fullPathCandidates[i])) {
             // copy into the temp arena: callers pass a local StrVec that is
             // destroyed on return, so returning a view into it would dangle
-            return str::DupTemp(fullPathCandidates.At(i));
+            return str::DupTemp(fullPathCandidates[i]);
         }
     }
     WCHAR pathW[MAX_PATH];
@@ -271,7 +295,7 @@ TempStr AIChatFindExecutableTemp(const StrVec& fullPathCandidates, WStr searchEx
 }
 
 void AIChatAppendModelUnique(StrVec& models, Str model) {
-    if (str::IsEmpty(model)) {
+    if (len(model) == 0) {
         return;
     }
     TempStr norm = str::DupTemp(model);
@@ -285,7 +309,7 @@ void AIChatAppendModelUnique(StrVec& models, Str model) {
     norm = Str(norm.s + start, norm.len - start);
     str::ToLowerInPlace(norm);
     for (int i = 0; i < len(models); i++) {
-        if (str::EqI(models.At(i), norm)) {
+        if (str::EqI(models[i], norm)) {
             return;
         }
     }
@@ -293,25 +317,38 @@ void AIChatAppendModelUnique(StrVec& models, Str model) {
 }
 
 int AIChatFindModelInList(const StrVec& models, Str model) {
-    if (str::IsEmpty(model)) {
+    if (len(model) == 0) {
         return -1;
     }
     TempStr norm = str::DupTemp(model);
     str::ToLowerInPlace(norm);
     for (int i = 0; i < len(models); i++) {
-        if (str::EqI(models.At(i), norm)) {
+        if (str::EqI(models[i], norm)) {
             return i;
         }
     }
     return -1;
 }
 
+// the saved model if it's in the list, else defaultModel
+Str AIChatResolveModel(const StrVec& models, Str model, Str defaultModel) {
+    int idx = AIChatFindModelInList(models, model);
+    if (idx >= 0) {
+        return models[idx];
+    }
+    idx = AIChatFindModelInList(models, defaultModel);
+    if (idx >= 0) {
+        return models[idx];
+    }
+    return defaultModel;
+}
+
 TempStr AIChatModelDisplayNameTemp(Str model, Str defaultDisplay) {
-    if (str::IsEmpty(model)) {
+    if (len(model) == 0) {
         return str::DupTemp(defaultDisplay ? defaultDisplay : StrL(""));
     }
     TempStr dup = str::DupTemp(model);
-    if (!str::IsEmpty(dup)) {
+    if (len(dup) > 0) {
         dup.s[0] = (char)toupper((unsigned char)dup.s[0]);
     }
     return dup;
@@ -319,10 +356,10 @@ TempStr AIChatModelDisplayNameTemp(Str model, Str defaultDisplay) {
 
 bool AIChatGetMarkedJsResource(void* ctx, Str path, WebViewResourceResult* res) {
     auto* data = (LoadedDataResource*)ctx;
-    if (!data || !res || str::IsEmpty(path)) {
+    if (!data || !res || len(path) == 0) {
         return false;
     }
-    if (!str::EqI(path, "/marked.min.js") && !str::EqI(path, "marked.min.js")) {
+    if (!str::EqI(path, StrL("/marked.min.js")) && !str::EqI(path, StrL("marked.min.js"))) {
         return false;
     }
     res->data = data->data;
@@ -335,23 +372,24 @@ bool AIChatGetMarkedJsResource(void* ctx, Str path, WebViewResourceResult* res) 
 static const char* kAIChatHtmlFmt = R"(<!DOCTYPE html><html><head><meta charset='utf-8'>
 <script src='%smarked.min.js'></script>
 <style>
+:root { %s }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: 'Segoe UI', sans-serif; font-size: 13px; margin: 0; padding: 6px;
-  background: %s; color: #222; line-height: 1.4; }
+  background: var(--bg); color: var(--fg); line-height: 1.4; }
 p { margin: 2px 0; }
 h1,h2,h3,h4 { margin: 6px 0 2px 0; }
 ul,ol { margin: 2px 0 2px 18px; }
 li { margin: 1px 0; }
-.user { color: #1a5276; font-weight: bold; margin: 8px 0 2px 0; padding: 4px 0;
-  border-top: 1px solid #ccc; }
-.tool { color: #555; font-size: 11px; font-style: italic;
-  border-left: 3px solid #999; padding-left: 6px; margin: 2px 0; }
+.user { color: var(--user); font-weight: bold; margin: 8px 0 2px 0; padding: 4px 0;
+  border-top: 1px solid var(--border); }
+.tool { color: var(--muted); font-size: 11px; font-style: italic;
+  border-left: 3px solid var(--muted); padding-left: 6px; margin: 2px 0; }
 .assistant { margin: 2px 0; }
-.assistant pre { background: #f0f0f0; padding: 6px; border-radius: 4px;
+.assistant pre { background: var(--code-bg); padding: 6px; border-radius: 4px;
   overflow-x: auto; margin: 3px 0; font-size: 12px; }
-.assistant code { background: #e8e8e8; padding: 1px 3px; border-radius: 2px; font-size: 12px; }
+.assistant code { background: var(--code-bg); padding: 1px 3px; border-radius: 2px; font-size: 12px; }
 .assistant pre code { background: none; padding: 0; }
-.error { color: #c0392b; font-weight: bold; margin: 4px 0; }
+.error { color: var(--error); font-weight: bold; margin: 4px 0; }
 </style></head><body><div id='chat'></div>
 <script>
 var chatDiv = document.getElementById('chat');
@@ -381,6 +419,34 @@ function addError(text) {
   chatDiv.appendChild(d);
   scrollToBottom();
 }
+function sanitizedMarkdown(markdown) {
+  var t = document.createElement('template');
+  t.innerHTML = marked.parse(markdown);
+  var allowed = new Set(['A', 'BLOCKQUOTE', 'BR', 'CODE', 'DEL', 'EM', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+                         'HR', 'LI', 'OL', 'P', 'PRE', 'STRONG', 'TABLE', 'TBODY', 'TD', 'TH', 'THEAD', 'TR', 'UL']);
+  var nodes = Array.from(t.content.querySelectorAll('*'));
+  for (var el of nodes) {
+    if (!allowed.has(el.tagName)) {
+      el.replaceWith(document.createTextNode(el.textContent || ''));
+      continue;
+    }
+    for (var attr of Array.from(el.attributes)) {
+      var keep = el.tagName === 'A' && (attr.name === 'href' || attr.name === 'title');
+      if (!keep) {
+        el.removeAttribute(attr.name);
+      }
+    }
+    if (el.tagName === 'A' && el.hasAttribute('href')) {
+      try {
+        var u = new URL(el.getAttribute('href'), location.href);
+        if (!['http:', 'https:', 'mailto:'].includes(u.protocol)) el.removeAttribute('href');
+      } catch (_) {
+        el.removeAttribute('href');
+      }
+    }
+  }
+  return t.content;
+}
 function appendText(text) {
   if (!currentBlock) {
     currentBlock = document.createElement('div');
@@ -390,7 +456,7 @@ function appendText(text) {
   }
   currentRaw += text;
   if (typeof marked !== 'undefined') {
-    currentBlock.innerHTML = marked.parse(currentRaw);
+    currentBlock.replaceChildren(sanitizedMarkdown(currentRaw));
   } else {
     currentBlock.textContent = currentRaw;
   }
@@ -408,10 +474,28 @@ function scrollToBottom() {
 }
 </script></body></html>)";
 
+static TempStr ColorToCssTemp(Color c) {
+    return fmt("#%02x%02x%02x", (int)GetRValue(c), (int)GetGValue(c), (int)GetBValue(c));
+}
+
+// bgColor is the per-backend BgColor setting; "#ffffff" is its default value
+// and means "follow the theme". An explicitly different color keeps the
+// classic light chat colors on top of that background.
 TempStr AIChatFormatChatHtmlTemp(Str virtualHost, Str bgColor) {
     Str host = virtualHost ? virtualHost : StrL("");
-    Str bg = bgColor ? bgColor : StrL("#ffffff");
-    return fmt(kAIChatHtmlFmt, host, bg);
+    bool followTheme = str::IsEmptyOrWhiteSpace(bgColor) || str::EqI(bgColor, StrL("#ffffff"));
+    Color themeBg = ThemeControlBackgroundColor();
+    bool dark = followTheme && !IsLightColor(themeBg);
+    TempStr bg = followTheme ? ColorToCssTemp(themeBg) : str::DupTemp(bgColor);
+    TempStr fg = dark ? ColorToCssTemp(ThemeWindowTextColor()) : str::DupTemp("#222222");
+    Str muted = dark ? StrL("#a0a0a0") : StrL("#555555");
+    Str user = dark ? StrL("#7fb3d5") : StrL("#1a5276");
+    Str border = dark ? StrL("#4a4a4a") : StrL("#cccccc");
+    Str codeBg = dark ? StrL("#3a3a3a") : StrL("#f0f0f0");
+    Str error = dark ? StrL("#e74c3c") : StrL("#c0392b");
+    TempStr cssVars = fmt("--bg:%s; --fg:%s; --muted:%s; --user:%s; --border:%s; --code-bg:%s; --error:%s;", bg, fg,
+                          muted, user, border, codeBg, error);
+    return fmt(kAIChatHtmlFmt, host, cssVars);
 }
 
 void AIChatCloseProcess(HANDLE* processHandle, bool terminateIfRunning) {
@@ -427,7 +511,7 @@ void AIChatCloseProcess(HANDLE* processHandle, bool terminateIfRunning) {
 }
 
 bool AIChatLaunchProcessWithStdoutPipe(Str cmdLine, Str cwd, AIChatProcessLaunchResult* out) {
-    if (!out || str::IsEmpty(cmdLine)) {
+    if (!out || len(cmdLine) == 0) {
         return false;
     }
     *out = {};
@@ -474,20 +558,20 @@ constexpr int kAIChatLabelCloseBtnDx = 16;
 constexpr int kAIChatLabelCloseBtnSpaceDx = 8;
 constexpr int kAIChatLabelPadX = 2;
 
-int AIChatLabelMaxTextDx(HWND labelHwnd, int labelDx) {
-    int padX = DpiScale(labelHwnd, kAIChatLabelPadX);
-    int btnDx = DpiScale(labelHwnd, kAIChatLabelCloseBtnDx);
-    int spaceDx = DpiScale(labelHwnd, kAIChatLabelCloseBtnSpaceDx);
-    int maxDx = labelDx - btnDx - spaceDx - 2 * padX;
+int AIChatLabelMaxTextDx(int labelDx) {
+    int padX = DpiScale(kAIChatLabelPadX);
+    int btnDx = DpiScale(kAIChatLabelCloseBtnDx);
+    int spaceDx = DpiScale(kAIChatLabelCloseBtnSpaceDx);
+    int maxDx = labelDx - btnDx - spaceDx - (2 * padX);
     return maxDx > 0 ? maxDx : 0;
 }
 
-TempStr AIChatFitPanelTitleTemp(HWND labelHwnd, HFONT font, Str prefix, Str docName, int maxDx) {
+TempStr AIChatFitPanelTitleTemp(PlatformFont* font, Str prefix, Str docName, int maxDx) {
     TempStr full = str::JoinTemp(prefix, docName);
     if (maxDx <= 0) {
         return full;
     }
-    Size sz = HwndMeasureText(labelHwnd, full, font);
+    Size sz = PlatformFontMeasureText(font, full);
     if (sz.dx <= maxDx) {
         return full;
     }
@@ -503,7 +587,7 @@ TempStr AIChatFitPanelTitleTemp(HWND labelHwnd, HFONT font, Str prefix, Str docN
     while (lo <= hi) {
         int mid = (lo + hi) / 2;
         TempStr trial = str::JoinTemp(prefix, ShortenStringUtf8Temp(docName, mid));
-        sz = HwndMeasureText(labelHwnd, trial, font);
+        sz = PlatformFontMeasureText(font, trial);
         if (sz.dx <= maxDx) {
             best = trial;
             lo = mid + 1;
@@ -524,7 +608,7 @@ TempStr AIChatGenerateSessionIdTemp() {
 }
 
 static AIChatBackend BackendFromTabStorage(int v) {
-    if (v < 0 || v > 2) {
+    if (v < 0 || v >= kAIChatProviderCount) {
         return AIChatBackend::None;
     }
     return (AIChatBackend)v;
@@ -551,42 +635,14 @@ void AIChatSetTabPanelOpen(WindowTab* tab, AIChatBackend backend) {
     tab->aiChatPanelOpen = BackendToTabStorage(backend);
 }
 
-static void ApplyPanelHwndVisibility(MainWindow* win) {
-    if (!win) {
-        return;
-    }
-    if (win->hwndClaudeBox) {
-        HwndSetVisibility(win->hwndClaudeBox, win->claudeVisible);
-    }
-    if (win->claudeSplitter && win->claudeSplitter->hwnd) {
-        HwndSetVisibility(win->claudeSplitter->hwnd, win->claudeVisible);
-    }
-    if (win->hwndGrokBox) {
-        HwndSetVisibility(win->hwndGrokBox, win->grokVisible);
-    }
-    if (win->grokSplitter && win->grokSplitter->hwnd) {
-        HwndSetVisibility(win->grokSplitter->hwnd, win->grokVisible);
-    }
-    if (win->hwndCodexBox) {
-        HwndSetVisibility(win->hwndCodexBox, win->codexVisible);
-    }
-    if (win->codexSplitter && win->codexSplitter->hwnd) {
-        HwndSetVisibility(win->codexSplitter->hwnd, win->codexVisible);
-    }
-}
-
+// records the desired panel visibility; RelayoutFrame (via the scheduled UI
+// update, which every caller triggers) shows/hides the panel windows
 void AIChatSyncPanelsToCurrentTab(MainWindow* win) {
     if (!win) {
         return;
     }
-    // CurrentTab() can be null during session restore (tabs not fully loaded yet),
-    // so guard against it to avoid null-pointer crashes.
-    WindowTab* tab = win->CurrentTab();
-    AIChatBackend open = tab ? AIChatGetTabPanelOpen(tab) : AIChatBackend::None;
-    win->claudeVisible = open == AIChatBackend::Claude;
-    win->grokVisible = open == AIChatBackend::Grok;
-    win->codexVisible = open == AIChatBackend::Codex;
-    ApplyPanelHwndVisibility(win);
+    AIChatBackend open = AIChatGetTabPanelOpen(win->CurrentTab());
+    win->uiState.aiChatVisible = open != AIChatBackend::None;
 }
 
 void AIChatApplySavedSidebarDx(MainWindow* win) {
@@ -607,7 +663,7 @@ void AIChatUpdateSidebarDx(MainWindow* win, int dx, bool persist) {
         gGlobalPrefs->aiChatSidebarDx = dx;
     }
     if (persist) {
-        SaveSettings();
+        ScheduleSaveSettings();
     }
 }
 

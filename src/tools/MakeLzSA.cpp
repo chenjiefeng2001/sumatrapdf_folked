@@ -10,11 +10,10 @@
 #include <LzmaEnc.h>
 #include <Bra.h>
 #include <zlib.h> // for crc32
-#include "base/ByteWriter.h"
+#include "base/ByteReaderWriter.h"
 #include "base/CmdLineArgsIter.h"
 #include "base/File.h"
-#include "base/DirIter.h"
-#include "base/Win.h"
+#include "base/DirScan.h"
 #include "base/LzmaSimpleArchive.h"
 
 namespace lzsa {
@@ -44,7 +43,7 @@ static bool Compress(const char* uncompressed, size_t uncompressedSize, char* co
         LzmaEncProps_Init(&props);
 
         // always apply the BCJ filter for speed (else two or three compression passes would be required)
-        ScopedMem<u8> bcj_enc(AllocArray<u8>(uncompressedSize));
+        ScopedMem<u8> bcj_enc(AllocArray<u8>((int)uncompressedSize));
         if (bcj_enc) {
             memcpy(bcj_enc, uncompressed, uncompressedSize);
             UInt32 x86State;
@@ -65,7 +64,7 @@ static bool Compress(const char* uncompressed, size_t uncompressedSize, char* co
     if (lzma_size <= uncompressedSize) {
         *compressedSize = lzma_size;
     } else {
-        compressed[0] = (u8)-1;
+        compressed[0] = (char)(u8)-1;
         memcpy(compressed + 1, uncompressed, uncompressedSize);
         *compressedSize = uncompressedSize + 1;
     }
@@ -80,7 +79,7 @@ static bool AppendEntry(str::Builder& data, str::Builder& content, Str filePath,
     u32 headerSize = 25 + (u32)nameLen;
     FILETIME ft = file::GetModificationTime(filePath);
 
-    constexpr size_t kBufSize = 24;
+    constexpr int kBufSize = 24;
 
     if (fi && FileTimeEq(ft, fi->ftModified)) {
     ReusePrevious:
@@ -108,9 +107,7 @@ static bool AppendEntry(str::Builder& data, str::Builder& content, Str filePath,
 
     size_t compressedSize = (size_t)fileData.len + 1;
     char* compressed = (char*)malloc(compressedSize);
-    defer {
-        free(compressed);
-    };
+    AutoCall freeCompressed(free, (void*)compressed);
     if (!compressed) {
         return false;
     }
@@ -129,7 +126,7 @@ static bool AppendEntry(str::Builder& data, str::Builder& content, Str filePath,
     data.Append(meta.AsByteSlice());
     data.Append(inArchiveName);
     data.AppendChar('\0');
-    return content.Append(Str(compressed.Get(), (int)compressedSize));
+    return content.Append(Str(compressed, (int)compressedSize));
 }
 
 // creates an archive from files (starting at index skipFiles);
@@ -138,24 +135,23 @@ static bool AppendEntry(str::Builder& data, str::Builder& content, Str filePath,
 // (this is required for absolute paths)
 bool CreateArchive(Str archivePath, StrVec& files, size_t skipFiles = 0) {
     Str prevData = file::ReadFile(archivePath);
-    size_t prevDataLen = (size_t)prevData.len;
     lzma::SimpleArchive prevArchive;
-    if (!lzma::ParseSimpleArchive((const u8*)prevData.s, prevDataLen, &prevArchive)) {
+    if (!lzma::ParseSimpleArchive((const u8*)prevData.s, prevData.len, &prevArchive)) {
         prevArchive.filesCount = 0;
     }
 
     str::Builder data;
     str::Builder content;
 
-    constexpr size_t kBufSize = 8;
+    constexpr int kBufSize = 8;
     ByteWriterLE lzsaHeader(kBufSize);
     lzsaHeader.Write32(LZMA_MAGIC_ID);
-    lzsaHeader.Write32((u32)(files.Size() - skipFiles));
+    lzsaHeader.Write32((u32)(len(files) - (int)skipFiles));
     ReportIf(lzsaHeader.Size() != kBufSize);
     data.Append(lzsaHeader.AsByteSlice());
 
-    for (int i = skipFiles; i < files.Size(); i++) {
-        TempStr filePath = str::DupTemp(files.At(i));
+    for (int i = (int)skipFiles; i < len(files); i++) {
+        TempStr filePath = str::DupTemp(files[i]);
         Str sep = str::SliceFromCharLast(filePath, ':');
         TempStr utf8Name;
         if (sep) {
@@ -224,7 +220,7 @@ static void MyParseCmdLine(WStr cmdLine, StrVec& args) {
         Str arg = ToUtf8Temp(argsArr[i]);
         args.Append(arg);
     }
-    LocalFree(argsArr);
+    LocalFree((void*)argsArr);
 }
 
 int mainVerify(Str archivePath) {
@@ -234,15 +230,13 @@ int mainVerify(Str archivePath) {
     errorStep++;
 
     lzma::SimpleArchive lzsa;
-    bool ok = lzma::ParseSimpleArchive((const u8*)fileData.s, (size_t)fileData.len, &lzsa);
+    bool ok = lzma::ParseSimpleArchive((const u8*)fileData.s, fileData.len, &lzsa);
     FailIf(!ok, "\"%s\" is no valid LzSA file", archivePath.s);
     errorStep++;
 
     for (int i = 0; i < lzsa.filesCount; i++) {
         auto data = lzma::GetFileDataByIdx(&lzsa, i, nullptr);
-        defer {
-            free(data);
-        };
+        AutoCall freeData(free, (void*)data);
         FailIf(!data, "Failed to extract data for \"%s\"", lzsa.files[i].name.s);
         errorStep++;
     }
@@ -272,21 +266,21 @@ int main(__unused int argc, __unused char** argv) {
     MyParseCmdLine(GetCommandLine(), args);
     int errorStep = 1;
 
-    auto exeName = path::GetBaseNameTemp(args.At(0));
+    auto exeName = path::GetBaseNameTemp(args[0]);
 
-    int nArgs = args.Size();
+    int nArgs = len(args);
     // first arg is exe path, the rest is
     if (nArgs < 2) {
         return printUsage(exeName);
     }
 
-    Str archiveName = args.At(1);
+    Str archiveName = args[1];
     if (nArgs == 2 && file::Exists(archiveName)) {
         return mainVerify(archiveName);
     }
 
     if (nArgs == 3) {
-        auto dir = args.At(2);
+        auto dir = args[2];
         if (dir::Exists(dir)) {
             bool ok = lzsa::CreateArchiveFromDir(archiveName, dir);
             if (!ok) {
@@ -302,7 +296,7 @@ int main(__unused int argc, __unused char** argv) {
     errorStep++;
 
     bool ok = lzsa::CreateArchive(archiveName, args, 2);
-    FailIf(!ok, "Failed to create \"%s\"", args.At(1).s);
+    FailIf(!ok, "Failed to create \"%s\"", args[1].s);
 
     return 0;
 }

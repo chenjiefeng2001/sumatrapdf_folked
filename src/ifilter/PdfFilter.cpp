@@ -5,21 +5,25 @@
 #include "base/ScopedWin.h"
 #include "base/Win.h"
 
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
 
 #include "DocProperties.h"
 #include "DocController.h"
 #include "EngineBase.h"
+#include "base/GuessFileType.h"
 #include "EngineAll.h"
 
 #include "FilterBase.h"
 #include "RegistrySearchFilter.h"
 #include "PdfFilter.h"
 
-#include "base/Log.h"
-
 struct EBookUI;
 EBookUI* GetEBookUI() {
+    return nullptr;
+}
+
+struct FileEBookUI;
+FileEBookUI* GetFileEBookUI(Str) {
     return nullptr;
 }
 
@@ -36,24 +40,10 @@ HRESULT PdfFilter::OnInit() {
     logf("PdfFilter::OnInit()\n");
     CleanUp();
 
-    // TODO: EngineMupdf::CreateFromStream never returns with
-    //       m_pStream instead of a clone - why?
-
-    // load content of PDF document into a seekable stream
-    HRESULT res;
-    Str data = GetDataFromStream(m_pStream, &res);
-    if (str::IsEmpty(data)) {
-        return res;
-    }
-
-    IStream* strm = CreateStreamFromData(data);
-    str::Free(data);
-    ScopedComPtr<IStream> stream(strm);
-    if (!stream) {
+    if (str::IsNull(m_data)) {
         return E_FAIL;
     }
-
-    m_pdfEngine = CreateEngineMupdfFromStream(stream, "foo.pdf");
+    m_pdfEngine = CreateEngineMupdfFromData(m_data, "foo.pdf", nullptr);
     if (!m_pdfEngine) {
         return E_FAIL;
     }
@@ -71,9 +61,7 @@ static bool PdfDateParse(Str pdfDate, SYSTEMTIME* timeOut) {
     ZeroMemory(timeOut, sizeof(SYSTEMTIME));
     Str slice = pdfDate;
     // "D:" at the beginning is optional
-    if (str::StartsWith(slice, "D:")) {
-        slice = Str(slice.s + 2, slice.len - 2);
-    }
+    str::TrimPrefix(slice, StrL("D:"));
     int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
     Str end = str::Parse(slice,
                          "%4d%2d%2d"
@@ -112,9 +100,9 @@ HRESULT PdfFilter::GetNextChunkValue(ChunkValue& chunkValue) {
 
         case PdfFilterState::Author:
             m_state = PdfFilterState::Title;
-            prop = m_pdfEngine->GetPropertyTemp(kPropAuthor);
-            if (!str::IsEmpty(prop)) {
-                ws = ToWStr(prop);
+            prop = m_pdfEngine->GetPropertyTemp(DocProp::Author);
+            if (len(prop) > 0) {
+                ws = ToWStrTemp(prop);
                 chunkValue.SetTextValue(PKEY_Author, ws.s);
                 return S_OK;
             }
@@ -123,12 +111,12 @@ HRESULT PdfFilter::GetNextChunkValue(ChunkValue& chunkValue) {
 
         case PdfFilterState::Title:
             m_state = PdfFilterState::Date;
-            prop = m_pdfEngine->GetPropertyTemp(kPropTitle);
+            prop = m_pdfEngine->GetPropertyTemp(DocProp::Title);
             if (!prop) {
-                prop = m_pdfEngine->GetPropertyTemp(kPropSubject);
+                prop = m_pdfEngine->GetPropertyTemp(DocProp::Subject);
             }
-            if (!str::IsEmpty(prop)) {
-                ws = ToWStr(prop);
+            if (len(prop) > 0) {
+                ws = ToWStrTemp(prop);
                 chunkValue.SetTextValue(PKEY_Title, ws.s);
                 return S_OK;
             }
@@ -137,11 +125,11 @@ HRESULT PdfFilter::GetNextChunkValue(ChunkValue& chunkValue) {
 
         case PdfFilterState::Date:
             m_state = PdfFilterState::Content;
-            prop = m_pdfEngine->GetPropertyTemp(kPropModificationDate);
+            prop = m_pdfEngine->GetPropertyTemp(DocProp::ModificationDate);
             if (!prop) {
-                prop = m_pdfEngine->GetPropertyTemp(kPropCreationDate);
+                prop = m_pdfEngine->GetPropertyTemp(DocProp::CreationDate);
             }
-            if (!str::IsEmpty(prop)) {
+            if (len(prop) > 0) {
                 SYSTEMTIME systime;
                 FILETIME filetime;
                 if (PdfDateParse(prop, &systime) && SystemTimeToFileTime(&systime, &filetime)) {
@@ -159,9 +147,12 @@ HRESULT PdfFilter::GetNextChunkValue(ChunkValue& chunkValue) {
                     FreePageText(&pageText);
                     continue;
                 }
+                // IFilter text is CRLF; extraction uses \n. CHUNK_EOP: each
+                // page is its own paragraph so the indexer doesn't glue pages
+                // together (#4859).
                 TempStr crlfText = str::ReplaceTemp(pageText.text, StrL("\n"), StrL("\r\n"));
                 TempWStr text = ToWStrTemp(crlfText);
-                chunkValue.SetTextValue(PKEY_Search_Contents, text.s, CHUNK_TEXT);
+                chunkValue.SetTextValue(PKEY_Search_Contents, text.s, CHUNK_TEXT, 0, 0, 0, CHUNK_EOP);
                 FreePageText(&pageText);
                 return S_OK;
             }

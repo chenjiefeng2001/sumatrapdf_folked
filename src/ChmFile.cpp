@@ -2,11 +2,10 @@
    License: GPLv3 */
 
 #include "base/Base.h"
-#include <chm_lib.h>
-#include "base/ByteReader.h"
+#include <chm.h>
+#include "base/ByteReaderWriter.h"
 #include "base/File.h"
 #include "base/GuessFileType.h"
-#include "base/Win.h"
 
 #include "GumboHelpers.h"
 
@@ -15,7 +14,8 @@
 #include "ChmFile.h"
 
 ChmFile::~ChmFile() {
-    chm_close(chmHandle);
+    // chm_ctx_free also closes the archive and frees the entries + their paths
+    chm_ctx_free(chmCtx);
     str::Free(title);
     str::Free(tocPath);
     str::Free(indexPath);
@@ -24,59 +24,73 @@ ChmFile::~ChmFile() {
     str::Free(data);
 }
 
+// find an entry by path. CHM path resolution is case-insensitive (the old
+// chm_resolve_object was too), which some files rely on - e.g. bug-842 has
+// home=HTML/PCAbout.htm in #SYSTEM but the entry is /Html/PCAbout.htm.
+static chm_entry* ChmLookupPath(const ChmFile* chm, Str path) {
+    for (int i = 0; i < chm->nEntries; i++) {
+        chm_entry* e = chm->entries[i];
+        if (e->path && str::EqI(Str(e->path), path)) {
+            return e;
+        }
+    }
+    return nullptr;
+}
+
 // Resolve a CHM object by its path, normalizing the leading slash and
 // tolerating backslashes in URLs the way Microsoft's HTML Help viewer does.
-// Returns true and fills `info` on success.
-static bool ChmResolveObject(struct chmFile* chmHandle, Str fileName, struct chmUnitInfo* info) {
+// Returns the entry (owned by chmCtx) or nullptr.
+static chm_entry* ChmResolveObject(const ChmFile* chm, Str fileName) {
     if (!fileName) {
-        return false;
+        return nullptr;
     }
-    if (!str::StartsWith(fileName, "/")) {
+    if (!str::StartsWith(fileName, StrL("/"))) {
         fileName = str::JoinTemp(StrL("/"), fileName);
-    } else if (str::StartsWith(fileName, "///")) {
-        fileName = Str(fileName.s + 2, fileName.len - 2);
+    } else if (str::StartsWith(fileName, StrL("///"))) {
+        str::TrimPrefix(fileName, StrL("//"));
     }
 
-    int res = chm_resolve_object(chmHandle, fileName.s, info);
-    if (CHM_RESOLVE_SUCCESS != res && str::ContainsChar(fileName, '\\')) {
+    chm_entry* e = ChmLookupPath(chm, fileName);
+    if (!e && str::ContainsChar(fileName, '\\')) {
         TempStr fileNameTemp = str::DupTemp(fileName);
         str::TransCharsInPlace(fileNameTemp, StrL("\\"), StrL("/"));
-        res = chm_resolve_object(chmHandle, fileNameTemp.s, info);
+        e = ChmLookupPath(chm, fileNameTemp);
     }
-    return CHM_RESOLVE_SUCCESS == res;
+    return e;
 }
 
 bool ChmFile::HasData(Str fileName) const {
-    struct chmUnitInfo info{};
-    return ChmResolveObject(chmHandle, fileName, &info);
+    return ChmResolveObject(this, fileName) != nullptr;
 }
 
 TempStr ChmFile::GetDataTemp(Str fileName) const {
-    struct chmUnitInfo info{};
-    if (!ChmResolveObject(chmHandle, fileName, &info)) {
+    chm_entry* e = ChmResolveObject(this, fileName);
+    if (!e) {
         return {};
     }
-    size_t len = (size_t)info.length;
-    if (len > 128 * 1024 * 1024) {
+    if (e->length > 128ULL * 1024 * 1024) {
         // limit to 128 MB
         return {};
     }
+    int n = (int)e->length;
 
     // +1 for 0 terminator for C string compatibility
-    u8* d = AllocArrayTemp<u8>((int)(len + 1));
+    u8* d = AllocArrayTemp<u8>(n + 1);
     if (!d) {
         return {};
     }
-    if (!chm_retrieve_object(chmHandle, &info, d, 0, len)) {
+    if (chm_read_entry(chmCtx, e, d) != (int64_t)e->length) {
         return {};
     }
 
-    return Str((char*)(d), (int)(len));
+    return Str((char*)(d), n);
 }
 
+// Strip a UTF-8 BOM if present; otherwise convert from `codepage` to UTF-8
+// (unless already UTF-8). Returns a TempStr owned by the temp allocator.
 TempStr SmartToUtf8Temp(Str s, uint codepage) {
-    if (str::StartsWith(s, UTF8_BOM)) {
-        return str::DupTemp(Str(s.s + 3, s.len - 3));
+    if (str::TrimPrefix(s, UTF8_BOM)) {
+        return str::DupTemp(s);
     }
     if (CP_UTF8 == codepage) {
         return str::DupTemp(s);
@@ -108,38 +122,38 @@ void ChmFile::ParseWindowsData() {
     TempStr windowsData = GetDataTemp("/#WINDOWS");
     TempStr stringsData = GetDataTemp("/#STRINGS");
 
-    if (str::IsEmpty(windowsData) || str::IsEmpty(stringsData)) {
+    if (len(windowsData) == 0 || len(stringsData) == 0) {
         return;
     }
-    size_t windowsLen = (size_t)windowsData.len;
+    int windowsLen = windowsData.len;
     if (windowsLen <= 8) {
         return;
     }
 
     ByteReader rw(windowsData);
-    size_t entries = rw.DWordLE(0);
-    size_t entrySize = rw.DWordLE(4);
+    int entries = (int)rw.UInt32LE(0);
+    int entrySize = (int)rw.UInt32LE(4);
     if (entrySize < 188) {
         return;
     }
 
-    for (size_t i = 0; i < entries && ((i + (size_t)1) * entrySize) <= windowsLen; i++) {
-        size_t off = 8 + i * entrySize;
+    for (int i = 0; i < entries && (i + 1) * entrySize <= windowsLen; i++) {
+        int off = 8 + (i * entrySize);
         if (str::IsNull(title)) {
-            DWORD strOff = rw.DWordLE(off + (size_t)0x14);
-            title = GetCharZ(stringsData, strOff);
+            DWORD strOff = rw.UInt32LE(off + 0x14);
+            title = GetCharZ(stringsData, (int)strOff);
         }
         if (str::IsNull(tocPath)) {
-            DWORD strOff = rw.DWordLE(off + (size_t)0x60);
-            tocPath = GetCharZ(stringsData, strOff);
+            DWORD strOff = rw.UInt32LE(off + 0x60);
+            tocPath = GetCharZ(stringsData, (int)strOff);
         }
         if (str::IsNull(indexPath)) {
-            DWORD strOff = rw.DWordLE(off + (size_t)0x64);
-            indexPath = GetCharZ(stringsData, strOff);
+            DWORD strOff = rw.UInt32LE(off + 0x64);
+            indexPath = GetCharZ(stringsData, (int)strOff);
         }
         if (str::IsNull(homePath)) {
-            DWORD strOff = rw.DWordLE(off + (size_t)0x68);
-            homePath = GetCharZ(stringsData, strOff);
+            DWORD strOff = rw.UInt32LE(off + 0x68);
+            homePath = GetCharZ(stringsData, (int)strOff);
         }
     }
 }
@@ -150,37 +164,63 @@ static uint LcidToCodepage(DWORD lcid) {
     // cf. http://msdn.microsoft.com/en-us/library/bb165625(v=VS.90).aspx
     // flat array of (lcid, codepage) pairs
     static const u16 lcidToCodepage[] = {
-        1025, 1256, //
-        2052, 936,  //
-        1028, 950,  //
-        1029, 1250, //
-        1032, 1253, //
-        1037, 1255, //
-        1038, 1250, //
-        1041, 932,  //
-        1042, 949,  //
-        1045, 1250, //
-        1049, 1251, //
-        1051, 1250, //
-        1060, 1250, //
-        1055, 1254, //
-        1026, 1251, //
-        4, 936,     //
+        1025,
+        1256, //
+        2052,
+        936, //
+        1028,
+        950, //
+        1029,
+        1250, //
+        1032,
+        1253, //
+        1037,
+        1255, //
+        1038,
+        1250, //
+        1041,
+        932, //
+        1042,
+        949, //
+        1045,
+        1250, //
+        1049,
+        1251, //
+        1051,
+        1250, //
+        1060,
+        1250, //
+        1055,
+        1254, //
+        1026,
+        1251, //
+        4,
+        936, //
         // more Cyrillic (1251) locales: Ukrainian, Belarusian, Serbian (Cyrillic),
         // Macedonian, Kazakh, Kyrgyz, Tatar, Mongolian, Azeri (Cyrillic)
-        1058, 1251, //
-        1059, 1251, //
-        3098, 1251, //
-        2074, 1251, //
-        1071, 1251, //
-        1087, 1251, //
-        1088, 1251, //
-        1092, 1251, //
-        1104, 1251, //
-        2092, 1251, //
+        1058,
+        1251, //
+        1059,
+        1251, //
+        3098,
+        1251, //
+        2074,
+        1251, //
+        1071,
+        1251, //
+        1087,
+        1251, //
+        1088,
+        1251, //
+        1092,
+        1251, //
+        1104,
+        1251, //
+        2092,
+        1251, //
     };
 
-    for (int i = 0; i < dimofi(lcidToCodepage); i += 2) {
+    for (int i = 0; i < dimof(lcidToCodepage); i += 2) {
         if (lcid == lcidToCodepage[i]) {
             return lcidToCodepage[i + 1];
         }
@@ -192,21 +232,21 @@ static uint LcidToCodepage(DWORD lcid) {
 // http://www.nongnu.org/chmspec/latest/Internal.html#SYSTEM
 bool ChmFile::ParseSystemData() {
     TempStr d = GetDataTemp("/#SYSTEM");
-    if (str::IsEmpty(d)) {
+    if (len(d) == 0) {
         return false;
     }
 
     ByteReader r(d);
-    DWORD len = 0;
+    DWORD n = 0;
     // Note: skipping DWORD version at offset 0. It's supposed to be 2 or 3.
-    for (size_t off = 4; off + 4 < (size_t)d.len; off += len + (size_t)4) {
+    for (int off = 4; off + 4 < d.len; off += (int)n + 4) {
         // Note: at some point we seem to get off-sync i.e. I'm seeing
-        // many entries with type == 0 and len == 0. Seems harmless.
-        len = r.WordLE(off + 2);
-        if (len == 0) {
+        // many entries with type == 0 and length == 0. Seems harmless.
+        n = r.UInt16LE(off + 2);
+        if (n == 0) {
             continue;
         }
-        WORD type = r.WordLE(off);
+        WORD type = r.UInt16LE(off);
         switch (type) {
             case 0:
                 if (str::IsNull(tocPath)) {
@@ -229,8 +269,8 @@ bool ChmFile::ParseSystemData() {
                 }
                 break;
             case 4:
-                if (!codepage && len >= 4) {
-                    codepage = LcidToCodepage(r.DWordLE(off + 4));
+                if (!codepage && n >= 4) {
+                    codepage = LcidToCodepage(r.UInt32LE(off + 4));
                 }
                 break;
             case 6:
@@ -252,16 +292,16 @@ bool ChmFile::ParseSystemData() {
 
 TempStr ChmFile::ResolveTopicID(unsigned int id) const {
     TempStr ivbData = GetDataTemp("/#IVB");
-    size_t ivbLen = (size_t)ivbData.len;
+    int ivbLen = ivbData.len;
     ByteReader br(ivbData);
-    if ((ivbLen % 8) != 4 || ivbLen - 4 != br.DWordLE(0)) {
+    if ((ivbLen % 8) != 4 || ivbLen - 4 != (int)br.UInt32LE(0)) {
         return {};
     }
 
-    for (size_t off = 4; off < ivbLen; off += 8) {
-        if (br.DWordLE(off) == id) {
+    for (int off = 4; off < ivbLen; off += 8) {
+        if (br.UInt32LE(off) == id) {
             TempStr stringsData = GetDataTemp("/#STRINGS");
-            Str res = GetCharZ(stringsData, br.DWordLE(off + 4));
+            Str res = GetCharZ(stringsData, (int)br.UInt32LE(off + 4));
             if (!res) {
                 return {};
             }
@@ -272,7 +312,7 @@ TempStr ChmFile::ResolveTopicID(unsigned int id) const {
 }
 
 void ChmFile::FixPathCodepage(Str& path, uint& fileCP) {
-    if (str::IsEmpty(path) || HasData(path)) {
+    if (len(path) == 0 || HasData(path)) {
         return;
     }
 
@@ -297,10 +337,13 @@ void ChmFile::FixPathCodepage(Str& path, uint& fileCP) {
 
 bool ChmFile::Load(Str path) {
     data = file::ReadFile(path);
-    chmHandle = chm_open(data.s, (size_t)data.len);
-    if (!chmHandle) {
+    chmCtx = chm_ctx_new(nullptr, nullptr, nullptr, nullptr);
+    if (!chmCtx || !chm_open(chmCtx, (const uint8_t*)data.s, (size_t)data.len)) {
         return false;
     }
+    // the data buffer must outlive chmCtx (chm_open doesn't copy it); it does,
+    // it's freed in ~ChmFile after chm_ctx_free
+    nEntries = chm_get_entries(chmCtx, &entries);
 
     ParseWindowsData();
     if (!ParseSystemData()) {
@@ -310,9 +353,9 @@ bool ChmFile::Load(Str path) {
     uint fileCodepage = codepage;
     char header[24]{};
     int n = file::ReadN(path, (u8*)header, sizeof(header));
-    if (n < (int)sizeof(header)) {
-        ByteReader r(Str(header, (int)sizeof(header)));
-        DWORD lcid = r.DWordLE(20);
+    if (n < sizeofi(header)) {
+        ByteReader r(Str(header, sizeof(header)));
+        DWORD lcid = r.UInt32LE(20);
         fileCodepage = LcidToCodepage(lcid);
     }
     if (!codepage) {
@@ -328,9 +371,9 @@ bool ChmFile::Load(Str path) {
 
     if (!HasData(homePath)) {
         Str pathsToTest[] = {"/index.htm", "/index.html", "/default.htm", "/default.html"};
-        for (int i = 0; i < dimof(pathsToTest); i++) {
-            if (HasData(pathsToTest[i])) {
-                str::ReplaceWithCopy(&homePath, pathsToTest[i]);
+        for (Str testPath : pathsToTest) {
+            if (HasData(testPath)) {
+                str::ReplaceWithCopy(&homePath, testPath);
             }
         }
         if (!HasData(homePath)) {
@@ -341,11 +384,11 @@ bool ChmFile::Load(Str path) {
     return true;
 }
 
-TempStr ChmFile::GetPropertyTemp(Str name) const {
+TempStr ChmFile::GetPropertyTemp(DocProp prop) const {
     TempStr result;
-    if (str::Eq(kPropTitle, name) && !str::IsEmpty(title)) {
+    if (prop == DocProp::Title && len(title) > 0) {
         result = SmartToUtf8Temp(title, codepage);
-    } else if (str::Eq(kPropCreatorApp, name) && !str::IsEmpty(creator)) {
+    } else if (prop == DocProp::CreatorApp && len(creator) > 0) {
         result = SmartToUtf8Temp(creator, codepage);
     }
     if (!result) {
@@ -359,17 +402,14 @@ TempStr ChmFile::GetHomePath() const {
     return homePath;
 }
 
-static int ChmEnumerateEntry(struct chmFile* chmHandle, struct chmUnitInfo* info, void* data) {
-    if (str::IsEmpty(info->path)) {
-        return CHM_ENUMERATOR_CONTINUE;
-    }
-    StrVec* paths = (StrVec*)data;
-    paths->Append(info->path);
-    return CHM_ENUMERATOR_CONTINUE;
-}
-
 void ChmFile::GetAllPaths(StrVec* v) const {
-    chm_enumerate(chmHandle, CHM_ENUMERATE_FILES | CHM_ENUMERATE_NORMAL, ChmEnumerateEntry, v);
+    // equivalent of the old CHM_ENUMERATE_FILES | CHM_ENUMERATE_NORMAL
+    for (int i = 0; i < nEntries; i++) {
+        chm_entry* e = entries[i];
+        if (e->is_file && e->is_normal && e->path && e->path[0]) {
+            v->Append(e->path);
+        }
+    }
 }
 
 /* The html looks like:
@@ -406,9 +446,9 @@ static bool VisitChmTocItem(EbookTocVisitor* visitor, const GumboNode* objNode, 
         if (!attrName || !attrVal) {
             continue;
         }
-        if (str::EqI(attrName->value, "Name")) {
+        if (str::EqI(attrName->value, StrL("Name"))) {
             name = str::DupTemp(attrVal->value);
-        } else if (str::EqI(attrName->value, "Local")) {
+        } else if (str::EqI(attrName->value, StrL("Local"))) {
             local = str::DupTemp(StripItsProtocol(Str(attrVal->value)));
         }
     }
@@ -449,15 +489,15 @@ static bool VisitChmIndexItem(EbookTocVisitor* visitor, const GumboNode* objNode
         if (!attrName || !attrVal) {
             continue;
         }
-        if (str::EqI(attrName->value, "Keyword")) {
+        if (str::EqI(attrName->value, StrL("Keyword"))) {
             keyword = Str(attrVal->value);
-        } else if (str::EqI(attrName->value, "Name")) {
+        } else if (str::EqI(attrName->value, StrL("Name"))) {
             name = Str(attrVal->value);
             // some CHM documents seem to use a lonely Name instead of Keyword
             if (!keyword) {
                 keyword = name;
             }
-        } else if (str::EqI(attrName->value, "Local") && name) {
+        } else if (str::EqI(attrName->value, StrL("Local")) && name) {
             references.Append(name);
             references.Append(StripItsProtocol(Str(attrVal->value)));
         }
@@ -467,7 +507,7 @@ static bool VisitChmIndexItem(EbookTocVisitor* visitor, const GumboNode* objNode
     }
 
     if (len(references) == 2) {
-        visitor->Visit(keyword, references.At(1), level);
+        visitor->Visit(keyword, references[1], level);
         return true;
     }
     visitor->Visit(keyword, {}, level);
@@ -571,7 +611,7 @@ static bool WalkBrokenChmTocOrIndex(EbookTocVisitor* visitor, const GumboNode* r
         }
         if (node->type == GUMBO_NODE_ELEMENT && GumboTagNameIs(node, "object")) {
             const GumboAttribute* type = gumbo_get_attribute(&node->v.element.attributes, "type");
-            if (type && str::EqI(type->value, "text/sitemap")) {
+            if (type && str::EqI(type->value, StrL("text/sitemap"))) {
                 *hadOneInOut |= isIndex ? VisitChmIndexItem(visitor, node, 1) : VisitChmTocItem(visitor, node, 1);
                 continue; // don't recurse into the object's <param> children
             }
@@ -648,7 +688,7 @@ static int ChmEntityByte(WCHAR c) {
 // codepage. Labels that decoded to real Unicode (codepoints > 0xFF, i.e. raw
 // non-Latin bytes already converted by SmartToUtf8Temp) are left untouched, as
 // are pure-ASCII labels (issue #842).
-static const TempStr FixChmTocEntitiesTemp(Str s, uint codepage) {
+static TempStr FixChmTocEntitiesTemp(Str s, uint codepage) {
     uint cp = (codepage == CP_ACP) ? GetACP() : codepage;
     if (!s || !ChmTocNeedsEntityRemap(cp)) {
         return s;
@@ -688,7 +728,7 @@ bool ChmFile::ParseTocOrIndex(EbookTocVisitor* visitor, Str path, bool isIndex) 
         return false;
     }
     TempStr htmlData = GetDataTemp(path);
-    if (str::IsEmpty(htmlData)) {
+    if (len(htmlData) == 0) {
         return false;
     }
     // Convert to UTF-8 (handling UTF-8 BOM and the file's codepage) so gumbo's
@@ -698,10 +738,10 @@ bool ChmFile::ParseTocOrIndex(EbookTocVisitor* visitor, Str path, bool isIndex) 
     if (!utf8) {
         return false;
     }
-    int len = ::len(utf8);
+    int n = ::len(utf8);
 
     GumboOptions opts = GumboMakeOptions();
-    GumboOutput* output = gumbo_parse_with_options(&opts, utf8.s, len);
+    GumboOutput* output = gumbo_parse_with_options(&opts, utf8.s, n);
     if (!output) {
         return false;
     }
@@ -728,7 +768,7 @@ bool ChmFile::ParseTocOrIndex(EbookTocVisitor* visitor, Str path, bool isIndex) 
 }
 
 bool ChmFile::HasToc() const {
-    return !str::IsEmpty(tocPath);
+    return len(tocPath) > 0;
 }
 
 bool ChmFile::ParseToc(EbookTocVisitor* visitor) const {
@@ -736,15 +776,15 @@ bool ChmFile::ParseToc(EbookTocVisitor* visitor) const {
 }
 
 bool ChmFile::HasIndex() const {
-    return !str::IsEmpty(indexPath);
+    return len(indexPath) > 0;
 }
 
 bool ChmFile::ParseIndex(EbookTocVisitor* visitor) const {
     return ParseTocOrIndex(visitor, indexPath, true);
 }
 
-bool ChmFile::IsSupportedFileType(Kind kind) {
-    return kind == kindFileChm;
+bool ChmFile::IsSupportedFileType(FileType kind) {
+    return kind == FileType::Chm;
 }
 
 ChmFile* ChmFile::CreateFromFile(Str path) {

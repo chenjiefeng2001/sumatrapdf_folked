@@ -2,38 +2,61 @@
    License: GPLv3 */
 
 #include "base/Base.h"
-#include "base/Dpi.h"
+#include "gui/Dpi.h"
 #include "base/File.h"
 #include "base/Win.h"
 
-#include "wingui/UIModels.h"
-#include "wingui/Layout.h"
-#include "wingui/WinGui.h"
+#include "gui/UIModels.h"
+#include "gui/Layout.h"
+#include "gui/win/WinGui.h"
+#include "gui/PlatformFont.h"
+#include "gui/Gfx.h"
+#include "gui/VirtCtrl.h"
+#include "gui/win/TabsCtrl.h"
 
 #include "Settings.h"
 #include "AppSettings.h"
 #include "DocController.h"
 #include "EngineBase.h"
+#include "base/GuessFileType.h"
 #include "EngineAll.h"
 #include "DisplayModel.h"
 #include "GlobalPrefs.h"
 #include "SumatraPDF.h"
 #include "SumatraProperties.h"
-#include "Notifications.h"
 #include "MainWindow.h"
 #include "WindowTab.h"
 #include "Commands.h"
 #include "CommandAvailability.h"
 #include "FindBar.h"
+#include "SelectionToolbar.h"
 #include "Menu.h"
 #include "TableOfContents.h"
 #include "Tabs.h"
-#include "SumatraDialogs.h"
 #include "FileHistory.h"
 #include "Theme.h"
 #include "Translations.h"
 
-#include "base/Log.h"
+// always full path (FullPathInTitle only affects tab/window title text).
+// Append size when GetSize succeeds (may fail for offline network paths).
+// Used by Tabs and Toolbar (toolbar was overwriting tooltips with path-only).
+// full path + size (if available); optional dirty suffix for unsaved annotations
+TempStr MakeTabTooltipTemp(Str path, bool dirty) {
+    if (!path) {
+        return Str{};
+    }
+    TempStr tip;
+    i64 size = file::GetSize(path);
+    if (size >= 0) {
+        tip = fmt("%s  %s", path, str::FormatSizeShortTemp(size, nullptr));
+    } else {
+        tip = path;
+    }
+    if (dirty) {
+        tip = str::JoinTemp(tip, StrL(" "), _TRA("(unsaved annotations)"));
+    }
+    return tip;
+}
 
 static void UpdateTabTitle(WindowTab* tab) {
     if (!tab) {
@@ -42,46 +65,45 @@ static void UpdateTabTitle(WindowTab* tab) {
     MainWindow* win = tab->win;
     int idx = win->GetTabIdx(tab);
     Str title = tab->GetTabTitle();
-    // respect FullPathInTitle for the tab tooltip too: when the user opted out
-    // of showing the full path, don't reveal it on hover either (#3024)
-    Str tooltip = tab->filePath;
-    if (tooltip && !gGlobalPrefs->fullPathInTitle) {
-        tooltip = path::GetBaseNameTemp(tooltip);
+    bool dirty = false;
+    if (tab->AsFixed()) {
+        dirty = EngineHasUnsavedAnnotations(tab->AsFixed()->GetEngine());
     }
+    TempStr tooltip = MakeTabTooltipTemp(tab->filePath, dirty);
     win->tabsCtrl->SetTextAndTooltip(idx, title, tooltip);
 }
 
 int GetTabbarHeight(HWND hwnd, float factor) {
-    int tabDy = DpiScale(hwnd, kTabBarDy);
-    HFONT hfont = GetAppFont();
-    int fontDyWithPadding = FontDyPx(hwnd, hfont) + DpiScale(hwnd, 2);
-    if (fontDyWithPadding > tabDy) {
-        tabDy = fontDyWithPadding;
-    }
-    // guard against bad per-window DPI (e.g. under Wine)
-    int minDy = DpiScale(HWND_DESKTOP, kTabBarDy);
-    int minFontDy = FontDyPx(hwnd, hfont) + DpiScale(HWND_DESKTOP, 2);
-    if (minFontDy > minDy) {
-        minDy = minFontDy;
-    }
-    if (tabDy < minDy) {
-        tabDy = minDy;
-    }
-    int res = (int)((float)tabDy * factor);
+    DpiSetFromHwnd(hwnd);
+    PlatformFont* font = GetAppFont();
+    int tabDy = DpiScale(kTabBarDy);
+    int fontDyWithPadding = PlatformFontLineHeight(font) + DpiScale(2);
+    tabDy = std::max(fontDyWithPadding, tabDy);
+    // Guard against the bad per-window DPI Wine reports (93e5b4e47: the tab bar
+    // and caption came out tiny). Wine only, deliberately: we are PerMonitorV2,
+    // so DpiScale(HWND_DESKTOP) is the *system* (primary monitor) DPI, which
+    // doesn't follow the window between monitors. Using it as a floor made the
+    // tab bar too tall on any monitor scaled lower than the primary
+    // (discussion #4831).
     if (IsRunningOnWine()) {
-        int dpi = DpiGet(hwnd);
-        int desktopDpi = DpiGet(HWND_DESKTOP);
+        int minDy = DpiScaleByDpi(DpiGetForHwnd(HWND_DESKTOP), kTabBarDy);
+        int minFontDy = PlatformFontLineHeight(font) + DpiScaleByDpi(DpiGetForHwnd(HWND_DESKTOP), 2);
+        minDy = std::max(minFontDy, minDy);
+        tabDy = std::max(tabDy, minDy);
+        int res = (int)((float)tabDy * factor);
         logf(
             "GetTabbarHeight: hwnd=%p factor=%g dpi=%d desktopDpi=%d tabDyScaled=%d fontDy=%d "
             "minDy=%d result=%d\n",
-            hwnd, factor, dpi, desktopDpi, DpiScale(hwnd, kTabBarDy), fontDyWithPadding, minDy, res);
+            hwnd, factor, DpiGetForHwnd(hwnd), DpiGetForHwnd(HWND_DESKTOP), DpiScale(kTabBarDy), fontDyWithPadding,
+            minDy, res);
+        return res;
     }
-    return res;
+    return (int)((float)tabDy * factor);
 }
 
 #if 0
 static inline Size GetTabSize(HWND hwnd) {
-    int dx = DpiScale(hwnd, std::max(gGlobalPrefs->tabWidth, kTabMinDx));
+    int dx = DpiScale(std::max(gGlobalPrefs->tabWidth, kTabMinDx));
     int dy = GetTabbarHeight(hwnd);
     return Size(dx, dy);
 }
@@ -95,22 +117,43 @@ static void ShowTabBar(MainWindow* win, bool show) {
     if (win->tabsCtrl) {
         win->tabsCtrl->SetIsVisible(show);
     }
-    RelayoutWindow(win);
+    ScheduleUiUpdate(win);
 }
 
+// also shows/hides the tabbar when necessary
 void UpdateTabWidth(MainWindow* win) {
-    int nTabs = (int)win->TabCount();
-    bool showSingleTab = SettingsUseTabs() || win->tabsInTitlebar;
-    bool showTabs = (nTabs > 1) || (showSingleTab && (nTabs > 0));
-    int tabWidth = gGlobalPrefs->tabWidth;
-    if (win->tabsCtrl) {
-        win->tabsCtrl->tabDefaultDx = tabWidth;
+    int nTabs = win->TabCount();
+    // Count real documents only: Home (and Favorites) alone should not keep the
+    // tab bar open. Showing Home as a single tab after the last document closed
+    // fought RelayoutCaption (which hides tabs with no file tabs) and caused a
+    // continuous TabsCtrl repaint storm (issue #5861).
+    int nDocTabs = 0;
+    for (int i = 0; i < nTabs; i++) {
+        WindowTab* t = win->GetTab(i);
+        if (t && !t->IsNonDocumentTab()) {
+            nDocTabs++;
+        }
     }
+    bool showSingleTab = SettingsUseTabs() || win->tabsInTitlebar;
+    bool showTabs = (nDocTabs > 1) || (showSingleTab && (nDocTabs > 0));
+    // TabWidth is stored in logical (96-DPI) units, same as other layout
+    // settings; convert to physical pixels so HiDPI monitors honor the value
+    // (issue #3850). Height already uses DpiScale via GetTabbarHeight.
+    if (win->tabsCtrl) {
+        HWND hwnd = win->tabsCtrl->hwnd ? win->tabsCtrl->hwnd : win->hwndFrame;
+        win->tabsCtrl->tabDefaultDx = DpiScale(gGlobalPrefs->tabWidth);
+    }
+    // Lay out only when the bar stays visible. Hiding it right after
+    // TabCtrl_SetItemSize invalidated the control leaves a pending WM_PAINT for
+    // a window we're about to hide (issue #5861). It's laid out when shown again.
     if (!showTabs) {
         ShowTabBar(win, false);
         return;
     }
     ShowTabBar(win, true);
+    if (win->tabsCtrl) {
+        win->tabsCtrl->LayoutTabs();
+    }
 }
 
 void RemoveTab(WindowTab* tab) {
@@ -125,6 +168,9 @@ void RemoveTab(WindowTab* tab) {
         win->ctrl = nullptr;
         win->currentTabTemp = nullptr;
     }
+    // Hide the bar before selecting Home so we don't flash Home's close button
+    // when the last document closes (formerly a special case; now UpdateTabWidth
+    // itself treats Home-only as "no tabs").
     UpdateTabWidth(win);
 
     int nTabs = win->TabCount();
@@ -154,9 +200,7 @@ void RemoveTab(WindowTab* tab) {
     // select tab to the right or to the left if nothing to the right
     int newIdx = idx;
     int lastIdx = nTabs - 1;
-    if (newIdx > lastIdx) {
-        newIdx = lastIdx;
-    }
+    newIdx = std::min(newIdx, lastIdx);
     win->tabsCtrl->SetSelected(newIdx);
     tab = win->CurrentTab();
     // seen in crash report that tab was WindowTab::Type::None
@@ -180,16 +224,21 @@ static void CloseWindowIfNoDocuments(MainWindow* win) {
 static void MaybeMigrateTab(WindowTab* tab, MainWindow* newWin, Point releasePt) {
     MainWindow* oldWin = tab->win;
 
+    // Home / Favorites tabs stay in their window
+    if (tab->IsNonDocumentTab()) {
+        return;
+    }
+
     // don't migrate if it's only one document tab and not
     // dragging over a window
     int nDocTabs = 0;
     for (auto& t : oldWin->Tabs()) {
-        if (t->IsAboutTab()) continue;
+        if (t->IsNonDocumentTab()) continue;
         nDocTabs++;
     }
     if (nDocTabs == 1 && !newWin) return;
 
-    auto engine = tab->GetEngine();
+    auto* engine = tab->GetEngine();
     if (EngineHasUnsavedAnnotations(engine)) {
         return;
     }
@@ -207,14 +256,14 @@ static void MaybeMigrateTab(WindowTab* tab, MainWindow* newWin, Point releasePt)
             GetWindowPlacement(oldWin->hwndFrame, &wp);
             int dx = wp.rcNormalPosition.right - wp.rcNormalPosition.left;
             int dy = wp.rcNormalPosition.bottom - wp.rcNormalPosition.top;
-            int x = releasePt.x - DpiScale(oldWin->hwndFrame, 100);
-            int y = releasePt.y - GetTabbarHeight(oldWin->hwndFrame) / 2;
+            int x = releasePt.x - DpiScale(100);
+            int y = releasePt.y - (GetTabbarHeight(oldWin->hwndFrame) / 2);
             Rect rect = ShiftRectToWorkArea(Rect(x, y, dx, dy), oldWin->hwndFrame, true);
             newWin = CreateAndShowMainWindow(nullptr, false);
             if (!newWin) {
                 return;
             }
-            MoveWindow(newWin->hwndFrame, rect);
+            HwndMoveWindow(newWin->hwndFrame, &rect);
             ShowMainWindow(newWin, WIN_STATE_NORMAL);
         } else {
             newWin = CreateAndShowMainWindow(nullptr);
@@ -271,8 +320,6 @@ void TabsSelect(MainWindow* win, int tabIndex) {
         return;
     }
 
-    bool isShowingPageInfo = (GetNotificationForGroup(win->hwndCanvas, kNotifPageInfo) != nullptr);
-
     // same work as in onSelectionChanging and onSelectionChanged
     SaveCurrentWindowTab(win);
     int prevIdx = tabsCtrl->SetSelected(tabIndex);
@@ -280,10 +327,8 @@ void TabsSelect(MainWindow* win, int tabIndex) {
         return;
     }
     WindowTab* tab = tabs[tabIndex];
+    // page-info tip is restored via MainWindow::pageInfoWanted in LoadModelIntoTab
     LoadModelIntoTab(tab);
-    if (isShowingPageInfo) {
-        PostMessageW(win->hwndFrame, WM_COMMAND, CmdTogglePageInfo, 0);
-    }
 }
 
 // clang-format off
@@ -303,7 +348,7 @@ static MenuDef menuDefContextTab[] = {
     },
     {
         _TRN("&Discard changes"),
-        CmdDiscardAnnotations,
+        CmdDiscardChanges,
     },
     {
         kMenuSeparator,
@@ -326,7 +371,7 @@ static MenuDef menuDefContextTab[] = {
         CmdDuplicateInNewWindow,
     },
     {
-        _TRN("Set Tab Color"),
+        _TRN("Change Tab Color"),
         CmdSetTabColor,
     },
     {
@@ -372,6 +417,7 @@ static MenuDef menuDefContextTab[] = {
 };
 // clang-format on
 
+// create a new window if win==nullptr
 void CollectTabsToClose(MainWindow* win, WindowTab* currTab, Vec<WindowTab*>& toCloseOther,
                         Vec<WindowTab*>& toCloseRight, Vec<WindowTab*>& toCloseLeft) {
     int nTabs = win->TabCount();
@@ -411,10 +457,12 @@ void CloseAllTabs(MainWindow* win) {
 }
 
 // TODO: add "Move to another window" sub-menu
-static void TabsContextMenu(ContextMenuEvent* ev) {
-    MainWindow* win = FindMainWindowByHwnd(ev->w->hwnd);
-    TabsCtrl* tabsCtrl = (TabsCtrl*)ev->w;
-    TabsCtrl::MouseState tabState = tabsCtrl->TabStateFromMousePosition(ev->mouseWindow);
+static void TabsContextMenu(TabsCtrl* tabsCtrl, VirtMouseEvent* ev) {
+    MainWindow* win = FindMainWindowByHwnd(tabsCtrl->hwnd);
+    if (!win) {
+        return;
+    }
+    TabsCtrl::MouseState tabState = tabsCtrl->TabStateFromMousePosition(ev->ptWindow);
     int tabIdx = tabState.tabIdx;
     if (tabIdx < 0) {
         return;
@@ -424,7 +472,7 @@ static void TabsContextMenu(ContextMenuEvent* ev) {
     if (tabUnderMouse->IsAboutTab()) {
         return;
     }
-    POINT pt = ToPOINT(ev->mouseScreen);
+    Point pt = HwndClientToScreen(tabsCtrl->hwnd, ev->ptWindow);
 
     Vec<WindowTab*> toCloseOther;
     Vec<WindowTab*> toCloseRight;
@@ -444,9 +492,9 @@ static void TabsContextMenu(ContextMenuEvent* ev) {
     ctx->filePath = tabUnderMouse->filePath;
     ctx->supportsAnnots = EngineSupportsAnnotations(tabEngine) && !win->isFullScreen;
     ctx->hasUnsavedAnnotations = EngineHasUnsavedAnnotations(tabEngine);
-    ctx->canCloseOtherTabs = !toCloseOther.IsEmpty();
-    ctx->canCloseTabsToRight = !toCloseRight.IsEmpty();
-    ctx->canCloseTabsToLeft = !toCloseLeft.IsEmpty();
+    ctx->canCloseOtherTabs = len(toCloseOther) > 0;
+    ctx->canCloseTabsToRight = len(toCloseRight) > 0;
+    ctx->canCloseTabsToLeft = len(toCloseLeft) > 0;
 
     HMENU popup = BuildMenuFromDef(menuDefContextTab, CreatePopupMenu(), ctx);
     DeleteBuildMenuCtx(ctx);
@@ -460,7 +508,7 @@ static void TabsContextMenu(ContextMenuEvent* ev) {
     if (!EngineHasUnsavedAnnotations(tabEngine)) {
         DeleteMenu(popup, CmdSaveAnnotations, MF_BYCOMMAND);
         DeleteMenu(popup, CmdSaveAnnotationsNewFile, MF_BYCOMMAND);
-        DeleteMenu(popup, CmdDiscardAnnotations, MF_BYCOMMAND);
+        DeleteMenu(popup, CmdDiscardChanges, MF_BYCOMMAND);
         RemoveBadMenuSeparators(popup);
     }
     MarkMenuOwnerDraw(popup);
@@ -526,7 +574,7 @@ static void TabsContextMenu(ContextMenuEvent* ev) {
             SaveAnnotationsToMaybeNewPdfFile(tabUnderMouse);
             return;
         }
-        case CmdDiscardAnnotations: {
+        case CmdDiscardChanges: {
             // revert to the on-disk version, discarding unsaved changes
             TabsSelect(win, tabIdx);
             ReloadDocument(win, false);
@@ -549,23 +597,17 @@ static void MainWindowTabSelectionChanging(MainWindow* win, TabsCtrl::SelectionC
     ev->preventChanging = false;
 }
 
-static void MainWindowTabSelectionChanged(MainWindow* win, TabsCtrl::SelectionChangedEvent* ev) {
-    bool isShowingPageInfo = (GetNotificationForGroup(win->hwndCanvas, kNotifPageInfo) != nullptr);
+static void MainWindowTabSelectionChanged(MainWindow* win, TabsCtrl::SelectionChangedEvent* /*ev*/) {
     int currentIdx = win->tabsCtrl->GetSelected();
     WindowTab* tab = win->Tabs()[currentIdx];
+    // page-info tip is restored via MainWindow::pageInfoWanted in LoadModelIntoTab
     LoadModelIntoTab(tab);
-    if (isShowingPageInfo) {
-        PostMessageW(win->hwndFrame, WM_COMMAND, CmdTogglePageInfo, 0);
-    }
 }
 
 static void MainWindowTabMigration(MainWindow* win, TabsCtrl::MigrationEvent* ev) {
     WindowTab* tab = win->GetTab(ev->tabIdx);
     MainWindow* releaseWnd = nullptr;
-    POINT p;
-    p.x = ev->releasePoint.x;
-    p.y = ev->releasePoint.y;
-    HWND hwnd = WindowFromPoint(p);
+    HWND hwnd = HwndWindowFromPoint(ev->releasePoint);
     if (hwnd != nullptr) {
         releaseWnd = FindMainWindowByHwnd(hwnd);
     }
@@ -577,19 +619,22 @@ static void MainWindowTabMigration(MainWindow* win, TabsCtrl::MigrationEvent* ev
 }
 
 void CreateTabbar(MainWindow* win) {
+    if (win->frameDpi > 0) {
+        DpiSet(win->frameDpi, win->frameDpi);
+    }
     TabsCtrl::CreateArgs args;
     args.parent = win->hwndFrame;
     args.withToolTips = true;
     args.font = GetAppFont();
-    int tabWidth = gGlobalPrefs->tabWidth;
-    args.tabDefaultDx = tabWidth;
+    // logical TabWidth → physical (see UpdateTabWidth / issue #3850)
+    args.tabDefaultDx = DpiScale(gGlobalPrefs->tabWidth);
     args.isRtl = false; // LTR hwnd; RTL tab order follows parent frame (see UpdateWindowRtlLayout)
 
     TabsCtrl* tabsCtrl = new TabsCtrl();
     tabsCtrl->onTabClosed = MkFunc1(MainWindowTabClosed, win);
     tabsCtrl->onSelectionChanging = MkFunc1(MainWindowTabSelectionChanging, win);
     tabsCtrl->onSelectionChanged = MkFunc1(MainWindowTabSelectionChanged, win);
-    tabsCtrl->onContextMenu = MkFunc1Void(TabsContextMenu);
+    tabsCtrl->onContextMenu = MkFunc1(TabsContextMenu, tabsCtrl);
     tabsCtrl->onTabMigration = MkFunc1(MainWindowTabMigration, win);
     tabsCtrl->Create(args);
     win->tabsCtrl = tabsCtrl;
@@ -599,6 +644,12 @@ void CreateTabbar(MainWindow* win) {
 // verifies that WindowTab state is consistent with MainWindow state
 static NO_INLINE void VerifyWindowTab(MainWindow* win, WindowTab* tdata) {
     ReportIf(tdata->ctrl != win->ctrl);
+    // Home / Favorites tabs have no document controller. Favorites layout
+    // intentionally leaves canvas geometry alone (hidden), so canvasRc is not
+    // kept in lockstep with win->canvasRc the way document tabs are.
+    if (tdata->IsNonDocumentTab()) {
+        return;
+    }
 #if 0
     // disabling this check. best I can tell, external apps can change window
     // title and trigger this
@@ -615,7 +666,14 @@ static NO_INLINE void VerifyWindowTab(MainWindow* win, WindowTab* tdata) {
             expectedTocVisibility = tdata->showTocPresentation;
         }
     }
-    ReportDebugIf(win->tocVisible != expectedTocVisibility);
+    // Heading TOC is generated after the document is shown. Until that finishes
+    // the sidebar stays hidden (uiState.tocVisible) but the tab keeps the
+    // caller's showToc preference so we can open it when headings arrive.
+    if (win->uiState.tocVisible != expectedTocVisibility) {
+        bool headingPending = EngineMupdfHeadingTocPending(tdata->GetEngine());
+        bool okPendingHide = headingPending && expectedTocVisibility && !win->uiState.tocVisible;
+        ReportDebugIf(!okPendingHide);
+    }
     ReportIf(tdata->canvasRc != win->canvasRc);
 }
 
@@ -633,12 +691,13 @@ void SaveCurrentWindowTab(MainWindow* win) {
     // results so the next tab can't show or navigate into the old document's
     // matches)
     HideFindBar(win);
+    HideSelectionToolbar(win);
 
     int current = win->tabsCtrl->GetSelected();
     if (-1 == current) {
         return;
     }
-    if (win->CurrentTab() != win->Tabs().at(current)) {
+    if (win->CurrentTab() != win->Tabs()[current]) {
         return; // TODO: restore ReportIf() ?
     }
 
@@ -654,7 +713,7 @@ void SaveCurrentWindowTab(MainWindow* win) {
     win->tabSelectionHistory->Append(tab);
 }
 
-WindowTab* AddTabToWindow(MainWindow* win, WindowTab* tab) {
+WindowTab* AddTabToWindow(MainWindow* win, WindowTab* tab, bool deferUpdate) {
     ReportIf(!win);
     if (!win) {
         return nullptr;
@@ -663,7 +722,7 @@ WindowTab* AddTabToWindow(MainWindow* win, WindowTab* tab) {
         return nullptr;
     }
 
-    auto tabs = win->tabsCtrl;
+    auto* tabs = win->tabsCtrl;
     int idx = win->TabCount();
     bool useTabs = SettingsUseTabs();
     bool noHomeTab = gGlobalPrefs->noHomeTab;
@@ -678,7 +737,7 @@ WindowTab* AddTabToWindow(MainWindow* win, WindowTab* tab) {
         newTab->isPinned = true;
         newTab->canClose = true;
         newTab->userData = (UINT_PTR)homeTab;
-        int insertedIdx = tabs->InsertTab(idx, newTab);
+        int insertedIdx = tabs->InsertTab(idx, newTab, !deferUpdate);
         ReportIf(insertedIdx != 0);
         idx++;
     }
@@ -686,15 +745,55 @@ WindowTab* AddTabToWindow(MainWindow* win, WindowTab* tab) {
     tab->canvasRc = win->canvasRc;
     TabInfo* newTab = new TabInfo();
     newTab->text = str::Dup(tab->GetTabTitle());
-    newTab->tooltip = str::Dup(tab->filePath);
+    // same full path + size as UpdateTabTitle (was path-only, so size missing until
+    // TabsOnChangedDoc for the active tab)
+    newTab->tooltip = str::Dup(MakeTabTooltipTemp(tab->filePath, false));
     newTab->userData = (UINT_PTR)tab;
     newTab->tabColor = tab->tabColor;
+    // a failed load can arrive in a tab created for it (ShowLoadErrorInTab)
+    newTab->isError = tab->loadState == WindowTab::LoadState::Error;
 
-    int insertedIdx = tabs->InsertTab(idx, newTab);
+    int insertedIdx = tabs->InsertTab(idx, newTab, !deferUpdate);
     ReportIf(insertedIdx == -1);
-    tabs->SetSelected(insertedIdx);
-    UpdateTabWidth(win);
+    if (!deferUpdate) {
+        tabs->SetSelected(insertedIdx);
+        UpdateTabWidth(win);
+    }
     return tab;
+}
+
+// The tab control paints from TabInfo::tabColor, so WindowTab::tabColor has to
+// be pushed into it whenever it changes. AddTabToWindow() does it at insert
+// time, but a document's saved color is only known once it has loaded, well
+// after that (issue #5884).
+// copy tab->tabColor into the tab control's TabInfo (what it paints from)
+void SetTabInfoColor(WindowTab* tab) {
+    if (!tab || !tab->win || !tab->win->tabsCtrl) {
+        return;
+    }
+    MainWindow* win = tab->win;
+    TabInfo* ti = win->tabsCtrl->GetTab(win->GetTabIdx(tab));
+    if (!ti || ti->tabColor == tab->tabColor) {
+        return;
+    }
+    ti->tabColor = tab->tabColor;
+    win->tabsCtrl->ScheduleRepaint();
+}
+
+// The tab control paints from TabInfo::isError, so it has to be re-synced from
+// WindowTab::loadState when a load fails or a reload succeeds
+void UpdateTabIsError(WindowTab* tab) {
+    if (!tab || !tab->win || !tab->win->tabsCtrl) {
+        return;
+    }
+    MainWindow* win = tab->win;
+    TabInfo* ti = win->tabsCtrl->GetTab(win->GetTabIdx(tab));
+    bool isError = tab->loadState == WindowTab::LoadState::Error;
+    if (!ti || ti->isError == isError) {
+        return;
+    }
+    ti->isError = isError;
+    win->tabsCtrl->ScheduleRepaint();
 }
 
 // Refresh the tab's title
@@ -722,12 +821,15 @@ void TabsOnCloseWindow(MainWindow* win) {
     if (!win->tabsCtrl) {
         return;
     }
+    // Clear these BEFORE destroying tabs. Deleting a Markdown/CHM tab destroys
+    // its WebView2, which pumps messages; canvas WndProc then called AsFixed()
+    // on win->ctrl after another tab's DisplayModel had already been freed.
+    win->ctrl = nullptr;
+    win->currentTabTemp = nullptr;
     auto tabs = win->Tabs();
     DeleteVecMembers(tabs);
     win->tabsCtrl->RemoveAllTabs();
     win->tabSelectionHistory->Reset();
-    win->currentTabTemp = nullptr;
-    win->ctrl = nullptr;
 }
 
 void SetTabsInTitlebar(MainWindow* win, bool inTitleBar) {

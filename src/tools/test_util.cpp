@@ -17,6 +17,7 @@ extern void CryptoUtilTest();
 extern void CssParser_UnitTests();
 extern void DictTest();
 extern void FileUtilTest();
+extern void GuessFileTypeTest();
 extern void JsonTest();
 extern void RefHoverTest();
 extern void SettingsUtilTest();
@@ -25,7 +26,6 @@ extern void SquareTreeTest();
 extern void StrFormatTest();
 extern void StrTest();
 extern void VecTest();
-extern void WinUtilTest();
 extern void StrVecTest();
 extern void WindowLifecycleTest();
 extern void HardwareProfileTest();
@@ -35,6 +35,13 @@ extern void RendererTest();
 extern void CommandPaletteScoringTest();
 extern void ElasticLayoutTest();
 extern void AnnotHitTestTest();
+extern void PdfDarkModeOklab_UnitTests();
+extern void PdfDarkModeImageClassifier_UnitTests();
+extern void AppendStoreTest();
+#if OS_WIN
+extern void WinUtilTest();
+extern void ClipboardImageTest();
+#endif
 
 void GetPrintersInfo(struct str::Builder&) {
     /* stub: do nothing */
@@ -51,20 +58,21 @@ static void PrintStdout(Str s) {
     printf("%.*s", s.len, s.s);
 }
 
+#if OS_WIN
 static WStr GetExeDir() {
     static WCHAR buf[MAX_PATH];
-    DWORD len = GetModuleFileNameW(nullptr, buf, dimof(buf));
-    if (len == 0 || len >= dimof(buf)) {
+    DWORD n = GetModuleFileNameW(nullptr, buf, dimof(buf));
+    if (n == 0 || n >= dimof(buf)) {
         return {};
     }
-    while (len > 0 && buf[len - 1] != L'\\' && buf[len - 1] != L'/') {
-        --len;
+    while (n > 0 && buf[n - 1] != L'\\' && buf[n - 1] != L'/') {
+        --n;
     }
-    if (len > 0) {
-        --len;
+    if (n > 0) {
+        --n;
     }
-    buf[len] = 0;
-    return WStr(buf, (int)len);
+    buf[n] = 0;
+    return WStr(buf, (int)n);
 }
 
 static bool InitSymbolsForAi() {
@@ -85,11 +93,12 @@ static LONG WINAPI ForAiCrashHandler(EXCEPTION_POINTERS* exceptionInfo) {
     ExitProcess(7);
     return EXCEPTION_EXECUTE_HANDLER;
 }
+#endif
 
 int main(int argc, char** argv) {
     bool forAi = false;
     for (int i = 1; i < argc; i++) {
-        if (str::Eq(argv[i], "-for-ai")) {
+        if (str::Eq(argv[i], StrL("-for-ai"))) {
             forAi = true;
         }
     }
@@ -102,8 +111,10 @@ int main(int argc, char** argv) {
     InitDynCalls();
     if (forAi) {
         utassert_set_for_ai(true);
+#if OS_WIN
         InitSymbolsForAi();
         SetUnhandledExceptionFilter(ForAiCrashHandler);
+#endif
     }
     BaseUtilTest();
     ByteOrderTests();
@@ -111,6 +122,7 @@ int main(int argc, char** argv) {
     CssParser_UnitTests();
     DictTest();
     FileUtilTest();
+    GuessFileTypeTest();
     JsonTest();
     RefHoverTest();
     SettingsUtilTest();
@@ -120,7 +132,13 @@ int main(int argc, char** argv) {
     StrTest();
     StrVecTest();
     VecTest();
+    PdfDarkModeOklab_UnitTests();
+    PdfDarkModeImageClassifier_UnitTests();
+    AppendStoreTest();
+#if OS_WIN
     WinUtilTest();
+    ClipboardImageTest();
+#endif
     SumatraPDF_UnitTests();
     WindowLifecycleTest();
     HardwareProfileTest();

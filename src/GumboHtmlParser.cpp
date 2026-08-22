@@ -5,11 +5,12 @@
 #include "base/HtmlTags.h"
 
 #include "GumboHelpers.h"
+
 #include "GumboHtmlParser.h"
 
 // returns -1 if didn't find
 int HtmlEntityNameToRune(Str name) {
-    return FindHtmlEntityRune(name);
+    return (int)FindHtmlEntityRune(name);
 }
 
 static int HtmlEntityHexDigit(char c) {
@@ -49,9 +50,13 @@ static Str ParseHtmlNumericEntity(Str str, int& rune) {
     bool any = false;
     bool overflow = false;
     while (off < str.len) {
-        int digit = base == 16                               ? HtmlEntityHexDigit(str.s[off])
-                    : str.s[off] >= '0' && str.s[off] <= '9' ? (int)(str.s[off] - '0')
-                                                             : -1;
+        char c = str.s[off];
+        int digit = -1;
+        if (base == 16) {
+            digit = HtmlEntityHexDigit(c);
+        } else if (c >= '0' && c <= '9') {
+            digit = (int)(c - '0');
+        }
         if (digit < 0 || digit >= base) {
             break;
         }
@@ -59,7 +64,7 @@ static Str ParseHtmlNumericEntity(Str str, int& rune) {
         if (codepoint > (0x10ffff - digit) / base) {
             overflow = true;
         } else if (!overflow) {
-            codepoint = codepoint * base + digit;
+            codepoint = (codepoint * base) + digit;
         }
         off++;
     }
@@ -150,7 +155,7 @@ bool IsSpaceOnly(Str s) {
 }
 
 static void MemAppend(char* buf, int& off, Str src) {
-    if (!src) {
+    if (!buf || !src) {
         return;
     }
     memcpy(buf + off, src.s, src.len);
@@ -176,10 +181,10 @@ Str ResolveHtmlEntity(Str str, int& rune) {
 
 // if s doesn't contain html entities, we just return it
 // if it contains html entities, we'll return string allocated
-// with alloc in which entities are converted to their values
+// with a in which entities are converted to their values
 // Entities are encoded as utf8 in the result.
-// alloc can be nullptr, in which case we'll allocate with malloc()
-Str ResolveHtmlEntities(Str str, Arena* alloc) {
+// a can be nullptr, in which case we'll allocate with malloc()
+Str ResolveHtmlEntities(Str str, Arena* a) {
     Str res;
     size_t resLen = 0;
     int dstOff = 0;
@@ -201,7 +206,7 @@ Str ResolveHtmlEntities(Str str, Arena* alloc) {
             // I'm banking that text after resolving entities will
             // be smaller than the original
             resLen = (size_t)str.len + 8; // +8 just in case
-            res.s = (char*)Alloc(alloc, resLen);
+            res.s = (char*)Alloc(a, resLen);
         }
         MemAppend(res.s, dstOff, Str(str.s + chunkStart, off - chunkStart));
         // off points at '&'
@@ -260,7 +265,7 @@ static bool IsNameWithNS(Str s, Str nameToCheck) {
 // for now just ignores any namespace qualifier
 // (i.e. succeeds for "xlink:href" with name="href" and any value of attrNS)
 // TODO: add proper namespace support
-bool AttrInfo::NameIsNS(Str nameToCheck, Str) const {
+bool AttrInfo::NameIsNS(Str nameToCheck, Str /*ns*/) const {
     // ReportIf(!ns);
     return IsNameWithNS(name, nameToCheck);
 }
@@ -300,7 +305,7 @@ bool HtmlToken::NameIs(Str nameToFind) const {
 // for now just ignores any namespace qualifier
 // (i.e. succeeds for "opf:content" with name="content" and any value of ns)
 // TODO: add proper namespace support
-bool HtmlToken::NameIsNS(Str nameToCheck, Str) const {
+bool HtmlToken::NameIsNS(Str nameToCheck, Str /*ns*/) const {
     // ReportIf(!ns);
     return IsNameWithNS(name, nameToCheck);
 }
@@ -397,9 +402,7 @@ static Str StartTagInner(Str raw, bool selfClosing) {
             end = slash;
         }
     }
-    if (end < start) {
-        end = start;
-    }
+    end = std::max(end, start);
     return Str(raw.s + start, end - start);
 }
 
@@ -416,10 +419,11 @@ static Str EndTagInner(Str raw) {
 }
 
 static Str CDataText(Str raw, const GumboNode* node) {
-    if (str::StartsWith(raw, StrL("<![CDATA[")) && str::EndsWith(raw, StrL("]]>"))) {
-        return Str(raw.s + 9, raw.len - 12);
+    if (str::TrimPrefix(raw, StrL("<![CDATA[")) && str::EndsWith(raw, StrL("]]>"))) {
+        raw.len -= 3;
+        return raw;
     }
-    return Str(node->v.text.text);
+    return {node->v.text.text};
 }
 
 static ptrdiff_t PosOfSource(Str html, Str p) {
@@ -462,7 +466,7 @@ void GumboHtmlParser::BuildEvents() {
 
         if (frame.emitEnd) {
             Str rawEnd = StrFromPiece(node->v.element.original_end_tag);
-            if (!str::IsEmpty(rawEnd)) {
+            if (len(rawEnd) > 0) {
                 Str inner = EndTagInner(rawEnd);
                 events.Append(
                     {HtmlToken::EndTag, node, inner, TagNameFromTagInner(inner), rawEnd, PosOfSource(html, rawEnd)});
@@ -493,7 +497,7 @@ void GumboHtmlParser::BuildEvents() {
 
         if (node->type == GUMBO_NODE_ELEMENT || node->type == GUMBO_NODE_TEMPLATE) {
             Str rawStart = StrFromPiece(node->v.element.original_tag);
-            if (str::IsEmpty(rawStart)) {
+            if (len(rawStart) == 0) {
                 for (unsigned int i = children->length; i > 0; i--) {
                     toVisit.Append({(const GumboNode*)children->data[i - 1], false});
                 }
@@ -506,7 +510,7 @@ void GumboHtmlParser::BuildEvents() {
             events.Append({type, node, inner, TagNameFromTagInner(inner), rawStart, PosOfSource(html, rawStart)});
 
             if (!selfClosing) {
-                if (!str::IsEmpty(StrFromPiece(node->v.element.original_end_tag))) {
+                if (len(StrFromPiece(node->v.element.original_end_tag)) > 0) {
                     toVisit.Append({node, true});
                 }
                 for (unsigned int i = children->length; i > 0; i--) {
@@ -542,17 +546,13 @@ HtmlToken* GumboHtmlParser::TokenFromEvent(Event& ev) {
 }
 
 void GumboHtmlParser::SetCurrPosOff(ptrdiff_t off) {
-    if (off < 0) {
-        off = 0;
-    }
-    if (off > html.len) {
-        off = html.len;
-    }
+    off = std::max<ptrdiff_t>(off, 0);
+    off = std::min<ptrdiff_t>(off, html.len);
 
     textStartOff = -1;
     eventIdx = (size_t)len(events);
     for (int i = 0; i < len(events); i++) {
-        Event& ev = events.at(i);
+        Event& ev = events[i];
         if (ev.type == HtmlToken::Text && off >= ev.off && off < ev.off + ev.s.len) {
             eventIdx = (size_t)i;
             textStartOff = off;
@@ -573,6 +573,6 @@ HtmlToken* GumboHtmlParser::Next() {
     if (eventIdx >= (size_t)len(events)) {
         return nullptr;
     }
-    Event& ev = events.at((int)eventIdx++);
+    Event& ev = events[(int)eventIdx++];
     return TokenFromEvent(ev);
 }

@@ -9,6 +9,14 @@ struct TextSel {
     Rect* rects = nullptr;
 };
 
+// Unit for keyboard/accessibility selection extension (platform-neutral).
+// Callers map input (e.g. Shift+arrow keys) to unit + signed delta.
+enum class TextSelectUnit {
+    Glyph, // one glyph / character
+    Word,  // to the previous / next word boundary
+    Line,  // one visual line of text
+};
+
 struct TextSelection {
     int startPage = -1;
     int endPage = -1;
@@ -28,8 +36,6 @@ struct TextSelection {
     ~TextSelection();
 
     bool IsOverGlyph(int pageNo, double x, double y);
-    // index of the glyph closest to (x, y) on pageNo, without mutating the
-    // selection (unlike StartAt, which stores it in startGlyph)
     int FindClosestGlyphAt(int pageNo, double x, double y);
     void StartAt(int pageNo, int glyphIx);
     void StartAt(int pageNo, double x, double y);
@@ -37,11 +43,9 @@ struct TextSelection {
     void SelectUpTo(int pageNo, double x, double y);
     void GetWordBoundsAt(int pageNo, double x, double y, int* wordStartOut, int* wordEndOut);
     void SelectWordAt(int pageNo, double x, double y);
-    // select the whole line of text at (x, y) (triple-click; issue #694)
     void SelectLineAt(int pageNo, double x, double y);
-    // extend the selection so it spans whole words from the anchor word (set by
-    // the last SelectWordAt) to the word at (x, y)
     void SelectWordsUpTo(int pageNo, double x, double y);
+    bool ExtendBy(TextSelectUnit unit, int delta);
     void CopySelection(TextSelection* orig);
     Str ExtractText(Str lineSep);
     void Reset();
@@ -53,3 +57,4 @@ struct TextSelection {
 
 uint distSq(int x, int y);
 bool isWordChar(int c);
+bool TextPosMoveBy(EngineBase*, int& page, int& glyph, TextSelectUnit unit, int dir);

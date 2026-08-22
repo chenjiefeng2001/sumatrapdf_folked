@@ -9,8 +9,6 @@
 
 #include <TextToSpeech.h>
 
-#include "base/Log.h"
-
 #pragma comment(lib, "sapi.lib")
 #pragma comment(lib, "winmm.lib")
 
@@ -42,6 +40,11 @@ static WStr gTtsSpokenText;
 
 static Str gTtsVoiceId;
 
+// playback speed multiplier, 1.0 is normal speed
+constexpr float kTtsSpeedMin = 0.5f;
+constexpr float kTtsSpeedMax = 3.0f;
+static float gTtsSpeed = 1.0f;
+
 static HWND gTtsNotifyHwnd = nullptr;
 static UINT gTtsNotifyMsg = 0;
 static WPARAM gTtsNotifyWParam = 0;
@@ -54,16 +57,16 @@ static void TtsPostNotifyMsg() {
 }
 
 static Str TtsVoiceLangForSort(const TtsVoiceInfo& voice) {
-    return str::IsEmpty(voice.lang) ? StrL("ffff") : voice.lang;
+    return len(voice.lang) == 0 ? StrL("ffff") : voice.lang;
 }
 
 static bool TtsVoiceLess(const TtsVoiceInfo& a, const TtsVoiceInfo& b) {
-    int langCmp = lstrcmpiA(TtsVoiceLangForSort(a).s, TtsVoiceLangForSort(b).s);
+    int langCmp = str::CmpI(TtsVoiceLangForSort(a), TtsVoiceLangForSort(b));
     if (langCmp != 0) {
         return langCmp < 0;
     }
 
-    return lstrcmpiA(a.name ? a.name.s : "", b.name ? b.name.s : "") < 0;
+    return str::CmpI(a.name ? a.name : StrL(""), b.name ? b.name : StrL("")) < 0;
 }
 
 static void TtsSortVoicesByLanguage(Vec<TtsVoiceInfo>& voices) {
@@ -90,7 +93,7 @@ static ULONG gSapiLastWordPos = 0;
 // Voice token lookup and metadata
 
 static ISpObjectToken* SapiFindVoiceTokenById(Str voiceId) {
-    if (str::IsEmpty(voiceId)) {
+    if (len(voiceId) == 0) {
         return nullptr;
     }
 
@@ -183,7 +186,9 @@ static void SapiSetNotify() {
         return;
     }
 
-    const ULONGLONG events = SPFEI(SPEI_END_INPUT_STREAM) | SPFEI(SPEI_WORD_BOUNDARY);
+    // equivalent to SPFEI(END_INPUT_STREAM)|SPFEI(WORD_BOUNDARY); written this way
+    // so FLAGCHECK is only or'd once (avoids misc-redundant-expression on SPFEI|SPFEI)
+    const ULONGLONG events = (1ull << SPEI_END_INPUT_STREAM) | (1ull << SPEI_WORD_BOUNDARY) | SPFEI_FLAGCHECK;
     eventSource->SetInterest(events, events);
 
     if (gTtsNotifyHwnd && gTtsNotifyMsg) {
@@ -191,6 +196,17 @@ static void SapiSetNotify() {
     }
 
     eventSource->Release();
+}
+
+// SAPI rate is -10 .. 10 on a logarithmic scale where 10 is ~3x and -10 ~1/3x,
+// so rate = 10 * log3(speed)
+static void SapiApplySpeed() {
+    if (!gSapiVoice) {
+        return;
+    }
+    double rate = 10.0 * log((double)gTtsSpeed) / log(3.0);
+    long rateAdjust = (long)(rate < 0 ? rate - 0.5 : rate + 0.5);
+    gSapiVoice->SetRate(rateAdjust);
 }
 
 static bool SapiInit() {
@@ -217,7 +233,7 @@ static bool SapiInit() {
         return false;
     }
 
-    if (!str::IsEmpty(gTtsVoiceId)) {
+    if (len(gTtsVoiceId) > 0) {
         ISpObjectToken* token = SapiFindVoiceTokenById(gTtsVoiceId);
         if (token) {
             gSapiVoice->SetVoice(token);
@@ -225,6 +241,7 @@ static bool SapiInit() {
         }
     }
 
+    SapiApplySpeed();
     SapiSetNotify();
     return true;
 }
@@ -311,7 +328,7 @@ static bool SapiSetVoiceById(Str voiceId) {
 
     HRESULT hr = E_FAIL;
 
-    if (str::IsEmpty(voiceId)) {
+    if (len(voiceId) == 0) {
         hr = gSapiVoice->SetVoice(nullptr);
     } else {
         ISpObjectToken* token = SapiFindVoiceTokenById(voiceId);
@@ -475,7 +492,7 @@ static Str HStringToUtf8Dup(HSTRING hs) {
 }
 
 class WinTtsSynthCompletedHandler : public SynthAsyncHandler {
-    LONG refCount = 1;
+    AtomicInt refCount = 1;
 
   public:
     // IUnknown
@@ -492,7 +509,7 @@ class WinTtsSynthCompletedHandler : public SynthAsyncHandler {
         return E_NOINTERFACE;
     }
 
-    STDMETHODIMP_(ULONG) AddRef() override { return (ULONG)InterlockedIncrement(&refCount); }
+    STDMETHODIMP_(ULONG) AddRef() override { return (ULONG)AtomicIntInc(&refCount); }
 
     STDMETHODIMP_(ULONG) Release() override {
         ULONG res = (ULONG)InterlockedDecrement(&refCount);
@@ -504,7 +521,7 @@ class WinTtsSynthCompletedHandler : public SynthAsyncHandler {
 
     // can be called on a background thread; actual handling happens
     // on the UI thread in WinTtsProcessEvents()
-    STDMETHODIMP Invoke(SynthAsyncOp*, AsyncStatus) override {
+    STDMETHODIMP Invoke(SynthAsyncOp* /*asyncInfo*/, AsyncStatus /*status*/) override {
         TtsPostNotifyMsg();
         return S_OK;
     }
@@ -540,6 +557,28 @@ static void WinTtsStopPlayback() {
     gWinAvgBytesPerSec = 0;
     gWinSamplesPerSec = 0;
     InterlockedExchange(&gWinWaveDone, 0);
+}
+
+// takes effect at the next SynthesizeTextToStreamAsync() i.e. the next
+// spoken chunk (needs Windows 10 1709+, no-op on older versions)
+static void WinTtsApplySpeed() {
+    if (!gWinSynth) {
+        return;
+    }
+    WMSS::ISpeechSynthesizer2* synth2 = nullptr;
+    if (FAILED(gWinSynth->QueryInterface(IID_PPV_ARGS(&synth2))) || !synth2) {
+        return;
+    }
+    WMSS::ISpeechSynthesizerOptions* options = nullptr;
+    if (SUCCEEDED(synth2->get_Options(&options)) && options) {
+        WMSS::ISpeechSynthesizerOptions2* options2 = nullptr;
+        if (SUCCEEDED(options->QueryInterface(IID_PPV_ARGS(&options2))) && options2) {
+            options2->put_SpeakingRate((DOUBLE)gTtsSpeed);
+            options2->Release();
+        }
+        options->Release();
+    }
+    synth2->Release();
 }
 
 static bool WinTtsInit() {
@@ -648,6 +687,8 @@ static bool WinTtsInit() {
         synth2->Release();
     }
 
+    WinTtsApplySpeed();
+
     gWinInitFailed = false;
     return true;
 }
@@ -727,7 +768,7 @@ static bool WinTtsSetVoiceById(Str voiceId) {
         return false;
     }
 
-    if (str::IsEmpty(voiceId)) {
+    if (len(voiceId) == 0) {
         WMSS::IVoiceInformation* def = nullptr;
         if (FAILED(gWinVoicesStatic->get_DefaultVoice(&def)) || !def) {
             return false;
@@ -791,7 +832,7 @@ static bool WinTtsSpeak(WStr textW) {
         return false;
     }
 
-    auto handler = new WinTtsSynthCompletedHandler();
+    auto* handler = new WinTtsSynthCompletedHandler();
     op->put_Completed(handler);
     handler->Release();
 
@@ -885,37 +926,15 @@ static bool WinTtsReadStreamBytes(WMSS::ISpeechSynthesisStream* stream) {
     }
 
     bool ok = false;
-    STATSTG st{};
-    if (SUCCEEDED(istm->Stat(&st, STATFLAG_NONAME))) {
-        constexpr ULONGLONG kMaxWavSize = 512 * 1024 * 1024;
-        ULONGLONG size = st.cbSize.QuadPart;
-        if (size > 0 && size < kMaxWavSize) {
-            u8* buf = (u8*)malloc((size_t)size);
-            if (buf) {
-                LARGE_INTEGER zero{};
-                istm->Seek(zero, STREAM_SEEK_SET, nullptr);
-
-                size_t total = 0;
-                while (total < (size_t)size) {
-                    ULONG read = 0;
-                    hr = istm->Read(buf + total, (ULONG)((size_t)size - total), &read);
-                    if (FAILED(hr) || read == 0) {
-                        break;
-                    }
-                    total += read;
-                }
-
-                if (total == (size_t)size) {
-                    gWinWavData = buf;
-                    gWinWaveHdr.dwBufferLength = (DWORD)size; // temporarily holds the file size
-                    ok = true;
-                } else {
-                    free(buf);
-                }
-            }
-        }
+    Str data = ReadIStream(istm);
+    constexpr int kMaxWavSize = 512 * 1024 * 1024;
+    if (!str::IsNull(data) && data.len > 0 && data.len < kMaxWavSize) {
+        gWinWavData = (u8*)data.s;
+        gWinWaveHdr.dwBufferLength = (DWORD)data.len; // temporarily holds the file size
+        ok = true;
+    } else {
+        str::Free(data);
     }
-
     istm->Release();
     return ok;
 }
@@ -928,8 +947,8 @@ static DWORD WavGetU32(const u8* d) {
 
 // finds "fmt " and "data" chunks in a RIFF WAVE file
 static bool WinTtsParseWav(const u8* d, size_t n, WAVEFORMATEX* wfx, const u8** dataOut, DWORD* dataSizeOut) {
-    if (n < 12 + 8 || !str::EqN(Str((char*)(d), (int)(4)), StrL("RIFF"), 4) ||
-        !str::EqN(Str((char*)(d + 8), (int)(4)), StrL("WAVE"), 4)) {
+    if (n < 12 + 8 || !str::EqN(Str((char*)(d), 4), StrL("RIFF"), 4) ||
+        !str::EqN(Str((char*)(d + 8), 4), StrL("WAVE"), 4)) {
         return false;
     }
 
@@ -939,7 +958,7 @@ static bool WinTtsParseWav(const u8* d, size_t n, WAVEFORMATEX* wfx, const u8** 
 
     size_t off = 12;
     while (off + 8 <= n) {
-        Str chunkId = Str((char*)(d + off), (int)(4));
+        Str chunkId = Str((char*)(d + off), 4);
         DWORD chunkSize = WavGetU32(d + off + 4);
         off += 8;
         if (chunkSize > n - off) {
@@ -948,9 +967,7 @@ static bool WinTtsParseWav(const u8* d, size_t n, WAVEFORMATEX* wfx, const u8** 
 
         if (str::EqN(chunkId, StrL("fmt "), 4) && chunkSize >= 16) {
             size_t toCopy = (size_t)chunkSize;
-            if (toCopy > sizeof(WAVEFORMATEX)) {
-                toCopy = sizeof(WAVEFORMATEX);
-            }
+            toCopy = std::min(toCopy, sizeof(WAVEFORMATEX));
             *wfx = {};
             memcpy(wfx, d + off, toCopy);
             wfx->cbSize = 0;
@@ -972,7 +989,8 @@ static bool WinTtsParseWav(const u8* d, size_t n, WAVEFORMATEX* wfx, const u8** 
     return true;
 }
 
-static void CALLBACK WinTtsWaveOutCb(HWAVEOUT, UINT msg, DWORD_PTR, DWORD_PTR, DWORD_PTR) {
+static void CALLBACK WinTtsWaveOutCb(HWAVEOUT /*hwo*/, UINT msg, DWORD_PTR /*instance*/, DWORD_PTR /*param1*/,
+                                     DWORD_PTR /*param2*/) {
     if (msg != WOM_DONE) {
         return;
     }
@@ -1118,7 +1136,7 @@ static void WinTtsStop() {
 static bool IsWinRtBackend() {
     if (gTtsBackend == TtsBackend::Unknown) {
         // an escape hatch, also for testing the SAPI implementation
-        bool forceSapi = !str::IsEmpty(GetEnvVariableTemp(StrL("SUMATRA_TTS_FORCE_SAPI")));
+        bool forceSapi = len(GetEnvVariableTemp(StrL("SUMATRA_TTS_FORCE_SAPI"))) > 0;
         if (!forceSapi && WinTtsInit()) {
             gTtsBackend = TtsBackend::WinRt;
             log("Tts: using Windows.Media.SpeechSynthesis\n");
@@ -1148,7 +1166,7 @@ void TtsProcessEvents() {
 }
 
 bool TtsSpeakUtf8(Str text) {
-    if (str::IsEmpty(text)) {
+    if (len(text) == 0) {
         return false;
     }
 
@@ -1177,6 +1195,8 @@ bool TtsIsSpeaking() {
     return gTtsActive;
 }
 
+// utf8 offset of the most recently spoken word within the text passed
+// to TtsSpeakUtf8, -1 if not known
 int TtsGetSpokenPosUtf8() {
     int wpos;
     if (gTtsBackend == TtsBackend::WinRt) {
@@ -1235,6 +1255,25 @@ bool TtsSetVoiceById(Str voiceId) {
 
 Str TtsGetVoiceId() {
     return gTtsVoiceId;
+}
+
+// with the WinRT backend the new speed applies from the next spoken chunk;
+// SAPI adjusts speech in progress
+void TtsSetSpeed(float speed) {
+    if (speed < kTtsSpeedMin) {
+        speed = kTtsSpeedMin;
+    } else if (speed > kTtsSpeedMax) {
+        speed = kTtsSpeedMax;
+    }
+    gTtsSpeed = speed;
+
+    // both no-op if that backend is not initialized
+    WinTtsApplySpeed();
+    SapiApplySpeed();
+}
+
+float TtsGetSpeed() {
+    return gTtsSpeed;
 }
 
 void TtsFreeVoices(Vec<TtsVoiceInfo>& voices) {

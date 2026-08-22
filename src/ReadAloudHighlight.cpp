@@ -2,9 +2,9 @@
    License: GPLv3 */
 
 #include "base/Base.h"
-#include "base/Dpi.h"
+#include "gui/Dpi.h"
 
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
 
 #include "Settings.h"
 #include "GlobalPrefs.h"
@@ -13,7 +13,6 @@
 #include "DisplayModel.h"
 #include "TextSelection.h"
 
-#include "base/Log.h"
 #include "TextToSpeech.h"
 #include "WindowTab.h"
 #include "MainWindow.h"
@@ -82,7 +81,7 @@ static bool ReadAloudByteLocHasRect(const ReadAloudByteLoc& loc) {
 }
 
 static Rect ReadAloudByteLocToRect(const ReadAloudByteLoc& loc) {
-    return Rect(loc.x, loc.y, loc.dx, loc.dy);
+    return {loc.x, loc.y, loc.dx, loc.dy};
 }
 
 static bool IsLineBreakGlyph(const Rect* coords, int idx, int c) {
@@ -104,7 +103,7 @@ static bool CleanRawBytes(Vec<ReadAloudRawByte>& raw, ReadAloudHighlightMap* map
         ReadAloudByteLoc loc = raw[i].loc;
 
         if (c == '-' && i + 1 < len(raw) && IsReadAloudLineBreak(raw[i + 1].c)) {
-            size_t after = i + 1;
+            int after = i + 1;
             while (after < len(raw) && IsReadAloudLineBreak(raw[after].c)) {
                 after++;
             }
@@ -227,9 +226,7 @@ static void ReadAloudAppendPageGlyphs(Vec<ReadAloudRawByte>& raw, EngineBase* en
         return;
     }
 
-    if (startGlyph < 0) {
-        startGlyph = 0;
-    }
+    startGlyph = std::max(startGlyph, 0);
     if (endGlyph < 0 || endGlyph > textLen) {
         endGlyph = textLen;
     }
@@ -252,7 +249,7 @@ static void ReadAloudAppendPageGlyphs(Vec<ReadAloudRawByte>& raw, EngineBase* en
         }
 
         Str utf8(text.s + charStart, byteIdx - charStart);
-        if (str::IsEmpty(utf8)) {
+        if (len(utf8) == 0) {
             continue;
         }
         for (int i = 0; i < utf8.len; i++) {
@@ -577,7 +574,7 @@ static bool ReadAloudGetCurrentWordAbsRange(WindowTab* tab, int* startAbsOut, in
     *endAbsOut = 0;
 
     ReadAloudHighlightMap* map = tab->readAloudHighlight;
-    if (!map || !map->locs || map->len <= 0 || str::IsEmpty(tab->readAloudText)) {
+    if (!map || !map->locs || map->len <= 0 || len(tab->readAloudText) == 0) {
         return false;
     }
 
@@ -596,9 +593,7 @@ static bool ReadAloudGetCurrentWordAbsRange(WindowTab* tab, int* startAbsOut, in
     if (wordStartAbs < 0 || wordStartAbs >= map->len) {
         return false;
     }
-    if (wordEndAbs > map->len) {
-        wordEndAbs = map->len;
-    }
+    wordEndAbs = std::min(wordEndAbs, map->len);
     if (wordEndAbs <= wordStartAbs) {
         return false;
     }
@@ -712,7 +707,7 @@ void ReadAloudUpdateAutoScroll(MainWindow* win) {
         return;
     }
 
-    int margin = DpiScale(win->hwndCanvas, 48);
+    int margin = DpiScale(48);
     if (ReadAloudIsWordRectFullyVisibleInViewport(win, wordRect, margin)) {
         return;
     }
@@ -736,7 +731,7 @@ void ReadAloudUpdateAutoScroll(MainWindow* win) {
         return;
     }
 
-    int maxStep = std::max(canvas.dy / 4, DpiScale(win->hwndCanvas, 120));
+    int maxStep = std::max(canvas.dy / 4, DpiScale(120));
     if (dx > maxStep) {
         dx = maxStep;
     } else if (dx < -maxStep) {
@@ -753,7 +748,7 @@ void ReadAloudUpdateAutoScroll(MainWindow* win) {
     win->readAloudScrollFromCode = false;
 }
 
-void PaintReadAloudHighlight(MainWindow* win, HDC hdc) {
+void PaintReadAloudHighlight(MainWindow* win, Gfx* gfx) {
     if (!TtsIsSpeaking()) {
         gReadAloudPaintLogState = 0;
         return;
@@ -794,9 +789,7 @@ void PaintReadAloudHighlight(MainWindow* win, HDC hdc) {
         ReadAloudPaintLogOnce(5, "ReadAloud: PaintHighlight: wordStartAbs out of range");
         return;
     }
-    if (wordEndAbs > map->len) {
-        wordEndAbs = map->len;
-    }
+    wordEndAbs = std::min(wordEndAbs, map->len);
     if (wordEndAbs <= wordStartAbs) {
         ReadAloudPaintLogOnce(6, "ReadAloud: PaintHighlight: empty word range");
         return;
@@ -804,7 +797,7 @@ void PaintReadAloudHighlight(MainWindow* win, HDC hdc) {
 
     int pageCount = dm->GetEngine()->PageCount();
     Vec<RectF> pageUnions;
-    pageUnions.SetSize(pageCount + 1);
+    VecResize(pageUnions, pageCount + 1);
 
     for (int i = wordStartAbs; i < wordEndAbs; i++) {
         ReadAloudByteLoc& loc = map->locs[i];
@@ -843,5 +836,5 @@ void PaintReadAloudHighlight(MainWindow* win, HDC hdc) {
     if (alpha == 0) {
         alpha = kSelectionDefaultAlpha;
     }
-    PaintTransparentRectangles(hdc, win->canvasRc, screenRects, parsedCol->col, alpha);
+    PaintTransparentRectangles(gfx, win->canvasRc, screenRects, parsedCol->col, alpha);
 }

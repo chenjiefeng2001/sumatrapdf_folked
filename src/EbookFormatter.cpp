@@ -2,13 +2,11 @@
    License: GPLv3 */
 
 #include "base/Base.h"
-#include "base/GdiPlus.h"
 #include "base/Archive.h"
 #include "base/HtmlTags.h"
-#include "GumboHtmlParser.h"
-#include "mui/Mui.h"
 
-#include "wingui/UIModels.h"
+#include "GumboHelpers.h"
+#include "GumboHtmlParser.h"
 
 #include "DocProperties.h"
 #include "DocController.h"
@@ -16,6 +14,8 @@
 #include "EbookDoc.h"
 #include "PalmDbReader.h"
 #include "MobiDoc.h"
+#include "gui/PlatformFont.h"
+#include "gui/PlatformText.h"
 #include "HtmlFormatter.h"
 #include "EbookFormatter.h"
 
@@ -89,23 +89,32 @@ void MobiFormatter::HandleSpacing_Mobi(HtmlToken* t) {
 // <img recindex="0000n" alt=""/>
 // where recindex is the record number of pdb record
 // that holds the image (within image record array, not a
-// global record)
+// global record). KF8 uses src="kindle:embed:XXXX" instead.
 void MobiFormatter::HandleTagImg(HtmlToken* t) {
     // we allow formatting raw html which can't require doc
     if (!doc) {
         return;
     }
     bool needAlt = true;
+    int n = 0;
     AttrInfo* attr = t->GetAttrByName(StrL("recindex"));
-    if (attr) {
-        int n;
-        if (!str::IsNull(str::Parse(attr->val, "%d", &n))) {
-            Str img = doc->GetImage(n);
-            needAlt = !img || !EmitImage(img);
+    if (attr && !str::IsNull(str::Parse(attr->val, "%d", &n))) {
+        // recindex parsed
+    } else {
+        attr = t->GetAttrByName(StrL("src"));
+        if (attr) {
+            n = KindleEmbedToRecIndex(attr->val);
         }
     }
-    if (needAlt && (attr = t->GetAttrByName(StrL("alt"))) != nullptr) {
-        HandleText(str::Dup(textAllocator, attr->val));
+    if (n > 0) {
+        Str img = doc->GetImage(n);
+        needAlt = !img || !EmitImage(img);
+    }
+    if (needAlt) {
+        attr = t->GetAttrByName(StrL("alt"));
+        if (attr != nullptr) {
+            HandleText(str::Dup(textAllocator, attr->val));
+        }
     }
 }
 
@@ -147,23 +156,25 @@ void EpubFormatter::HandleTagImg(HtmlToken* t) {
     bool needAlt = true;
     AttrInfo* attr = t->GetAttrByName(StrL("src"));
     if (attr) {
-        TempStr src = str::DupTemp(attr->val);
-        url::DecodeInPlace(src);
+        TempStr src = url::DecodeTemp(attr->val);
         Str img = epubDoc->GetImageData(src, pagePath);
         needAlt = !img || !EmitImage(img);
     }
-    if (needAlt && (attr = t->GetAttrByName(StrL("alt"))) != nullptr) {
-        HandleText(str::Dup(textAllocator, attr->val));
+    if (needAlt) {
+        attr = t->GetAttrByName(StrL("alt"));
+        if (attr != nullptr) {
+            HandleText(str::Dup(textAllocator, attr->val));
+        }
     }
 }
 
 void EpubFormatter::HandleTagPagebreak(HtmlToken* t) {
     AttrInfo* attr = t->GetAttrByName(StrL("page_path"));
-    if (!attr || !str::IsEmpty(pagePath)) {
+    if (!attr || len(pagePath) > 0) {
         ForceNewPage();
     }
     if (attr) {
-        Gdiplus::RectF bbox(0, currY, pageDx, 0);
+        RectF bbox(0, currY, pageDx, 0);
         // attr->val is owned by the gumbo parse tree which doesn't outlive
         // the formatter, so copy it into textAllocator
         currPage->instructions.Append(DrawInstr::PageMarkerAnchor(str::Dup(textAllocator, attr->val), bbox));
@@ -191,8 +202,7 @@ void EpubFormatter::HandleTagLink(HtmlToken* t) {
         return;
     }
 
-    TempStr src = str::DupTemp(attr->val);
-    url::DecodeInPlace(src);
+    TempStr src = url::DecodeTemp(attr->val);
     Str data = epubDoc->GetFileData(src, pagePath);
     if (data) {
         ParseStyleSheet(data);
@@ -212,8 +222,7 @@ void EpubFormatter::HandleTagSvgImage(HtmlToken* t) {
     if (!attr) {
         return;
     }
-    TempStr src = str::DupTemp(attr->val);
-    url::DecodeInPlace(src);
+    TempStr src = url::DecodeTemp(attr->val);
     Str img = epubDoc->GetImageData(src, pagePath);
     if (img) {
         EmitImage(img);
@@ -274,8 +283,7 @@ void Fb2Formatter::HandleTagImg(HtmlToken* t) {
     Str img;
     AttrInfo* attr = t->GetAttrByNameNS(StrL("href"), StrL("http://www.w3.org/1999/xlink"));
     if (attr) {
-        TempStr src = str::DupTemp(attr->val);
-        url::DecodeInPlace(src);
+        TempStr src = url::DecodeTemp(attr->val);
         img = fb2Doc->GetImageData(src);
     }
     if (img) {
@@ -301,7 +309,7 @@ void Fb2Formatter::HandleHtmlTag(HtmlToken* t) {
         if (!isSubtitle && t->IsStartTag()) {
             // the anchor must outlive the formatter, so not a TempStr
             Str link = str::Dup(textAllocator, fmt(FB2_TOC_ENTRY_MARK "%d", ++titleCount));
-            currPage->instructions.Append(DrawInstr::Anchor(link, Gdiplus::RectF(0, currY, pageDx, 0)));
+            currPage->instructions.Append(DrawInstr::Anchor(link, RectF(0, currY, pageDx, 0)));
         }
     } else if (Tag_Section == t->tag) {
         if (t->IsStartTag()) {
@@ -348,13 +356,15 @@ void HtmlFileFormatter::HandleTagImg(HtmlToken* t) {
     bool needAlt = true;
     AttrInfo* attr = t->GetAttrByName(StrL("src"));
     if (attr) {
-        TempStr src = str::DupTemp(attr->val);
-        url::DecodeInPlace(src);
+        TempStr src = url::DecodeTemp(attr->val);
         Str img = htmlDoc->GetImageData(src);
         needAlt = !img || !EmitImage(img);
     }
-    if (needAlt && (attr = t->GetAttrByName(StrL("alt"))) != nullptr) {
-        HandleText(str::Dup(textAllocator, attr->val));
+    if (needAlt) {
+        attr = t->GetAttrByName(StrL("alt"));
+        if (attr != nullptr) {
+            HandleText(str::Dup(textAllocator, attr->val));
+        }
     }
 }
 
@@ -376,8 +386,7 @@ void HtmlFileFormatter::HandleTagLink(HtmlToken* t) {
         return;
     }
 
-    TempStr src = str::DupTemp(attr->val);
-    url::DecodeInPlace(src);
+    TempStr src = url::DecodeTemp(attr->val);
     Str data = htmlDoc->GetFileData(src);
     if (data) {
         ParseStyleSheet(data);

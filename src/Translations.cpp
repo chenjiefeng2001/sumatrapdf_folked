@@ -2,15 +2,13 @@
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "base/Base.h"
-#include "base/Win.h"
 #include "base/LzmaSimpleArchive.h"
+#include "EmbeddedResources.h"
 
 #include "SumatraConfig.h"
 
 #include "Translations.h"
 #include "resource.h"
-
-#include "base/Log.h"
 
 namespace trans {
 
@@ -73,7 +71,6 @@ static void FreeTranslations() {
 
 static void ParseTranslationsTxt(Str d, Str langCode) {
     TempStr langCodePref = str::JoinTemp(langCode, StrL(":"));
-    int nLangCode = langCodePref.len;
 
     StrVec lines;
     Split(&lines, d, "\n", true);
@@ -88,23 +85,23 @@ static void ParseTranslationsTxt(Str d, Str langCode) {
 
     delete gTranslationCache;
     gTranslationCache = new StrVec();
-    auto c = gTranslationCache;
+    auto* c = gTranslationCache;
     int nUntranslated = 0;
 
     Str orig;
     Str trans;
     int i = 2; // skip first 2 header lines
     while (i < nLines) {
-        Str origLine = lines.At(i);
+        Str origLine = lines[i];
         ReportDebugIf(!origLine || origLine.s[0] != ':');
         orig = Str(origLine.s + 1, origLine.len - 1);
         i++;
         trans = {};
-        while (i < nLines && lines.At(i) && lines.At(i).s[0] != ':') {
+        while (i < nLines && lines[i] && lines[i].s[0] != ':') {
             if (!trans) {
-                Str line = lines.At(i);
-                if (str::StartsWith(line, langCodePref)) {
-                    trans = Str(line.s + nLangCode, line.len - nLangCode);
+                Str line = lines[i];
+                if (str::TrimPrefix(line, langCodePref)) {
+                    trans = line;
                 }
             }
             i++;
@@ -133,7 +130,7 @@ Str GetTranslation(Str s) {
         // 0 is english, no translation needed
         return s;
     }
-    auto c = gTranslationCache;
+    auto* c = gTranslationCache;
     if (!c) {
         // translations failed to load (e.g. corrupted resource data)
         return s;
@@ -197,40 +194,42 @@ void SetCurrentLangByCode(Str langCode) {
         // in debug we want to execute this code to catch errors
         return;
     }
-    LoadedDataResource ldr;
-    bool lok = LockDataResource(IDR_TRANSLATIONS, &ldr);
-    if (!lok) {
-        logf("SetCurrentLangByCode: LockDataResource(IDR_TRANSLATIONS) failed\n");
-        FallbackToEnglish();
-        return;
-    }
-    lzma::SimpleArchive archive;
-    lok = lzma::ParseSimpleArchive(ldr.data, (size_t)ldr.dataSize, &archive);
-    if (!lok) {
-        logf("SetCurrentLangByCode: ParseSimpleArchive failed\n");
-        FallbackToEnglish();
-        return;
-    }
-    int fileIdx = lzma::GetIdxFromName(&archive, "translations-good.txt");
-    if (fileIdx < 0) {
-        logf("SetCurrentLangByCode: translations-good.txt not found in archive\n");
-        FallbackToEnglish();
-        return;
-    }
-    u8* data = lzma::GetFileDataByIdx(&archive, fileIdx, nullptr);
+    int dataSize = 0;
+    u8* data = GetEmbeddedFileData(StrL("translations.txt"), &dataSize);
     if (!data) {
-        logf("SetCurrentLangByCode: GetFileDataByIdx failed\n");
+        logf("SetCurrentLangByCode: translations.txt not found in embedded.dat\n");
         FallbackToEnglish();
         return;
     }
-    int dataSize = (int)(archive.files[fileIdx].uncompressedSize);
-    Str d = Str((char*)(data), (int)(dataSize));
+    logf("SetCurrentLangByCode: translations.txt uncompressed=%d\n", dataSize);
+    // empty file is expected when TRANS_UPLOAD_SECRET was missing at build time
+    if (dataSize <= 0) {
+        logf("SetCurrentLangByCode: translations.txt is empty (no translations available)\n");
+        free(data);
+        FallbackToEnglish();
+        return;
+    }
+    Str d = Str((char*)(data), dataSize);
+    // whitespace-only / header-only with no strings: treat as empty
+    bool hasString = false;
+    for (int i = 0; i < d.len; i++) {
+        if (d.s[i] == ':' && (i == 0 || d.s[i - 1] == '\n')) {
+            hasString = true;
+            break;
+        }
+    }
+    if (!hasString) {
+        logf("SetCurrentLangByCode: translations.txt has no strings (no translations available)\n");
+        free(data);
+        FallbackToEnglish();
+        return;
+    }
     ParseTranslationsTxt(d, langCode);
     free(data);
 }
 
 Str ValidateLangCode(Str langCode) {
-    if (!langCode) return Str();
+    if (!langCode) return {};
     int idx = SeqStrIndex(gLangCodes, langCode);
     if (idx < 0) {
         return nullptr;

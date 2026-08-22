@@ -13,19 +13,14 @@ static ILayout* mainLayout = nullptr;
 static int currWinDx = 0;
 static int currWinDy = 0;
 
-#define COL_GRAY RGB(0xdd, 0xdd, 0xdd)
-#define COL_WHITE RGB(0xff, 0xff, 0xff)
-#define COL_BLACK RGB(0, 0, 0)
-
 static void Draw(HWND hwnd, HDC hdc) {
-    RECT rc = GetClientRect(hwnd);
-    AutoDeleteBrush brush(CreateSolidBrush(COL_GRAY));
-    FillRect(hdc, &rc, brush);
+    AutoDeleteBrush brush(CreateSolidBrush(kColGray));
+    HdcFillRect(hdc, HwndClientRect(hwnd), brush);
 }
 
 static void doMainLayout() {
     LayoutToSize(mainLayout, {currWinDx, currWinDy});
-    InvalidateRect(g_hwnd, nullptr, false);
+    HwndInvalidate(g_hwnd);
 }
 
 static void onCheckboxChanged(Checkbox::State state) {
@@ -212,10 +207,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
 
         case WM_SIZE: {
-            RECT rect;
-            GetClientRect(hwnd, &rect);
-            currWinDx = RectDx(rect);
-            currWinDy = RectDy(rect);
+            Rect rect = HwndClientRect(hwnd);
+            currWinDx = rect.dx;
+            currWinDy = rect.dy;
             //logf("WM_SIZE: wp: %d, (%d,%d)\n", (int)wp, currWinDx, currWinDy);
             doMainLayout();
             return 0;
@@ -259,7 +253,7 @@ static ATOM RegisterWinClass(HINSTANCE hInstance) {
     wcex.cbWndExtra = 0;
     wcex.hInstance = hInstance;
     wcex.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_TESTWIN));
-    wcex.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wcex.hCursor = GetCachedCursor(IDC_ARROW);
     wcex.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wcex.lpszMenuName = MAKEINTRESOURCEW(IDC_TESTWIN);
     wcex.lpszClassName = WIN_CLASS;
@@ -289,7 +283,7 @@ static BOOL CreateMainWindow(HINSTANCE hInstance, int nCmdShow) {
 }
 #endif
 
-int TestLayout(int nCmdShow) {
+int TestLayout(int /*nCmdShow*/) {
 #if 0
     RegisterWinClass(hInstance);
 

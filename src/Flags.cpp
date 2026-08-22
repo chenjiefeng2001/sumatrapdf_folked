@@ -3,17 +3,20 @@
 
 #include "base/Base.h"
 #include "base/CmdLineArgsIter.h"
+#if OS_WIN
 #include "base/Win.h"
+#endif
 
 #include "Settings.h"
 #include "DisplayMode.h"
 #include "Flags.h"
+#if OS_WIN
 #include "Print.h"
-#ifndef SUMATRA_TEST_UTIL
+#endif
+#include "SumatraLog.h"
+#if OS_WIN && !defined(SUMATRA_TEST_UTIL)
 #include "Translations.h"
 #endif
-
-#include "base/Log.h"
 
 // @gen-start flags
 // clang-format off
@@ -39,11 +42,12 @@ enum class Arg {
     FwdSearchColor = 68, FwdSearchPermanent = 69, MangaMode = 70, Search = 71,
     AllUsers = 72, AllUsers2 = 73, RunInstallNow = 74, Adobe = 75,
     DDE = 76, Pwd = 77, EngineDump = 78, SetColorRange = 79,
-    UpgradeFrom = 80, ForTesting = 81, DumpExif = 82, DumpChm = 83,
-    Control = 84, UnitTests = 85,
+    UpgradeFrom = 80, ForTesting = 81, QuickLook = 82, QuickLookAgent = 83,
+    WindowPos = 84, DumpExif = 85, DumpChm = 86, Control = 87,
+    UnitTests = 88,
 };
 
-static const char* gArgNames =
+static SeqStrings gArgNames =
     "s\0" "silent\0" "fast-install\0" "print-to-default\0"
     "print-dialog\0" "p\0" "h\0" "?\0"
     "help\0" "exit-when-done\0" "exit-on-print\0" "restrict\0"
@@ -64,12 +68,15 @@ static const char* gArgNames =
     "fwdsearch-color\0" "fwdsearch-permanent\0" "manga-mode\0" "search\0"
     "all-users\0" "allusers\0" "run-install-now\0" "a\0"
     "dde\0" "pwd\0" "engine-dump\0" "set-color-range\0"
-    "upgrade-from\0" "for-testing\0" "dump-exif\0" "dump-chm\0"
-    "dbg-control\0" "unit-tests\0";
+    "upgrade-from\0" "for-testing\0" "quicklook\0" "quicklook-agent\0"
+    "window-pos\0" "dump-exif\0" "dump-chm\0" "dbg-control\0"
+    "unit-tests\0";
 // clang-format on
 // @gen-end flags
 
-void ShowPrintersDialog() {
+#if OS_WIN
+// consoleOnly: skip the GUI text dialog (CLI -list-printers with -console/-silent)
+void ShowPrintersDialog(bool consoleOnly) {
     str::Builder out;
 
     gLogToConsole = true;
@@ -80,11 +87,34 @@ void ShowPrintersDialog() {
 
     gLogToConsole = false;
 #ifndef SUMATRA_TEST_UTIL
-    ShowTextInWindowDialog(_TRA("SumatraPDF - Show Printers"), ToStr(out));
+    // CLI (-list-printers with -console/-silent, or stdout already a console):
+    // print only. Otherwise show the text dialog (e.g. CmdListPrinters).
+    if (!consoleOnly) {
+        HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+        DWORD mode = 0;
+        if (hOut && hOut != INVALID_HANDLE_VALUE && GetConsoleMode(hOut, &mode)) {
+            consoleOnly = true;
+        }
+    }
+    if (!consoleOnly) {
+        ShowTextInWindowDialog(_TRA("SumatraPDF - Show Printers"), ToStr(out));
+    }
 #else
-    ShowTextInWindowDialog("SumatraPDF - Show Printers", ToStr(out));
+    (void)consoleOnly;
 #endif
 }
+#else
+static TempStr GetDefaultPrinterNameTemp() {
+    return {};
+}
+
+static TempStr ResolveLnkTemp(Str path) {
+    return str::DupTemp(path);
+}
+
+// consoleOnly: skip the GUI text dialog (CLI -list-printers with -console/-silent)
+void ShowPrintersDialog(bool) {}
+#endif
 
 // parses a list of page ranges such as 1,3-5,7- (i..e all but pages 2 and 6)
 // into an interable list (returns nullptr on parsing errors)
@@ -126,7 +156,7 @@ bool IsValidPageRange(Str ranges) {
 // * "loadonly"
 // * description of page ranges e.g. "1", "1-5", "2-3,6,8-10"
 bool IsBenchPagesInfo(Str s) {
-    return str::EqI(s, "loadonly") || IsValidPageRange(s);
+    return str::EqI(s, StrL("loadonly")) || IsValidPageRange(s);
 }
 
 // -view [continuous][singlepage|facing|bookview]
@@ -135,10 +165,12 @@ static void ParseViewMode(DisplayMode* mode, Str s) {
 }
 
 static SeqStrings zoomValues =
-    "fit page\0fitpage\0fit-page\0fit width\0fitwidth\0fit-width\0fit "
-    "content\0fitcontent\0fit-content\0";
+    "fit page\0fitpage\0fit-page\0"
+    "fit width\0fitwidth\0fit-width\0"
+    "fit height\0fitheight\0fit-height\0"
+    "fit content\0fitcontent\0fit-content\0";
 
-// -zoom [fitwidth|fitpage|fitcontent|n]
+// -zoom [fitwidth|fitheight|fitpage|fitcontent|n]
 // if a number, it's in percent e.g. 12.5 means 12.5%
 // 100 means 100% i.e. actual size as e.g. given in PDF file
 static void ParseZoomValue(float* zoom, Str txtOrig) {
@@ -148,11 +180,11 @@ static void ParseZoomValue(float* zoom, Str txtOrig) {
     if (zoomVal >= 0) {
         // 0-2 : fit page
         // 3-5 : fit width
-        // 6-8 : fit content
-        // 9-11: shrink to fit
-        *zoom = kZoomShrinkToFit;
+        // 6-8 : fit height
+        // 9-11: fit content
+        *zoom = kZoomFitContent;
         if (zoomVal <= 8) {
-            *zoom = kZoomFitContent;
+            *zoom = kZoomFitHeight;
         }
         if (zoomVal <= 5) {
             *zoom = kZoomFitWidth;
@@ -163,7 +195,7 @@ static void ParseZoomValue(float* zoom, Str txtOrig) {
         return;
     }
     // remove trailing % in place, if exists
-    if (str::EndsWith(txtDup, "%")) {
+    if (str::EndsWith(txtDup, StrL("%"))) {
         txtDup.len--;
     }
     str::Parse(txtDup, "%f", zoom);
@@ -172,6 +204,18 @@ static void ParseZoomValue(float* zoom, Str txtOrig) {
     if (*zoom < 1.f) {
         *zoom = kZoomActualSize;
     }
+}
+
+// -window-pos <width>x<height>@<x>x<y> e.g. 960x540@960x0
+static void ParseWindowPos(Rect* rect, Str txt) {
+    int dx, dy, x, y;
+    if (str::IsNull(str::Parse(txt, "%dx%d@%dx%d%$", &dx, &dy, &x, &y))) {
+        return;
+    }
+    if (dx <= 0 || dy <= 0) {
+        return;
+    }
+    *rect = Rect(x, y, dx, dy);
 }
 
 // -scroll x,y
@@ -211,7 +255,7 @@ static Arg GetArg(Str s) {
 // https://stackoverflow.com/questions/619158/adobe-reader-command-line-reference
 // https://www.robvanderwoude.com/commandlineswitches.php#Acrobat
 // with Sumatra extensions
-void ParseAdobeFlags(FileArgs& i, Str s) {
+static void ParseAdobeFlags(FileArgs& i, Str s) {
     StrVec parts;
     StrVec parts2;
     Str name;
@@ -241,22 +285,22 @@ void ParseAdobeFlags(FileArgs& i, Str s) {
         valN = ParseInt(val);
 
         // https://pdfobject.com/pdf/pdf_open_parameters_acro8.pdf
-        if (str::EqI(name, "nameddest")) {
+        if (str::EqI(name, StrL("nameddest"))) {
             i.destName = str::Dup(val);
             continue;
         }
-        if (str::EqI(name, "page") && valN >= 1) {
+        if (str::EqI(name, StrL("page")) && valN >= 1) {
             i.pageNumber = valN;
             continue;
         }
         // comment=
         // collab=setting
-        if (str::EqI(name, "zoom")) {
+        if (str::EqI(name, StrL("zoom"))) {
             // TODO: handle zoom
             // 100 is 100%
             continue;
         }
-        if (str::EqI(name, "view")) {
+        if (str::EqI(name, StrL("view"))) {
             // TODO: Fit FitH FitH,top FitV FitV,left
             // FitB FitBH FitBH,top FitBV, FitBV,left
             continue;
@@ -264,7 +308,7 @@ void ParseAdobeFlags(FileArgs& i, Str s) {
         // viewrect
         // pagemode=bookmarks, thumbs, none
         // scrollbar=1|0
-        if (str::EqI(name, "search")) {
+        if (str::EqI(name, StrL("search"))) {
             if (len(val) > 0) {
                 i.search = str::Dup(val);
             }
@@ -279,14 +323,14 @@ void ParseAdobeFlags(FileArgs& i, Str s) {
 
         // those are Sumatra additions
 
-        if (str::EqI(name, "annotatt") && valN > 0) {
+        if (str::EqI(name, StrL("annotatt")) && valN > 0) {
             // for annotations that are attachments this is pdf object number
             // representing the attachment
             i.annotAttObjNum = valN;
             continue;
         }
 
-        if (str::EqI(name, "attachno") && valN > 0) {
+        if (str::EqI(name, StrL("attachno")) && valN > 0) {
             // this is attachment number, use PdfLoadAttachment() to load it
             i.attachmentNo = valN;
             continue;
@@ -321,6 +365,7 @@ FileArgs* ParseFileArgs(Str path) {
 }
 
 /* parse argument list. we assume that all unrecognized arguments are file names. */
+#if OS_WIN
 void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
     ReportIf(!a);
     // logf("ParseFlags: cmdLine: '%s'\n", ToUtf8Temp(cmdLine));
@@ -342,7 +387,7 @@ void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
         // for some reason that makes Directory Opus "Open With" provide the file twice
         // and gives "%3" and "%4' on cmd-line.
         // this is a hack to ignore that
-        if (str::Eq(argName, "%2") || str::Eq(argName, "%3") || str::Eq(argName, "%4")) {
+        if (str::Eq(argName, StrL("%2")) || str::Eq(argName, StrL("%3")) || str::Eq(argName, StrL("%4"))) {
             logf("ParseFlags: skipping '%s'\n", argName);
             continue;
         }
@@ -378,7 +423,7 @@ void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
             }
             Str p2 = args.AdditionalParam(1);
             if (p2 && !CouldBeArg(p2)) {
-                if (len(i.fileNames) == 0 || !str::Eq(i.fileNames.At(len(i.fileNames) - 1), p1)) {
+                if (len(i.fileNames) == 0 || !str::Eq(i.fileNames[len(i.fileNames) - 1], p1)) {
                     i.fileNames.Append(p1);
                 }
                 i.printerName = str::Dup(a, args.EatParam());
@@ -419,9 +464,7 @@ void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
         }
         if (arg == Arg::InvertColors || arg == Arg::InvertColors2) {
             // -invertcolors is for backwards compat (was used pre-1.3)
-            // -invert-colors is for consistency
-            // -invert-colors used to be a shortcut for -set-color-range 0xFFFFFF 0x000000
-            // now it non-permanently swaps textColor and backgroundColor
+            // -invert-colors is for consistency; maps to DocumentColorsFollowTheme = smart
             i.invertColors = true;
             continue;
         }
@@ -487,6 +530,14 @@ void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
             i.forTesting = true;
             continue;
         }
+        if (arg == Arg::QuickLook) {
+            i.quickLook = true;
+            continue;
+        }
+        if (arg == Arg::QuickLookAgent) {
+            i.quickLookAgent = true;
+            continue;
+        }
         if (arg == Arg::UnitTests) {
             i.unitTests = true;
             i.exitImmediately = true;
@@ -521,10 +572,11 @@ void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
             continue;
         }
         if ((arg == Arg::ArgEnumPrinters) || (arg == Arg::ListPrinters)) {
-            // defer UI until after SetCurrentLang() so _TRA resolves (issue #5697)
+            // defer UI until after SetCurrentLang() so _TRA resolves (issue #5697).
+            // Do not return early: later flags like -console / -silent must still apply.
             i.showPrintersDialog = true;
             i.exitImmediately = true;
-            return;
+            continue;
         }
         param = args.EatParam();
         // following args require at least one param
@@ -599,6 +651,10 @@ void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
             ParseScrollValue(&i.startScroll, param);
             continue;
         }
+        if (arg == Arg::WindowPos) {
+            ParseWindowPos(&i.windowPos, param);
+            continue;
+        }
         if (arg == Arg::AppData) {
             i.appdataDir = str::Dup(a, param);
             continue;
@@ -610,9 +666,9 @@ void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
             // (used e.g. for embedding it into a browser plugin)
             if (args.AdditionalParam(1) && !str::IsDigit(param.s[0])) {
                 i.pluginURL = str::Dup(a, param);
-                i.hwndPluginParent = (HWND)(INT_PTR)ParseInt64(args.EatParam());
+                i.hwndPluginParent = (HWND)(intptr_t)ParseInt64(args.EatParam());
             } else {
-                i.hwndPluginParent = (HWND)(INT_PTR)ParseInt64(param);
+                i.hwndPluginParent = (HWND)(intptr_t)ParseInt64(param);
             }
             continue;
         }
@@ -749,9 +805,9 @@ void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
         args.RewindParam();
 
     CollectFile:
-        // TODO: resolve .lnk when opening file
+        // Resolve shell shortcuts so opening a .lnk loads the target document.
         Str filePath = argName;
-        if (str::EndsWithI(filePath, ".lnk")) {
+        if (str::EndsWithI(filePath, StrL(".lnk"))) {
             filePath = ResolveLnkTemp(argName);
         }
         if (filePath) { // resolve might fail
@@ -768,3 +824,4 @@ void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
         }
     }
 }
+#endif

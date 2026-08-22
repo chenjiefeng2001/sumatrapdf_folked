@@ -1,1095 +1,64 @@
 /* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
+// SumatraPDF's half of the screenshot feature: the global hotkey, the dialog
+// that sets it, and the hooks the shared capture code calls back into.
+// Capturing and the picker overlay live in ScreenshotCapture.cpp.
+
 #include "base/Base.h"
 #include "base/ScopedWin.h"
-#include "base/WinDynCalls.h"
 #include "base/File.h"
 #include "base/Win.h"
-#include "base/Dpi.h"
-#include "base/Log.h"
+#include "gui/Dpi.h"
+
+#include "gui/UIModels.h"
+#include "gui/Layout.h"
+#include "gui/win/WinGui.h"
+#include "gui/PlatformFont.h"
+#include "gui/Gfx.h"
+#include "gui/VirtCtrl.h"
 
 #include "Notifications.h"
 #include "AppTools.h"
+#include "ScreenshotCapture.h"
+#include "ShortcutParse.h"
 #include "Screenshot.h"
-#include "ImageSaveCropResize.h"
+#include "Theme.h"
+#include "SumatraConfig.h"
+#include "DarkMode_win.h"
 #include "Commands.h"
 #include "Accelerators.h"
 #include "Settings.h"
 #include "GlobalPrefs.h"
 #include "AppSettings.h"
 #include "MainWindow.h"
+#include "SumatraPDF.h"
 #include "Translations.h"
 
-extern Vec<MainWindow*> gWindows;
-
-static const WCHAR* kScreenshotOverlayClassName = L"SumatraScreenshotOverlay";
-static bool gScreenshotClassRegistered = false;
-
-// horizontal padding in each grid cell (on each side of thumbnail)
-constexpr int kGridPaddingX = 16;
-// vertical padding in each grid cell (on each side of thumbnail)
-constexpr int kGridPaddingY = 16;
-// outer padding around the entire overlay
-constexpr int kOuterPadding = 32;
-// border thickness for selected thumbnail
-constexpr int kBorderThickness = 3;
-// max thumbnail size
-constexpr int kMaxThumbSize = 240;
-// height reserved for label text below thumbnail
-constexpr int kLabelHeight = 20;
-// extra gap below label
-constexpr int kLabelGap = 4;
-// height for the info bar at the bottom
-constexpr int kInfoBarHeight = 30;
-
-struct CapturedScreenshot {
-    HBITMAP bmp = nullptr;   // full-size capture
-    HBITMAP thumb = nullptr; // scaled thumbnail
-    HWND srcHwnd = nullptr;  // source window (nullptr for desktop)
-    int origW = 0;
-    int origH = 0;
-    int thumbW = 0;
-    int thumbH = 0;
-    Str processName; // for file naming
-};
-
-struct ScreenshotOverlayData {
-    Vec<CapturedScreenshot> captures;
-    int selected = 0; // index of currently selected (hovered/arrow-keyed)
-    int cols = 0;
-    int rows = 0;
-    Vec<int> colWidths;  // width of each column
-    Vec<int> rowHeights; // height of each row
-    Vec<int> colX;       // x start of each column (cumulative)
-    Vec<int> rowY;       // y start of each row (cumulative)
-    int winW = 0;
-    int winH = 0;
-};
-
-// true if hwnd is a floating window of ours owned by one of our frames (e.g. the
-// floating find bar, a WS_POPUP | WS_EX_TOOLWINDOW window owned by hwndFrame).
-// Such windows are part of our UI and worth capturing even though the generic
-// filters below would normally drop tool / owned-caption-less windows.
-static bool IsOwnedByAppFrame(HWND hwnd) {
-    HWND owner = GetWindow(hwnd, GW_OWNER);
-    if (!owner) {
-        return false;
-    }
+static bool IsAppFrame(HWND hwnd) {
     for (MainWindow* win : gWindows) {
-        if (win->hwndFrame == owner) {
+        if (win->hwndFrame == hwnd) {
             return true;
         }
     }
     return false;
 }
 
-static bool ShouldCaptureWindow(HWND hwnd, HWND overlayHwnd) {
-    if (hwnd == overlayHwnd) {
-        return false;
-    }
-    if (!IsWindowVisible(hwnd)) {
-        return false;
-    }
-    if (hwnd == GetDesktopWindow()) {
-        return false;
-    }
-    WCHAR className[256];
-    bool isMenu = false;
-    if (GetClassNameW(hwnd, className, 256) > 0) {
-        if (wstr::Eq(className, L"Progman") || wstr::Eq(className, L"WorkerW")) {
-            return false;
-        }
-        // #32768 is the Win32 menu window class (context menus, popups etc.)
-        isMenu = wstr::Eq(className, L"#32768");
-    }
-    // our own floating UI (e.g. the find bar) is a tool window owned by a frame;
-    // capture it even though the tool/owned-window filters below would drop it
-    bool ownedByApp = IsOwnedByAppFrame(hwnd);
-    LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-    if (!isMenu && !ownedByApp && (exStyle & WS_EX_TOOLWINDOW)) {
-        return false;
-    }
-    HWND hwndOwner = GetWindow(hwnd, GW_OWNER);
-    if (!isMenu && !ownedByApp && hwndOwner != nullptr && !(exStyle & WS_EX_APPWINDOW)) {
-        // owned window without WS_EX_APPWINDOW: accept if it has a caption
-        // (modal dialogs like config windows), reject otherwise
-        LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-        if ((style & WS_CAPTION) != WS_CAPTION) {
-            return false;
-        }
-    }
-    BOOL isCloaked = FALSE;
-    if (SUCCEEDED(dwm::GetWindowAttribute(hwnd, DWMWA_CLOAKED, &isCloaked, sizeof(isCloaked)))) {
-        if (isCloaked) {
-            return false;
-        }
-    }
-    RECT rect;
-    if (!GetWindowRect(hwnd, &rect)) {
-        return false;
-    }
-    int w = rect.right - rect.left;
-    int h = rect.bottom - rect.top;
-    if (w <= 0 || h <= 0) {
-        return false;
-    }
-    if (w * h < 100) {
-        return false;
-    }
-    // skip thin slivers of our own floating UI (e.g. the overlay scrollbar) -
-    // require at least 20x20px for owned-by-app windows
-    if (ownedByApp && (w < 20 || h < 20)) {
-        return false;
-    }
-    WCHAR title[256];
-    int titleLen = GetWindowTextW(hwnd, title, 256);
-    if (titleLen == 0) {
-        LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-        if (!(style & WS_POPUP)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-static HBITMAP CaptureDesktop() {
-    int x = GetSystemMetrics(SM_XVIRTUALSCREEN);
-    int y = GetSystemMetrics(SM_YVIRTUALSCREEN);
-    int w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-    int h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-    HDC hdcScreen = GetDC(nullptr);
-    HDC hdcMem = CreateCompatibleDC(hdcScreen);
-    HBITMAP hbm = CreateCompatibleBitmap(hdcScreen, w, h);
-    SelectObject(hdcMem, hbm);
-    BitBlt(hdcMem, 0, 0, w, h, hdcScreen, x, y, SRCCOPY);
-    DeleteDC(hdcMem);
-    ReleaseDC(nullptr, hdcScreen);
-    return hbm;
-}
-
-static bool IsNearBlack(DWORD px) {
-    BYTE r = (px >> 16) & 0xFF;
-    BYTE g = (px >> 8) & 0xFF;
-    BYTE b = px & 0xFF;
-    return r < 10 && g < 10 && b < 10;
-}
-
-static void InitBitmapInfo32(BITMAPINFO& bmi, int w, int h) {
-    bmi = {};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = w;
-    bmi.bmiHeader.biHeight = -h; // top-down
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-}
-
-// check if a specific edge row/column is predominantly near-black
-// uses stride to handle sub-regions within a larger pixel buffer
-// edge: 0=left, 1=right, 2=top, 3=bottom
-static bool IsEdgeMostlyBlackEx(DWORD* pixels, int stride, int x0, int y0, int w, int h, int edge) {
-    int blackCount = 0;
-    int total = 0;
-    switch (edge) {
-        case 0: // left column
-            for (int y = y0; y < y0 + h; y++) {
-                if (IsNearBlack(pixels[y * stride + x0] & 0x00FFFFFF)) {
-                    blackCount++;
-                }
-                total++;
-            }
-            break;
-        case 1: // right column
-            for (int y = y0; y < y0 + h; y++) {
-                if (IsNearBlack(pixels[y * stride + x0 + w - 1] & 0x00FFFFFF)) {
-                    blackCount++;
-                }
-                total++;
-            }
-            break;
-        case 2: // top row
-            for (int x = x0; x < x0 + w; x++) {
-                if (IsNearBlack(pixels[y0 * stride + x] & 0x00FFFFFF)) {
-                    blackCount++;
-                }
-                total++;
-            }
-            break;
-        case 3: // bottom row
-            for (int x = x0; x < x0 + w; x++) {
-                if (IsNearBlack(pixels[(y0 + h - 1) * stride + x] & 0x00FFFFFF)) {
-                    blackCount++;
-                }
-                total++;
-            }
-            break;
-    }
-    return total > 0 && blackCount > (total * 7 / 10);
-}
-
-// trim black border pixels left by PrintWindow on DWM-composited windows
-// returns a new cropped bitmap (caller owns it), or the original if no trimming needed
-static HBITMAP TrimBlackBorders(HBITMAP hbm, int* pW, int* pH) {
-    int origW = *pW, origH = *pH;
-
-    BITMAPINFO bmi;
-    InitBitmapInfo32(bmi, origW, origH);
-
-    HDC hdc = GetDC(nullptr);
-    DWORD* pixels = (DWORD*)malloc((size_t)origW * origH * 4);
-    if (!pixels) {
-        ReleaseDC(nullptr, hdc);
-        return hbm;
-    }
-    GetDIBits(hdc, hbm, 0, origH, pixels, &bmi, DIB_RGB_COLORS);
-
-    // detect trim amounts by scanning edges; trim up to 2px per edge
-    int trimLeft = 0, trimRight = 0, trimTop = 0, trimBottom = 0;
-    int x0 = 0, y0 = 0, w = origW, h = origH;
-
-    for (int i = 0; i < 2 && w > 0; i++) {
-        if (IsEdgeMostlyBlackEx(pixels, origW, x0, y0, w, h, 0)) {
-            trimLeft++;
-            x0++;
-            w--;
-        } else {
-            break;
-        }
-    }
-    for (int i = 0; i < 2 && w > 0; i++) {
-        if (IsEdgeMostlyBlackEx(pixels, origW, x0, y0, w, h, 1)) {
-            trimRight++;
-            w--;
-        } else {
-            break;
-        }
-    }
-    for (int i = 0; i < 2 && h > 0; i++) {
-        if (IsEdgeMostlyBlackEx(pixels, origW, x0, y0, w, h, 2)) {
-            trimTop++;
-            y0++;
-            h--;
-        } else {
-            break;
-        }
-    }
-    for (int i = 0; i < 2 && h > 0; i++) {
-        if (IsEdgeMostlyBlackEx(pixels, origW, x0, y0, w, h, 3)) {
-            trimBottom++;
-            h--;
-        } else {
-            break;
-        }
-    }
-
-    free(pixels);
-
-    if (trimLeft == 0 && trimRight == 0 && trimTop == 0 && trimBottom == 0) {
-        ReleaseDC(nullptr, hdc);
-        return hbm;
-    }
-
-    int newW = origW - trimLeft - trimRight;
-    int newH = origH - trimTop - trimBottom;
-    if (newW <= 0 || newH <= 0) {
-        ReleaseDC(nullptr, hdc);
-        return hbm;
-    }
-
-    HDC hdcSrc = CreateCompatibleDC(hdc);
-    HDC hdcDst = CreateCompatibleDC(hdc);
-    HBITMAP hbmNew = CreateCompatibleBitmap(hdc, newW, newH);
-    SelectObject(hdcSrc, hbm);
-    SelectObject(hdcDst, hbmNew);
-    BitBlt(hdcDst, 0, 0, newW, newH, hdcSrc, trimLeft, trimTop, SRCCOPY);
-    DeleteDC(hdcSrc);
-    DeleteDC(hdcDst);
-    ReleaseDC(nullptr, hdc);
-    DeleteObject(hbm);
-
-    *pW = newW;
-    *pH = newH;
-    return hbmNew;
-}
-
-// replace black corner pixels from PrintWindow with bgColor using a rounded corner mask
-static void FixRoundedCorners(HBITMAP hbm, int w, int h, COLORREF bgColor, int radius) {
-    BITMAPINFO bmi;
-    InitBitmapInfo32(bmi, w, h);
-
-    HDC hdc = GetDC(nullptr);
-    DWORD* pixels = (DWORD*)malloc(w * h * 4);
-    if (!pixels) {
-        ReleaseDC(nullptr, hdc);
-        return;
-    }
-    GetDIBits(hdc, hbm, 0, h, pixels, &bmi, DIB_RGB_COLORS);
-
-    DWORD bg = (GetRValue(bgColor) << 16) | (GetGValue(bgColor) << 8) | GetBValue(bgColor);
-
-    // only replace pixels that are actually near-black (avoids clobbering legitimate content)
-    auto replaceIfBlack = [&](int idx) {
-        if (IsNearBlack(pixels[idx] & 0x00FFFFFF)) {
-            pixels[idx] = bg;
-        }
-    };
-
-    // fix the four corners
-    for (int cy = 0; cy < radius; cy++) {
-        for (int cx = 0; cx < radius; cx++) {
-            // distance from corner center to pixel
-            int dx = radius - 1 - cx;
-            int dy = radius - 1 - cy;
-            if (dx * dx + dy * dy > radius * radius) {
-                // outside the rounded corner — replace with background if black
-                replaceIfBlack(cy * w + cx);                     // top-left
-                replaceIfBlack(cy * w + (w - 1 - cx));           // top-right
-                replaceIfBlack((h - 1 - cy) * w + cx);           // bottom-left
-                replaceIfBlack((h - 1 - cy) * w + (w - 1 - cx)); // bottom-right
-            }
-        }
-    }
-
-    SetDIBits(hdc, hbm, 0, h, pixels, &bmi, DIB_RGB_COLORS);
-    free(pixels);
-    ReleaseDC(nullptr, hdc);
-}
-
-// outW/outH receive the actual captured size (may differ from GetWindowRect due to cropping)
-static HBITMAP CaptureWindowBmp(HWND hwnd, int* outW, int* outH) {
-    RECT fullRect;
-    if (!GetWindowRect(hwnd, &fullRect)) {
-        return nullptr;
-    }
-    int fullW = fullRect.right - fullRect.left;
-    int fullH = fullRect.bottom - fullRect.top;
-    if (fullW <= 0 || fullH <= 0) {
-        return nullptr;
-    }
-
-    HDC hdcWin = GetWindowDC(hwnd);
-    HDC hdcMem = CreateCompatibleDC(hdcWin);
-    HBITMAP hbmFull = CreateCompatibleBitmap(hdcWin, fullW, fullH);
-    SelectObject(hdcMem, hbmFull);
-
-    // Try PrintWindow with PW_RENDERFULLCONTENT (0x2) first (Windows 8.1+)
-    BOOL ok = PrintWindow(hwnd, hdcMem, 0x2);
-    if (!ok) {
-        ok = BitBlt(hdcMem, 0, 0, fullW, fullH, hdcWin, 0, 0, SRCCOPY);
-    }
-
-    DeleteDC(hdcMem);
-    ReleaseDC(hwnd, hdcWin);
-
-    if (!ok) {
-        DeleteObject(hbmFull);
-        return nullptr;
-    }
-
-    // crop to visible frame bounds (excludes invisible resize/shadow border)
-    RECT visibleRect;
-    HRESULT hr = dwm::GetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &visibleRect, sizeof(visibleRect));
-    if (SUCCEEDED(hr)) {
-        int cropX = visibleRect.left - fullRect.left;
-        int cropY = visibleRect.top - fullRect.top;
-        int cropW = visibleRect.right - visibleRect.left;
-        int cropH = visibleRect.bottom - visibleRect.top;
-        if (cropX > 0 || cropY > 0 || cropW < fullW || cropH < fullH) {
-            HDC hdcScreen = GetDC(nullptr);
-            HDC hdcSrc = CreateCompatibleDC(hdcScreen);
-            HDC hdcDst = CreateCompatibleDC(hdcScreen);
-            HBITMAP hbmCropped = CreateCompatibleBitmap(hdcScreen, cropW, cropH);
-            SelectObject(hdcSrc, hbmFull);
-            SelectObject(hdcDst, hbmCropped);
-            BitBlt(hdcDst, 0, 0, cropW, cropH, hdcSrc, cropX, cropY, SRCCOPY);
-            DeleteDC(hdcSrc);
-            DeleteDC(hdcDst);
-            ReleaseDC(nullptr, hdcScreen);
-            DeleteObject(hbmFull);
-            hbmFull = hbmCropped;
-            fullW = cropW;
-            fullH = cropH;
-        }
-    }
-
-    // trim black border pixels left by PrintWindow on DWM-composited windows
-    hbmFull = TrimBlackBorders(hbmFull, &fullW, &fullH);
-
-    // fix black corners from DWM rounded windows
-    int cornerPref = DWMWCP_DEFAULT;
-    dwm::GetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &cornerPref, sizeof(cornerPref));
-    if (cornerPref == DWMWCP_DEFAULT || cornerPref == DWMWCP_ROUND || cornerPref == DWMWCP_ROUNDSMALL) {
-        COLORREF bgColor = GetSysColor(COLOR_WINDOW);
-        // DWM corner radius is 8 logical pixels (4 for ROUNDSMALL), scale by DPI
-        int baseRadius = (cornerPref == DWMWCP_ROUNDSMALL) ? 4 : 8;
-        int dpi = DpiGetForHwnd(hwnd);
-        int radius = MulDiv(baseRadius, dpi, 96);
-        if (radius < baseRadius) {
-            radius = baseRadius;
-        }
-        FixRoundedCorners(hbmFull, fullW, fullH, bgColor, radius);
-    }
-
-    *outW = fullW;
-    *outH = fullH;
-    return hbmFull;
-}
-
-static TempStr GetWindowProcessNameTemp(HWND hwnd) {
-    DWORD pid = 0;
-    GetWindowThreadProcessId(hwnd, &pid);
-    if (pid == 0) {
-        return {};
-    }
-    AutoCloseHandle hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (!hProc.IsValid()) {
-        return {};
-    }
-    WCHAR path[MAX_PATH]{};
-    DWORD pathLen = MAX_PATH;
-    if (!QueryFullProcessImageNameW(hProc, 0, path, &pathLen)) {
-        return {};
-    }
-    TempStr fullPath = ToUtf8Temp(path);
-    TempStr baseName = path::GetBaseNameTemp(fullPath);
-    TempStr noExt = path::GetPathNoExtTemp(baseName);
-    return noExt;
-}
-
-static TempStr MakeUniquePathTemp(Str dir, Str base) {
-    TempStr name = fmt("%s.png", base);
-    TempStr path = path::JoinTemp(dir, name);
-    if (!file::Exists(Str(path))) {
-        return path;
-    }
-    for (int i = 1; i < 10000; i++) {
-        name = fmt("%s.%d.png", base, i);
-        path = path::JoinTemp(dir, name);
-        if (!file::Exists(Str(path))) {
-            return path;
-        }
-    }
-    return {};
-}
-
-// Create a scaled thumbnail of a bitmap (only downscale, never upscale)
-static HBITMAP CreateThumbnail(HBITMAP src, int srcW, int srcH, int* outW, int* outH) {
-    int tw, th;
-    if (srcW <= kMaxThumbSize && srcH <= kMaxThumbSize) {
-        // source fits within thumbnail size, use original size
-        tw = srcW;
-        th = srcH;
-    } else if (srcW >= srcH) {
-        tw = kMaxThumbSize;
-        th = MulDiv(srcH, kMaxThumbSize, srcW);
-    } else {
-        th = kMaxThumbSize;
-        tw = MulDiv(srcW, kMaxThumbSize, srcH);
-    }
-    if (tw < 1) {
-        tw = 1;
-    }
-    if (th < 1) {
-        th = 1;
-    }
-
-    HDC hdcScreen = GetDC(nullptr);
-    HDC hdcSrc = CreateCompatibleDC(hdcScreen);
-    HDC hdcDst = CreateCompatibleDC(hdcScreen);
-    HBITMAP hbmThumb = CreateCompatibleBitmap(hdcScreen, tw, th);
-    SelectObject(hdcSrc, src);
-    SelectObject(hdcDst, hbmThumb);
-    SetStretchBltMode(hdcDst, HALFTONE);
-    SetBrushOrgEx(hdcDst, 0, 0, nullptr);
-    StretchBlt(hdcDst, 0, 0, tw, th, hdcSrc, 0, 0, srcW, srcH, SRCCOPY);
-    DeleteDC(hdcSrc);
-    DeleteDC(hdcDst);
-    ReleaseDC(nullptr, hdcScreen);
-
-    *outW = tw;
-    *outH = th;
-    return hbmThumb;
-}
-
-static void FreeCapturedScreenshots(ScreenshotOverlayData* data) {
-    for (auto& cs : data->captures) {
-        if (cs.bmp) {
-            DeleteObject(cs.bmp);
-        }
-        if (cs.thumb) {
-            DeleteObject(cs.thumb);
-        }
-        str::Free(cs.processName);
-    }
-    data->captures.Reset();
-}
-
-struct EnumCaptureCtx {
-    Vec<CapturedScreenshot>* captures;
-    HWND overlayHwnd;
-};
-
-static BOOL CALLBACK EnumCaptureWindowsProc(HWND hwnd, LPARAM lParam) {
-    EnumCaptureCtx* ctx = (EnumCaptureCtx*)lParam;
-    if (!ShouldCaptureWindow(hwnd, ctx->overlayHwnd)) {
-        return TRUE;
-    }
-    int w = 0, h = 0;
-    HBITMAP hbm = CaptureWindowBmp(hwnd, &w, &h);
-    if (!hbm) {
-        return TRUE;
-    }
-
-    CapturedScreenshot cs;
-    cs.bmp = hbm;
-    cs.srcHwnd = hwnd;
-    cs.origW = w;
-    cs.origH = h;
-    cs.thumb = CreateThumbnail(hbm, w, h, &cs.thumbW, &cs.thumbH);
-    TempStr procName = GetWindowProcessNameTemp(hwnd);
-    cs.processName = procName ? str::Dup(procName) : str::Dup(StrL("unknown"));
-    ctx->captures->Append(cs);
-    return TRUE;
-}
-
-static void CaptureAllScreenshots(ScreenshotOverlayData* data, HWND overlayHwnd) {
-    // Desktop first
-    HBITMAP hbmDesktop = CaptureDesktop();
-    if (hbmDesktop) {
-        int dw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-        int dh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-        CapturedScreenshot cs;
-        cs.bmp = hbmDesktop;
-        cs.origW = dw;
-        cs.origH = dh;
-        cs.thumb = CreateThumbnail(hbmDesktop, dw, dh, &cs.thumbW, &cs.thumbH);
-        cs.processName = str::Dup(StrL("desktop"));
-        data->captures.Append(cs);
-    }
-
-    // Individual windows
-    EnumCaptureCtx ctx;
-    ctx.captures = &data->captures;
-    ctx.overlayHwnd = overlayHwnd;
-    EnumWindows(EnumCaptureWindowsProc, (LPARAM)&ctx);
-}
-
-// Compute grid layout and overlay window size
-static void ComputeLayout(ScreenshotOverlayData* data) {
-    int n = len(data->captures);
-    if (n == 0) {
-        return;
-    }
-
-    data->cols = (int)ceil(sqrt((double)n));
-    data->rows = (n + data->cols - 1) / data->cols;
-
-    // compute per-column widths (max thumb width in that column + 2*kGridPaddingX)
-    data->colWidths.SetSize(data->cols);
-    for (int c = 0; c < data->cols; c++) {
-        data->colWidths[c] = 0;
-    }
-    for (int i = 0; i < n; i++) {
-        int col = i % data->cols;
-        int tw = data->captures[i].thumbW;
-        if (tw > data->colWidths[col]) {
-            data->colWidths[col] = tw;
-        }
-    }
-    for (int c = 0; c < data->cols; c++) {
-        data->colWidths[c] += 2 * kGridPaddingX;
-    }
-
-    // compute per-row heights (max thumb height in that row + label + 2*kGridPaddingY)
-    data->rowHeights.SetSize(data->rows);
-    for (int r = 0; r < data->rows; r++) {
-        data->rowHeights[r] = 0;
-    }
-    for (int i = 0; i < n; i++) {
-        int row = i / data->cols;
-        int th = data->captures[i].thumbH;
-        if (th > data->rowHeights[row]) {
-            data->rowHeights[row] = th;
-        }
-    }
-    for (int r = 0; r < data->rows; r++) {
-        data->rowHeights[r] += kLabelGap + kLabelHeight + (2 * kGridPaddingY);
-    }
-
-    // compute cumulative x/y offsets for each column/row
-    data->colX.SetSize(data->cols);
-    int x = kOuterPadding;
-    for (int c = 0; c < data->cols; c++) {
-        data->colX[c] = x;
-        x += data->colWidths[c];
-    }
-
-    data->rowY.SetSize(data->rows);
-    int y = kInfoBarHeight + kOuterPadding; // start below info bar
-    for (int r = 0; r < data->rows; r++) {
-        data->rowY[r] = y;
-        y += data->rowHeights[r];
-    }
-
-    // window sized to fit content + outer padding + info bar at top
-    data->winW = x + kOuterPadding;
-    data->winH = y + kOuterPadding;
-}
-
-// Get the bounding rect for thumbnail at index i (in client coords)
-static RECT GetThumbRect(ScreenshotOverlayData* data, int idx) {
-    int col = idx % data->cols;
-    int row = idx / data->cols;
-    auto& cs = data->captures[idx];
-
-    int cellX = data->colX[col];
-    int cellY = data->rowY[row];
-    int cellW = data->colWidths[col];
-    // thumb area height = rowHeight - kLabelGap - kLabelHeight - 2*kGridPaddingY + 2*kGridPaddingY
-    // simplifies to: rowHeight - kLabelGap - kLabelHeight
-    int thumbAreaH = data->rowHeights[row] - kLabelGap - kLabelHeight;
-
-    // center thumbnail in cell
-    int tx = cellX + (cellW - cs.thumbW) / 2;
-    int ty = cellY + kGridPaddingY + (thumbAreaH - (2 * kGridPaddingY) - cs.thumbH) / 2;
-
-    RECT rc;
-    rc.left = tx;
-    rc.top = ty;
-    rc.right = tx + cs.thumbW;
-    rc.bottom = ty + cs.thumbH;
-    return rc;
-}
-
-// Hit test: returns index of thumbnail under point, or -1
-static int HitTestThumb(ScreenshotOverlayData* data, int mx, int my) {
-    int n = len(data->captures);
-    for (int i = 0; i < n; i++) {
-        RECT rc = GetThumbRect(data, i);
-        // expand hit area to include the label
-        rc.bottom += kLabelGap + kLabelHeight;
-        POINT pt = {mx, my};
-        if (PtInRect(&rc, pt)) {
-            return i;
-        }
-    }
-    return -1;
-}
-
-static void SaveSelectedScreenshot(ScreenshotOverlayData* data) {
-    if (data->selected < 0 || data->selected >= len(data->captures)) {
-        return;
-    }
+static TempStr GetScreenshotSaveDirTemp() {
     TempStr dataDir = GetAppDataDirTemp();
-    TempStr screenshotDir = path::JoinTemp(dataDir, StrL("Screenshots"));
-    dir::CreateAll(screenshotDir);
-
-    auto& cs = data->captures[data->selected];
-    TempStr filePath = MakeUniquePathTemp(screenshotDir, cs.processName);
-    if (!filePath) {
-        return;
-    }
-
-    MainWindow* win = len(gWindows) > 0 ? gWindows[0] : nullptr;
-    if (!win) {
-        return;
-    }
-    HBITMAP hbmpCopy = (HBITMAP)CopyImage(cs.bmp, IMAGE_BITMAP, cs.origW, cs.origH, 0);
-    RenderedBitmap* rbmp = new RenderedBitmap(hbmpCopy, Size(cs.origW, cs.origH));
-    ShowImageEditWindow(win, ImageEditMode::Save, filePath, rbmp);
-    delete rbmp;
+    return path::JoinTemp(dataDir, StrL("Screenshots"));
 }
 
-// Premultiply alpha for a pixel: component = component * alpha / 255
-static inline DWORD PremultiplyPixel(BYTE r, BYTE g, BYTE b, BYTE a) {
-    r = (BYTE)((r * a) / 255);
-    g = (BYTE)((g * a) / 255);
-    b = (BYTE)((b * a) / 255);
-    return (a << 24) | (r << 16) | (g << 8) | b;
+static HWND GetScreenshotOwnerHwnd() {
+    return len(gWindows) > 0 ? gWindows[0]->hwndFrame : nullptr;
 }
 
-static void PaintOverlayLayered(HWND hwnd, ScreenshotOverlayData* data) {
-    int w = data->winW;
-    int h = data->winH;
-
-    HDC hdcScreen = GetDC(nullptr);
-    HDC hdcMem = CreateCompatibleDC(hdcScreen);
-
-    // Create 32-bit ARGB DIB section for per-pixel alpha
-    BITMAPINFO bmi{};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = w;
-    bmi.bmiHeader.biHeight = -h; // top-down
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-
-    DWORD* pixels = nullptr;
-    HBITMAP hbmDib = CreateDIBSection(hdcScreen, &bmi, DIB_RGB_COLORS, (void**)&pixels, nullptr, 0);
-    HGDIOBJ oldBmp = SelectObject(hdcMem, hbmDib);
-
-    // Fill background: light blue at 93% opaque (7% transparent), premultiplied
-    DWORD bgPixel = PremultiplyPixel(220, 230, 245, 237);
-    for (int i = 0; i < w * h; i++) {
-        pixels[i] = bgPixel;
-    }
-
-    // Draw thumbnails and labels using GDI onto the DIB
-    // First draw into a temp compatible DC, then copy pixels with full alpha
-    HDC hdcTemp = CreateCompatibleDC(hdcScreen);
-    HBITMAP hbmTemp = CreateCompatibleBitmap(hdcScreen, w, h);
-    HGDIOBJ oldTemp = SelectObject(hdcTemp, hbmTemp);
-
-    // select GUI font for text drawing
-    HFONT guiFont = GetDefaultGuiFont();
-    HGDIOBJ oldFont = SelectObject(hdcTemp, guiFont);
-
-    // white background for the temp surface
-    RECT fullRect = {0, 0, w, h};
-    HBRUSH brWhite = CreateSolidBrush(RGB(255, 255, 255));
-    FillRect(hdcTemp, &fullRect, brWhite);
-    DeleteObject(brWhite);
-
-    int n = len(data->captures);
-    for (int i = 0; i < n; i++) {
-        auto& cs = data->captures[i];
-        RECT rc = GetThumbRect(data, i);
-
-        // draw thumbnail onto temp DC
-        HDC hdcSrc = CreateCompatibleDC(hdcTemp);
-        HGDIOBJ prev = SelectObject(hdcSrc, cs.thumb);
-        BitBlt(hdcTemp, rc.left, rc.top, cs.thumbW, cs.thumbH, hdcSrc, 0, 0, SRCCOPY);
-        SelectObject(hdcSrc, prev);
-        DeleteDC(hdcSrc);
-
-        // draw label below thumbnail: process name on left, dimensions on right
-        RECT labelRect;
-        labelRect.left = rc.left + 4;
-        labelRect.right = rc.right - 4;
-        labelRect.top = rc.bottom + kLabelGap;
-        labelRect.bottom = rc.bottom + kLabelGap + kLabelHeight;
-        SetTextColor(hdcTemp, RGB(0, 0, 0));
-        SetBkMode(hdcTemp, TRANSPARENT);
-        WCHAR* nameW = CWStrTemp(cs.processName);
-        DrawTextW(hdcTemp, nameW, -1, &labelRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-        TempStr dimStr = fmt("%dx%d", cs.origW, cs.origH);
-        WCHAR* dimW = CWStrTemp(dimStr);
-        DrawTextW(hdcTemp, dimW, -1, &labelRect, DT_RIGHT | DT_SINGLELINE);
-
-        // draw selection border around thumbnail and label
-        if (i == data->selected) {
-            HPEN pen = CreatePen(PS_SOLID, kBorderThickness, RGB(0, 120, 215));
-            HGDIOBJ oldPen = SelectObject(hdcTemp, pen);
-            HGDIOBJ oldBrush = SelectObject(hdcTemp, GetStockObject(NULL_BRUSH));
-            int b = (kBorderThickness / 2) + 1;
-            int selLeft = std::min((int)rc.left, (int)labelRect.left) - b;
-            int selTop = rc.top - b;
-            int selRight = std::max((int)rc.right, (int)labelRect.right) + b;
-            int selBottom = labelRect.bottom + b;
-            Rectangle(hdcTemp, selLeft, selTop, selRight, selBottom);
-            SelectObject(hdcTemp, oldBrush);
-            SelectObject(hdcTemp, oldPen);
-            DeleteObject(pen);
-        }
-    }
-
-    // Draw 1px blue border around the window
-    HPEN borderPen = CreatePen(PS_SOLID, 1, RGB(0, 90, 180));
-    HGDIOBJ oldPen2 = SelectObject(hdcTemp, borderPen);
-    HGDIOBJ oldBrush2 = SelectObject(hdcTemp, GetStockObject(NULL_BRUSH));
-    Rectangle(hdcTemp, 0, 0, w, h);
-    SelectObject(hdcTemp, oldBrush2);
-    SelectObject(hdcTemp, oldPen2);
-    DeleteObject(borderPen);
-
-    // Draw info bar at the top with solid blue background
-    RECT infoRect;
-    infoRect.left = 0;
-    infoRect.right = w;
-    infoRect.top = 0;
-    infoRect.bottom = kInfoBarHeight;
-    HBRUSH brBlue = CreateSolidBrush(RGB(0, 90, 180));
-    FillRect(hdcTemp, &infoRect, brBlue);
-    DeleteObject(brBlue);
-
-    // Use bigger bold font for info text
-    NONCLIENTMETRICS ncm{};
-    ncm.cbSize = sizeof(ncm);
-    SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
-    ncm.lfMessageFont.lfHeight = (LONG)(ncm.lfMessageFont.lfHeight * 1.3);
-    ncm.lfMessageFont.lfWeight = FW_BOLD;
-    HFONT infoFont = CreateFontIndirectW(&ncm.lfMessageFont);
-    HGDIOBJ prevInfoFont = SelectObject(hdcTemp, infoFont);
-
-    SetTextColor(hdcTemp, RGB(255, 255, 255));
-    SetBkMode(hdcTemp, TRANSPARENT);
-    DrawTextW(hdcTemp, L"Select screenshot to save. ↑ ↓ to navigate. Enter to select. Esc to cancel", -1, &infoRect,
-              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-    SelectObject(hdcTemp, prevInfoFont);
-    DeleteObject(infoFont);
-
-    // Read back temp bitmap pixels
-    BITMAPINFO bmiTemp{};
-    bmiTemp.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmiTemp.bmiHeader.biWidth = w;
-    bmiTemp.bmiHeader.biHeight = -h;
-    bmiTemp.bmiHeader.biPlanes = 1;
-    bmiTemp.bmiHeader.biBitCount = 32;
-    bmiTemp.bmiHeader.biCompression = BI_RGB;
-    DWORD* tempPixels = (DWORD*)malloc(w * h * 4);
-    GetDIBits(hdcTemp, hbmTemp, 0, h, tempPixels, &bmiTemp, DIB_RGB_COLORS);
-
-    // Copy thumbnail and label regions with full opacity into the DIB
-    for (int i = 0; i < n; i++) {
-        auto& cs = data->captures[i];
-        RECT rc = GetThumbRect(data, i);
-
-        // expand region to include border and label
-        int b = (kBorderThickness / 2) + 2;
-        int x0 = std::max(0, (int)rc.left - b);
-        int y0 = std::max(0, (int)rc.top - b);
-        int x1 = std::min(w, (int)rc.right + b);
-        int y1 = std::min(h, (int)rc.bottom + 4 + kLabelHeight + b);
-
-        for (int y = y0; y < y1; y++) {
-            for (int x = x0; x < x1; x++) {
-                DWORD px = tempPixels[y * w + x];
-                BYTE r = (px >> 16) & 0xFF;
-                BYTE g = (px >> 8) & 0xFF;
-                BYTE bb = px & 0xFF;
-                pixels[y * w + x] = (255u << 24) | (r << 16) | (g << 8) | bb;
-            }
-        }
-    }
-
-    // Copy info bar region at top with full opacity
-    {
-        for (int y = 0; y < kInfoBarHeight; y++) {
-            for (int x = 0; x < w; x++) {
-                DWORD px = tempPixels[y * w + x];
-                BYTE r = (px >> 16) & 0xFF;
-                BYTE g = (px >> 8) & 0xFF;
-                BYTE bb = px & 0xFF;
-                pixels[y * w + x] = (255u << 24) | (r << 16) | (g << 8) | bb;
-            }
-        }
-    }
-
-    // Copy 1px border around the window with full opacity
-    for (int x = 0; x < w; x++) {
-        // top edge
-        DWORD px = tempPixels[x];
-        pixels[x] = (255u << 24) | (px & 0xFFFFFF);
-        // bottom edge
-        px = tempPixels[(h - 1) * w + x];
-        pixels[(h - 1) * w + x] = (255u << 24) | (px & 0xFFFFFF);
-    }
-    for (int y = 0; y < h; y++) {
-        // left edge
-        DWORD px = tempPixels[y * w];
-        pixels[y * w] = (255u << 24) | (px & 0xFFFFFF);
-        // right edge
-        px = tempPixels[y * w + w - 1];
-        pixels[y * w + w - 1] = (255u << 24) | (px & 0xFFFFFF);
-    }
-
-    free(tempPixels);
-    SelectObject(hdcTemp, oldFont);
-    SelectObject(hdcTemp, oldTemp);
-    DeleteObject(hbmTemp);
-    DeleteDC(hdcTemp);
-
-    // Update layered window
-    POINT ptSrc = {0, 0};
-    SIZE szWnd = {w, h};
-    BLENDFUNCTION blend{};
-    blend.BlendOp = AC_SRC_OVER;
-    blend.SourceConstantAlpha = 255;
-    blend.AlphaFormat = AC_SRC_ALPHA;
-
-    RECT winRect;
-    GetWindowRect(hwnd, &winRect);
-    POINT ptDst = {winRect.left, winRect.top};
-    UpdateLayeredWindow(hwnd, hdcScreen, &ptDst, &szWnd, hdcMem, &ptSrc, 0, &blend, ULW_ALPHA);
-
-    SelectObject(hdcMem, oldBmp);
-    DeleteObject(hbmDib);
-    DeleteDC(hdcMem);
-    ReleaseDC(nullptr, hdcScreen);
-}
-
-static LRESULT CALLBACK WndProcScreenshotOverlay(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    ScreenshotOverlayData* data = (ScreenshotOverlayData*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
-
-    switch (msg) {
-        case WM_ERASEBKGND:
-            return TRUE;
-
-        case WM_MOUSEACTIVATE:
-            SetFocus(hwnd);
-            return MA_ACTIVATE;
-
-        case WM_ACTIVATE:
-            if (LOWORD(wp) == WA_INACTIVE) {
-                DestroyWindow(hwnd);
-                return 0;
-            }
-            break;
-
-        case WM_KEYDOWN:
-            if (!data) {
-                break;
-            }
-            switch (wp) {
-                case VK_ESCAPE:
-                    DestroyWindow(hwnd);
-                    return 0;
-                case VK_LEFT:
-                    if (data->selected > 0) {
-                        data->selected--;
-                        PaintOverlayLayered(hwnd, data);
-                    }
-                    return 0;
-                case VK_RIGHT:
-                    if (data->selected < len(data->captures) - 1) {
-                        data->selected++;
-                        PaintOverlayLayered(hwnd, data);
-                    }
-                    return 0;
-                case VK_UP:
-                    if (data->selected >= data->cols) {
-                        data->selected -= data->cols;
-                        PaintOverlayLayered(hwnd, data);
-                    }
-                    return 0;
-                case VK_DOWN:
-                    if (data->selected + data->cols < len(data->captures)) {
-                        data->selected += data->cols;
-                        PaintOverlayLayered(hwnd, data);
-                    }
-                    return 0;
-                case VK_RETURN:
-                    SaveSelectedScreenshot(data);
-                    DestroyWindow(hwnd);
-                    return 0;
-            }
-            break;
-
-        case WM_MOUSEMOVE:
-            if (data) {
-                int mx = GET_X_LPARAM(lp);
-                int my = GET_Y_LPARAM(lp);
-                int hit = HitTestThumb(data, mx, my);
-                if (hit >= 0 && hit != data->selected) {
-                    data->selected = hit;
-                    PaintOverlayLayered(hwnd, data);
-                }
-            }
-            return 0;
-
-        case WM_LBUTTONDOWN:
-            if (data) {
-                int mx = GET_X_LPARAM(lp);
-                int my = GET_Y_LPARAM(lp);
-                int hit = HitTestThumb(data, mx, my);
-                if (hit >= 0) {
-                    data->selected = hit;
-                    SaveSelectedScreenshot(data);
-                    DestroyWindow(hwnd);
-                }
-            }
-            return 0;
-
-        case WM_DESTROY:
-            if (data) {
-                FreeCapturedScreenshots(data);
-                delete data;
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-            }
-            return 0;
-    }
-
-    return DefWindowProcW(hwnd, msg, wp, lp);
-}
-
-static void RegisterScreenshotOverlayClass() {
-    if (gScreenshotClassRegistered) {
-        return;
-    }
-    WNDCLASSEX wcex{};
-    FillWndClassEx(wcex, kScreenshotOverlayClassName, WndProcScreenshotOverlay);
-    wcex.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    RegisterClassEx(&wcex);
-    gScreenshotClassRegistered = true;
-}
-
-void TakeScreenshots() {
-    RegisterScreenshotOverlayClass();
-
-    // Remember the foreground window and capture screenshots before creating
-    // our overlay window to avoid disturbing what's on screen
-    HWND hwndForeground = GetForegroundWindow();
-
-    auto* data = new ScreenshotOverlayData();
-    CaptureAllScreenshots(data, nullptr);
-
-    int screenW = GetSystemMetrics(SM_CXSCREEN);
-    int screenH = GetSystemMetrics(SM_CYSCREEN);
-
-    DWORD exStyle = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED;
-    DWORD style = WS_POPUP;
-    HWND hwnd = CreateWindowExW(exStyle, kScreenshotOverlayClassName, nullptr, style, 0, 0, 1, 1, nullptr, nullptr,
-                                GetModuleHandleW(nullptr), nullptr);
-    if (!hwnd) {
-        logf("Screenshot: failed to create overlay window\n");
-        FreeCapturedScreenshots(data);
-        delete data;
-        return;
-    }
-
-    SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)data);
-
-    if (data->captures.IsEmpty()) {
-        logf("Screenshot: no windows captured\n");
-        DestroyWindow(hwnd);
-        return;
-    }
-
-    // Select the previously active window's thumbnail, or first if not found
-    data->selected = 0;
-    if (hwndForeground) {
-        int n = len(data->captures);
-        for (int i = 0; i < n; i++) {
-            if (data->captures[i].srcHwnd == hwndForeground) {
-                data->selected = i;
-                break;
-            }
-        }
-    }
-
-    ComputeLayout(data);
-
-    // Clamp to screen size
-    if (data->winW > screenW) {
-        data->winW = screenW;
-    }
-    if (data->winH > screenH) {
-        data->winH = screenH;
-    }
-
-    // Center on screen
-    int x = (screenW - data->winW) / 2;
-    int y = (screenH - data->winH) / 2;
-    SetWindowPos(hwnd, HWND_TOPMOST, x, y, data->winW, data->winH, 0);
-
-    // Paint the layered content
-    PaintOverlayLayered(hwnd, data);
-
-    ShowWindow(hwnd, SW_SHOWNORMAL);
-    SetForegroundWindow(hwnd);
-    SetFocus(hwnd);
+// wires up the hooks the shared capture code (ScreenshotCapture.h) calls back
+// into; TakeScreenshots() itself is declared there
+void InitScreenshotHost() {
+    gScreenshotHost.IsAppFrame = IsAppFrame;
+    gScreenshotHost.GetSaveDirTemp = GetScreenshotSaveDirTemp;
+    gScreenshotHost.GetOwnerHwnd = GetScreenshotOwnerHwnd;
 }
 
 static bool IsOtherSumatraProcessRunning() {
@@ -1109,12 +78,12 @@ static bool IsOtherSumatraProcessRunning() {
 static Str FindScreenshotShortcut() {
     // check gGlobalPrefs->shortcuts first (may have been updated at runtime)
     for (Shortcut* sc : *gGlobalPrefs->shortcuts) {
-        if (str::EqI(sc->cmd, "CmdScreenshot") && sc->key) {
+        if (str::EqI(sc->cmd, StrL("CmdScreenshot")) && sc->key) {
             return sc->key;
         }
     }
     // fall back to custom commands (built at startup)
-    auto curr = gFirstCustomCommand;
+    auto* curr = gFirstCustomCommand;
     while (curr) {
         if (curr->origId == CmdScreenshot && curr->key) {
             return curr->key;
@@ -1165,25 +134,38 @@ void UnregisterScreenshotHotkey(HWND hwnd) {
 // --- Set Screenshot Hotkey dialog ---
 
 // serialize VK code + modifiers to a shortcut string like "Ctrl+Shift+F5"
-static TempStr SerializeHotkeyTemp(UINT vk, bool ctrl, bool shift, bool alt) {
+static TempStr SerializeHotkeyTemp(UINT vk, bool ctrl, bool shift, bool alt, bool altGr) {
     str::Builder s;
-    if (ctrl) {
-        s.Append("Ctrl+");
-    }
-    if (alt) {
-        s.Append("Alt+");
+    if (altGr) {
+        s.Append("AltGr+");
+    } else {
+        if (ctrl) {
+            s.Append("Ctrl+");
+        }
+        if (alt) {
+            s.Append("Alt+");
+        }
     }
     if (shift) {
         s.Append("Shift+");
     }
+    bool isAlphaNumKey = (vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9');
     if (vk >= VK_F1 && vk <= VK_F24) {
         s.Append(fmt("F%d", (int)(vk - VK_F1 + 1)));
-    } else if (vk >= 'A' && vk <= 'Z') {
-        s.AppendChar((char)vk);
-    } else if (vk >= '0' && vk <= '9') {
+    } else if (isAlphaNumKey) {
         s.AppendChar((char)vk);
     } else if (vk == VK_SNAPSHOT) {
         s.Append("PrtSc");
+    } else if (vk == VK_RETURN) {
+        s.Append("Return");
+    } else if (vk == VK_LEFT) {
+        s.Append("Left");
+    } else if (vk == VK_RIGHT) {
+        s.Append("Right");
+    } else if (vk == VK_UP) {
+        s.Append("Up");
+    } else if (vk == VK_DOWN) {
+        s.Append("Down");
     } else if (vk == VK_DELETE) {
         s.Append("Delete");
     } else if (vk == VK_INSERT) {
@@ -1214,7 +196,7 @@ static TempStr SerializeHotkeyTemp(UINT vk, bool ctrl, bool shift, bool alt) {
 // find existing Shortcut entry for CmdScreenshot, or nullptr
 static Shortcut* FindScreenshotShortcutEntry() {
     for (Shortcut* sc : *gGlobalPrefs->shortcuts) {
-        if (str::EqI(sc->cmd, "CmdScreenshot")) {
+        if (str::EqI(sc->cmd, StrL("CmdScreenshot"))) {
             return sc;
         }
     }
@@ -1238,40 +220,108 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wp, LPARAM lp) {
     return CallNextHookEx(gKeyboardHook, nCode, wp, lp);
 }
 
-struct SetHotkeyDialog {
-    HWND hwnd = nullptr;
-    HWND hwndCurrentLabel = nullptr;
-    HWND hwndHotkeyLabel = nullptr;
-    HWND hwndSetBtn = nullptr;
-    HWND hwndRemoveBtn = nullptr;
-    HWND hwndCancelBtn = nullptr;
-    HFONT hFont = nullptr;
+struct SetHotkeyWnd : WindowBase {
+    ~SetHotkeyWnd() override;
+
     HWND hwndOwner = nullptr;
+    // the dialog is made only of virtual controls: it turns every key into a
+    // hotkey to capture, so nothing in it can hold the keyboard focus anyway
+    VirtText* prompt = nullptr;
+    // the current / captured combination, drawn as a key-cap
+    VirtRichText* hotkeyDisplay = nullptr;
+    VirtButton* btnSet = nullptr;
+    VirtButton* btnRemove = nullptr;
+    VirtButton* btnCancel = nullptr;
+
     Str currentHotkey;      // current hotkey string, or empty if none
     Str newHotkey;          // newly captured hotkey string
     bool committed = false; // true if Set or Remove was pressed
+
+    bool Create(HWND owner);
+    void WndProc(WindowBase::WndProcEvent* ev);
+    void OnKeyDown(KeyEvent* ev);
+
+    VirtButton* NewButton(Str text, bool isDefault);
+    void UpdateUI();
+    bool HandleKeyDown(UINT vk);
+    void DoSet(VirtMouseEvent* ev = nullptr);
+    void DoRemove(VirtMouseEvent* ev = nullptr);
+    void OnCancel(VirtMouseEvent* ev = nullptr);
+    static void CleanupHook();
 };
 
-static void SetHotkeyUpdateUI(SetHotkeyDialog* dlg) {
-    Str display = dlg->newHotkey ? dlg->newHotkey : (dlg->currentHotkey ? dlg->currentHotkey : StrL("None"));
-    SetWindowTextA(dlg->hwndHotkeyLabel, display.s);
-    EnableWindow(dlg->hwndSetBtn, !str::IsEmpty(dlg->newHotkey));
-    EnableWindow(dlg->hwndRemoveBtn, !str::IsEmpty(dlg->currentHotkey) || !str::IsEmpty(dlg->newHotkey));
+static SetHotkeyWnd* gSetHotkeyWnd = nullptr;
+
+SetHotkeyWnd::~SetHotkeyWnd() {
+    str::Free(currentHotkey);
+    str::Free(newHotkey);
 }
 
-static void SetHotkeyDoSet(SetHotkeyDialog* dlg) {
-    if (!dlg->newHotkey) {
+void SetHotkeyWnd::UpdateUI() {
+    Str display = StrL("None");
+    if (newHotkey) {
+        display = newHotkey;
+    } else if (currentHotkey) {
+        display = currentHotkey;
+    }
+    if (hotkeyDisplay) {
+        // a real combination draws as a key-cap; "None" is just text
+        bool isNone = str::Eq(display, StrL("None"));
+        TempStr markup = isNone ? str::DupTemp(display) : str::JoinTemp(StrL("(Kbd/"), display, StrL(")"));
+        hotkeyDisplay->Reset();
+        ParseTipInto(hotkeyDisplay, markup);
+    }
+    if (btnSet) {
+        btnSet->SetFlag(vwfEnabled, len(newHotkey) > 0);
+    }
+    if (btnRemove) {
+        btnRemove->SetFlag(vwfEnabled, len(currentHotkey) > 0 || len(newHotkey) > 0);
+    }
+    // the key-cap changes width with the combination, so lay out again
+    DoLayout();
+    HwndScheduleRepaint(hwnd);
+}
+
+bool SetHotkeyWnd::HandleKeyDown(UINT vk) {
+    if (vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL || vk == VK_SHIFT || vk == VK_MENU ||
+        vk == VK_LMENU || vk == VK_RMENU || vk == VK_LWIN || vk == VK_RWIN) {
+        return true;
+    }
+    if (vk == VK_ESCAPE) {
+        OnCancel();
+        return true;
+    }
+    bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
+    bool altGr = (GetKeyState(VK_RMENU) & 0x8000) != 0;
+    // Return / arrows as a global hotkey without a modifier would steal
+    // Enter and cursor keys from every app
+    bool needsMod = (vk == VK_RETURN) || (vk == VK_LEFT) || (vk == VK_RIGHT) || (vk == VK_UP) || (vk == VK_DOWN);
+    if (needsMod && !ctrl && !shift && !alt) {
+        return true;
+    }
+    TempStr hotkey = SerializeHotkeyTemp(vk, ctrl, shift, alt, altGr);
+    if (hotkey) {
+        str::ReplaceWithCopy(&newHotkey, hotkey);
+        UpdateUI();
+    }
+    return true;
+}
+
+void SetHotkeyWnd::DoSet(VirtMouseEvent*) {
+    if (!newHotkey) {
         return;
     }
-    logf("SetHotkeyDoSet: setting screenshot hotkey to '%s'\n", dlg->newHotkey);
+    logf("SetHotkeyDoSet: setting screenshot hotkey to '%s'\n", newHotkey);
 
     Shortcut* sc = FindScreenshotShortcutEntry();
     if (sc) {
-        str::ReplaceWithCopy(&sc->key, dlg->newHotkey);
+        str::ReplaceWithCopy(&sc->key, newHotkey);
     } else {
         sc = new Shortcut();
         sc->cmd = str::Dup(StrL("CmdScreenshot"));
-        sc->key = str::Dup(dlg->newHotkey);
+        sc->key = str::Dup(newHotkey);
         sc->name = nullptr;
         sc->toolbarText = nullptr;
         sc->toolbarSvgIcon = nullptr;
@@ -1280,23 +330,21 @@ static void SetHotkeyDoSet(SetHotkeyDialog* dlg) {
     }
     SaveSettings();
 
-    // register the new hotkey (old one was unregistered before dialog opened)
     for (MainWindow* win : gWindows) {
         RegisterScreenshotHotkey(win->hwndFrame);
     }
-    dlg->committed = true;
-    DestroyWindow(dlg->hwnd);
+    committed = true;
+    Close();
 }
 
-static void SetHotkeyDoRemove(SetHotkeyDialog* dlg) {
+void SetHotkeyWnd::DoRemove(VirtMouseEvent*) {
     logf("SetHotkeyDoRemove: removing screenshot hotkey\n");
 
     Shortcut* sc = FindScreenshotShortcutEntry();
     if (sc) {
         gGlobalPrefs->shortcuts->Remove(sc);
     }
-    // also clear the key in the custom command chain so it doesn't get picked up
-    auto curr = gFirstCustomCommand;
+    auto* curr = gFirstCustomCommand;
     while (curr) {
         if (curr->origId == CmdScreenshot) {
             str::ReplaceWithCopy(&curr->key, Str{});
@@ -1304,177 +352,182 @@ static void SetHotkeyDoRemove(SetHotkeyDialog* dlg) {
         curr = curr->next;
     }
     SaveSettings();
-    // hotkey was already unregistered before dialog opened, nothing to re-register
-    dlg->committed = true;
-    DestroyWindow(dlg->hwnd);
+    committed = true;
+    Close();
 }
 
-static LRESULT CALLBACK SetHotkeyDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    SetHotkeyDialog* dlg = nullptr;
-    if (msg == WM_CREATE) {
-        CREATESTRUCTW* cs = (CREATESTRUCTW*)lp;
-        dlg = (SetHotkeyDialog*)cs->lpCreateParams;
-        dlg->hwnd = hwnd;
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)dlg);
-        return 0;
-    }
-    dlg = (SetHotkeyDialog*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
-    if (!dlg) {
-        return DefWindowProc(hwnd, msg, wp, lp);
-    }
-
-    switch (msg) {
-        case WM_HOTKEY_CAPTURED:
-        case WM_KEYDOWN:
-        case WM_SYSKEYDOWN: {
-            UINT vk = (UINT)wp;
-            // ignore bare modifier keys
-            if (vk == VK_CONTROL || vk == VK_SHIFT || vk == VK_MENU || vk == VK_LWIN || vk == VK_RWIN) {
-                return 0;
-            }
-            if (vk == VK_ESCAPE) {
-                DestroyWindow(hwnd);
-                return 0;
-            }
-            bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-            bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-            bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
-            TempStr hotkey = SerializeHotkeyTemp(vk, ctrl, shift, alt);
-            if (hotkey) {
-                str::ReplaceWithCopy(&dlg->newHotkey, hotkey);
-                SetHotkeyUpdateUI(dlg);
-            }
-            return 0;
-        }
-        case WM_COMMAND: {
-            int code = HIWORD(wp);
-            HWND ctl = (HWND)lp;
-            if (ctl == dlg->hwndSetBtn && code == BN_CLICKED) {
-                SetHotkeyDoSet(dlg);
-                return 0;
-            }
-            if (ctl == dlg->hwndRemoveBtn && code == BN_CLICKED) {
-                SetHotkeyDoRemove(dlg);
-                return 0;
-            }
-            if (ctl == dlg->hwndCancelBtn && code == BN_CLICKED) {
-                DestroyWindow(hwnd);
-                return 0;
-            }
-            break;
-        }
-        case WM_CLOSE:
-            DestroyWindow(hwnd);
-            return 0;
-        case WM_DESTROY:
-            // remove keyboard hook
-            if (gKeyboardHook) {
-                UnhookWindowsHookEx(gKeyboardHook);
-                gKeyboardHook = nullptr;
-            }
-            gHotkeyDlgHwnd = nullptr;
-            if (!dlg->committed) {
-                // cancelled: re-register the original hotkey
-                for (MainWindow* w : gWindows) {
-                    RegisterScreenshotHotkey(w->hwndFrame);
-                }
-            }
-            str::Free(dlg->currentHotkey);
-            str::Free(dlg->newHotkey);
-            delete dlg;
-            return 0;
-    }
-    return DefWindowProc(hwnd, msg, wp, lp);
+void SetHotkeyWnd::OnCancel(VirtMouseEvent*) {
+    Close();
 }
 
-static constexpr const WCHAR* kSetHotkeyWinClassName = L"SUMATRA_SET_HOTKEY";
-static bool gSetHotkeyWinClassRegistered = false;
+void SetHotkeyWnd::CleanupHook() {
+    if (gKeyboardHook) {
+        UnhookWindowsHookEx(gKeyboardHook);
+        gKeyboardHook = nullptr;
+    }
+    gHotkeyDlgHwnd = nullptr;
+}
+
+VirtButton* SetHotkeyWnd::NewButton(Str text, bool isDefault) {
+    return NewThemedButton(hwnd, text, font, isDefault);
+}
+
+void SetHotkeyWnd::WndProc(WindowBase::WndProcEvent* ev) {
+    if (ev->msg == WM_HOTKEY_CAPTURED || ev->msg == WM_KEYDOWN || ev->msg == WM_SYSKEYDOWN) {
+        HandleKeyDown((UINT)ev->wparam);
+        ev->result = 0;
+        ev->didHandle = true;
+        return;
+    }
+}
+
+void SetHotkeyWnd::OnKeyDown(KeyEvent* ev) {
+    if (!hwnd) {
+        return;
+    }
+    if (ev->hwnd != hwnd && !IsChild(hwnd, ev->hwnd)) {
+        return;
+    }
+    ev->didHandle = HandleKeyDown((UINT)ev->vkey);
+}
+
+static void TeardownSetHotkeyWnd() {
+    if (!gSetHotkeyWnd) {
+        return;
+    }
+    SetHotkeyWnd* w = gSetHotkeyWnd;
+    gSetHotkeyWnd = nullptr;
+    SetHotkeyWnd::CleanupHook();
+    if (!w->committed) {
+        for (MainWindow* win : gWindows) {
+            RegisterScreenshotHotkey(win->hwndFrame);
+        }
+    }
+    w->ScheduleDelete();
+}
+
+static void OnSetHotkeyClose(WindowBase::CloseEvent* ev) {
+    if (gSetHotkeyWnd == (SetHotkeyWnd*)ev->e->self) {
+        TeardownSetHotkeyWnd();
+    }
+}
+
+static void OnSetHotkeyDestroy(WindowBase::DestroyEvent* ev) {
+    if (gSetHotkeyWnd == (SetHotkeyWnd*)ev->e->self) {
+        TeardownSetHotkeyWnd();
+    }
+}
+
+bool SetHotkeyWnd::Create(HWND owner) {
+    hwndOwner = owner;
+    Str existing = FindScreenshotShortcut();
+    if (existing) {
+        currentHotkey = str::Dup(existing);
+    }
+
+    bool isRtl = IsUIRtl();
+    {
+        CreateCustomArgs args;
+        args.owner = owner;
+        args.title = _TRA("Set Screenshot Hotkey");
+        args.visible = false;
+        args.style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
+        args.exStyle = WS_EX_DLGMODALFRAME;
+        args.font = GetFont();
+        args.icon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(GetAppIconID()));
+        CreateCustom(args);
+    }
+    if (!hwnd) {
+        return false;
+    }
+
+    auto* vbox = new VBox();
+    vbox->alignMain = MainAxisAlign::MainStart;
+    vbox->alignCross = CrossAxisAlign::Stretch;
+
+    prompt = NewVirtText({
+        .s = _TRA("Press a key combination:"),
+        .font = font,
+        .isRtl = isRtl,
+    });
+    vbox->AddChild(prompt);
+
+    {
+        auto* t = new VirtRichText();
+        t->font = font;
+        t->padding = DpiScaledInsets(6, 0, 0, 0);
+        hotkeyDisplay = t;
+        vbox->AddChild(t);
+    }
+
+    {
+        auto* hbox = new HBox();
+        hbox->alignMain = MainAxisAlign::MainEnd;
+        hbox->alignCross = CrossAxisAlign::CrossCenter;
+        hbox->gap = font->averageCharWidth;
+
+        btnCancel = NewButton(_TRA("Cancel"), false);
+        btnCancel->onClick = MkMethod1<SetHotkeyWnd, VirtMouseEvent*, &SetHotkeyWnd::OnCancel>(this);
+        hbox->AddChild(btnCancel);
+        btnRemove = NewButton(_TRA("Remove"), false);
+        btnRemove->onClick = MkMethod1<SetHotkeyWnd, VirtMouseEvent*, &SetHotkeyWnd::DoRemove>(this);
+        hbox->AddChild(btnRemove);
+        btnSet = NewButton(_TRA("Set"), true);
+        btnSet->onClick = MkMethod1<SetHotkeyWnd, VirtMouseEvent*, &SetHotkeyWnd::DoSet>(this);
+        hbox->AddChild(btnSet);
+
+        auto* hboxPad = new Padding(hbox, DpiScaledInsets(8, 0, 0, 0));
+        vbox->AddChild(hboxPad);
+    }
+
+    layout = new Padding(vbox, DpiScaledInsets(8, 12));
+
+    // fill in the key-cap and the button states before measuring: an empty
+    // rich text has no height, and the window is sized to its content
+    UpdateUI();
+    int minDx = DpiScale(320);
+    LayoutAndSizeToContent(layout, minDx, 0, hwnd);
+    // pick up the virtual controls so we paint them and they get their input
+    DoLayout(HwndClientRect(hwnd).Size());
+    HwndCenterDialog(hwnd, owner);
+    UpdateTheme();
+
+    SetIsVisible(true);
+    HwndSetFocus(hwnd);
+    return true;
+}
 
 void ShowSetScreenshotHotkeyDialog(HWND hwndOwner) {
-    if (!gSetHotkeyWinClassRegistered) {
-        WNDCLASSEXW wc{};
-        wc.cbSize = sizeof(wc);
-        wc.style = CS_HREDRAW | CS_VREDRAW;
-        wc.lpfnWndProc = SetHotkeyDlgProc;
-        wc.hInstance = GetModuleHandleW(nullptr);
-        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-        wc.lpszClassName = kSetHotkeyWinClassName;
-        RegisterClassExW(&wc);
-        gSetHotkeyWinClassRegistered = true;
+    if (gSetHotkeyWnd) {
+        if (gSetHotkeyWnd->hwnd && IsWindow(gSetHotkeyWnd->hwnd)) {
+            HwndSetFocus(gSetHotkeyWnd->hwnd);
+            return;
+        }
+        TeardownSetHotkeyWnd();
     }
 
-    // unregister current hotkey so the dialog can capture those keys
     for (MainWindow* win : gWindows) {
         UnregisterScreenshotHotkey(win->hwndFrame);
     }
 
-    SetHotkeyDialog* dlg = new SetHotkeyDialog();
-    dlg->hwndOwner = hwndOwner;
-    dlg->hFont = GetDefaultGuiFont();
-    Str existing = FindScreenshotShortcut();
-    if (existing) {
-        dlg->currentHotkey = str::Dup(existing);
-    }
-
-    int dlgW = 350;
-    int dlgH = 140;
-
-    HINSTANCE h = GetModuleHandleW(nullptr);
-    HWND hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, kSetHotkeyWinClassName, _TRW("Set Screenshot Hotkey").s,
-                                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
-                                dlgW, dlgH, hwndOwner, nullptr, h, dlg);
-    if (!hwnd) {
-        delete dlg;
+    auto* wnd = new SetHotkeyWnd();
+    wnd->hwndOwner = hwndOwner;
+    wnd->onClose = MkFunc1Void<WindowBase::CloseEvent*>(OnSetHotkeyClose);
+    wnd->onDestroy = MkFunc1Void<WindowBase::DestroyEvent*>(OnSetHotkeyDestroy);
+    wnd->onWndProc = MkMethod1<SetHotkeyWnd, WindowBase::WndProcEvent*, &SetHotkeyWnd::WndProc>(wnd);
+    wnd->onKeyDown = MkMethod1<SetHotkeyWnd, KeyEvent*, &SetHotkeyWnd::OnKeyDown>(wnd);
+    wnd->SetFont(GetAppFont());
+    if (!wnd->Create(hwndOwner)) {
+        delete wnd;
+        for (MainWindow* win : gWindows) {
+            RegisterScreenshotHotkey(win->hwndFrame);
+        }
         return;
     }
 
-    int padding = 10;
-    int x = padding;
-    int y = padding;
-    int w = dlgW - 2 * padding - 16;
-    int rowH = 22;
-    int rowGap = 6;
-
-    // row 1: "Current hotkey:" label
-    dlg->hwndCurrentLabel = CreateWindowExW(0, L"STATIC", _TRW("Press a key combination:").s,
-                                            WS_CHILD | WS_VISIBLE | SS_LEFT, x, y, w, rowH, hwnd, nullptr, h, nullptr);
-    SendMessageW(dlg->hwndCurrentLabel, WM_SETFONT, (WPARAM)dlg->hFont, TRUE);
-    y += rowH + rowGap;
-
-    // row 2: hotkey display
-    Str display = dlg->currentHotkey ? dlg->currentHotkey : StrL("None");
-    dlg->hwndHotkeyLabel =
-        CreateWindowExW(WS_EX_CLIENTEDGE, L"STATIC", CWStrTemp(display),
-                        WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE, x, y, w, rowH, hwnd, nullptr, h, nullptr);
-    SendMessageW(dlg->hwndHotkeyLabel, WM_SETFONT, (WPARAM)dlg->hFont, TRUE);
-    y += rowH + rowGap;
-
-    // row 3: Set + Remove + Cancel buttons (right-aligned)
-    int btnW = 75;
-    int btnH = 24;
-    int bx = x + w - btnW;
-    dlg->hwndCancelBtn = CreateWindowExW(0, L"BUTTON", _TRW("Cancel").s, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, bx, y,
-                                         btnW, btnH, hwnd, nullptr, h, nullptr);
-    SendMessageW(dlg->hwndCancelBtn, WM_SETFONT, (WPARAM)dlg->hFont, TRUE);
-    bx -= btnW + 4;
-    dlg->hwndRemoveBtn = CreateWindowExW(0, L"BUTTON", _TRW("Remove").s, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, bx, y,
-                                         btnW, btnH, hwnd, nullptr, h, nullptr);
-    SendMessageW(dlg->hwndRemoveBtn, WM_SETFONT, (WPARAM)dlg->hFont, TRUE);
-    bx -= btnW + 4;
-    dlg->hwndSetBtn = CreateWindowExW(0, L"BUTTON", _TRW("Set").s, WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, bx, y,
-                                      btnW, btnH, hwnd, nullptr, h, nullptr);
-    SendMessageW(dlg->hwndSetBtn, WM_SETFONT, (WPARAM)dlg->hFont, TRUE);
-
-    EnableWindow(dlg->hwndSetBtn, FALSE);
-    EnableWindow(dlg->hwndRemoveBtn, !str::IsEmpty(dlg->currentHotkey));
-
-    CenterDialog(hwnd, hwndOwner);
-
-    // install low-level keyboard hook to capture PrtSc (VK_SNAPSHOT)
-    // which doesn't generate WM_KEYDOWN
-    gHotkeyDlgHwnd = hwnd;
+    gSetHotkeyWnd = wnd;
+    gHotkeyDlgHwnd = wnd->hwnd;
+    HINSTANCE h = GetModuleHandleW(nullptr);
     gKeyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, h, 0);
-
-    ShowWindow(hwnd, SW_SHOW);
+    RunModalWindow(wnd->hwnd, hwndOwner);
 }

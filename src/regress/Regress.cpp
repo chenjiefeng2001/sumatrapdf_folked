@@ -22,12 +22,13 @@ To write new regression test:
 #include "base/DbgHelpDyn.h"
 #include "base/File.h"
 #include "base/GuessFileType.h"
-#include "base/GdiPlus.h"
+#include "base/GdiPlusUtil.h"
 #include "base/HtmlTags.h"
-#include "mui/Mui.h"
+#include "gui/PlatformFont.h"
+#include "gui/PlatformText.h"
 #include "base/Win.h"
 
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
 
 #include "DocProperties.h"
 #include "DocController.h"
@@ -84,7 +85,7 @@ static void VerifyFileExists(Str filePath) {
 }
 
 static HANDLE gDumpEvent = nullptr;
-static HANDLE gDumpThread = nullptr;
+static ThreadHandle gDumpThread = nullptr;
 static bool gCrashed = false;
 
 static MINIDUMP_EXCEPTION_INFORMATION gMei{};
@@ -156,7 +157,7 @@ static void UninstallCrashHandler() {
     SetEvent(gDumpEvent);
     WaitForSingleObject(gDumpThread, 1000); // 1 sec
 
-    SafeCloseHandle(&gDumpThread);
+    SafeCloseThreadHandle(&gDumpThread);
     SafeCloseHandle(&gDumpEvent);
 }
 
@@ -180,12 +181,10 @@ int RegressMain() {
     InstallCrashHandler();
     InitAllCommonControls();
     ScopedGdiPlus gdi;
-    mui::Initialize();
 
     RunTests();
 
     printflush("All tests completed successfully!\n");
-    mui::Destroy();
     UninstallCrashHandler();
 
     system("pause");

@@ -7,12 +7,13 @@ extern int TestTab(HINSTANCE hInstance, int nCmdShow);
 // in TestLayout.cpp
 extern int TestLayout(HINSTANCE hInstance, int nCmdShow);
 
-static std::tuple<ILayout*, Button*> CreateButtonLayout(HWND parent, const char* s, OnClicked onClicked) {
+static void CreateButtonLayout(HWND parent, const char* s, OnClicked onClicked, ILayout** layoutOut, Button** buttonOut) {
     auto b = new Button(parent);
     b->OnClicked = onClicked;
     b->SetText(s);
     b->Create();
-    return {NewButtonLayout(b), b};
+    *layoutOut = NewButtonLayout(b);
+    *buttonOut = b;
 }
 
 HINSTANCE gHinst = nullptr;
@@ -32,12 +33,16 @@ static ILayout* CreateMainLayout(HWND hwnd) {
     vbox->alignCross = CrossAxisAlign::CrossCenter;
 
     {
-        auto [l, b] = CreateButtonLayout(hwnd, "Tabs test", LaunchTabs);
+        ILayout* l = nullptr;
+        Button* b = nullptr;
+        CreateButtonLayout(hwnd, "Tabs test", LaunchTabs, &l, &b);
         vbox->addChild(l);
     }
 
     {
-        auto [l, b] = CreateButtonLayout(hwnd, "Layout test", LaunchLayout);
+        ILayout* l = nullptr;
+        Button* b = nullptr;
+        CreateButtonLayout(hwnd, "Layout test", LaunchLayout, &l, &b);
         vbox->addChild(l);
     }
 
@@ -52,7 +57,7 @@ void _uploadDebugReportIfFunc(__unused bool cond, __unused Str condStr) {
     // no-op implementation to satisfy SubmitBugReport()
 }
 
-int APIENTRY WinMain(HINSTANCE hInstance, __unused HINSTANCE hPrevInstance, __unused LPSTR lpCmdLine,
+int APIENTRY WinMain(HINSTANCE /*hInstance*/, __unused HINSTANCE hPrevInstance, __unused LPSTR lpCmdLine,
                      __unused int nCmdShow) {
     // SetProcessDpiAwareness(PROCESS_SYSTEM_DPI_AWARE);
     // SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE);
@@ -85,7 +90,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, __unused HINSTANCE hPrevInstance, __un
         }
         //auto c = Loose(Size{dx, dy});
         LayoutToSize(l, {dx, dy});
-        InvalidateRect(hwnd, nullptr, false);
+        HwndInvalidate(hwnd);
     };
 
     // important to call this after hooking up onSize to ensure

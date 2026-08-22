@@ -3,6 +3,9 @@
 
 struct HuffDicDecompressor;
 struct PdbReader;
+struct PropValue;
+enum class DocProp : u8;
+enum class FileType : u8;
 
 struct MobiDoc {
     Str fileName;
@@ -25,7 +28,7 @@ struct MobiDoc {
 
     HuffDicDecompressor* huffDic = nullptr;
 
-    Props props;
+    Vec<PropValue> props;
 
     explicit MobiDoc(Str filePath);
 
@@ -35,6 +38,8 @@ struct MobiDoc {
     bool LoadImage(int imageNo);
     bool LoadForPdbReader(PdbReader* pdbReader);
     bool DecodeExthHeader(const u8* data, int dataLen);
+    int CountLoadedImages() const;
+    void MaybeSynthesizeImagePages();
 
     str::Builder doc;
 
@@ -46,13 +51,15 @@ struct MobiDoc {
     Str GetCoverImage();
     Str GetImage(int imgRecIndex) const;
     Str GetFileName() const { return fileName; }
-    TempStr GetPropertyTemp(Str name);
+    TempStr GetPropertyTemp(DocProp prop);
     PdbDocType GetDocType() const { return docType; }
 
     bool HasToc();
     bool ParseToc(EbookTocVisitor* visitor);
 
-    static bool IsSupportedFileType(Kind);
-    static MobiDoc* CreateFromFile(Str fileName);
-    static MobiDoc* CreateFromStream(IStream* stream);
+    static bool IsSupportedFileType(FileType);
+    static MobiDoc* CreateFromFile(Str path);
+    static MobiDoc* CreateFromData(Str data);
 };
+
+int KindleEmbedToRecIndex(Str src);

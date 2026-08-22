@@ -3,7 +3,7 @@
 
 #include "base/Base.h"
 #include "base/Win.h"
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
 #include "Settings.h"
 #include "DocController.h"
 #include "DisplayMode.h"
@@ -12,7 +12,7 @@
 #include "MainWindow.h"
 #include "HardwareProfile.h"
 #include "OverscrollEffect.h"
-#include "wingui/Animation.h"
+#include "gui/win/Animation.h"
 
 bool OverscrollState::ApplyDelta(int dy, MainWindow* win) {
     if (dy == 0) {

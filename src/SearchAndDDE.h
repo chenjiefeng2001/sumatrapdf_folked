@@ -4,6 +4,8 @@
 #define kSumatraDdeServer L"SUMATRA"
 #define kSumatraDdeTopic L"control"
 
+struct Gfx;
+
 // WM_COPYDATA magic numbers (in COPYDATASTRUCT::dwData):
 // - kCopyDataDdeW   : payload is a null-terminated UTF-16 DDE command string
 //                    ("[Open(\"...\",...)]..."). Handled synchronously via
@@ -13,12 +15,21 @@
 //                    the sending instance (launched by Explorer for
 //                    reuseInstance) can exit immediately without waiting for
 //                    the receiver to finish loading the file.
-#define kCopyDataDdeW 0x44646557 // 'DdeW'
-#define kCopyDataOpen 0x4F70656E // 'Open'
+// - kCopyDataOpenMany: payload is a SumatraOpenManyCopyData struct followed by
+//                     UTF-8 null-terminated paths.
+#define kCopyDataDdeW 0x44646557     // 'DdeW'
+#define kCopyDataOpen 0x4F70656E     // 'Open'
+#define kCopyDataOpenMany 0x4F704D6E // 'OpMn'
 
 struct SumatraOpenCopyData {
     u32 newWindow; // 0: reuse existing, non-zero: force new window
     // followed by UTF-8 path, null-terminated
+};
+
+struct SumatraOpenManyCopyData {
+    u32 newWindow;
+    u32 pathCount;
+    // followed by pathCount UTF-8 paths, each null-terminated
 };
 
 LRESULT OnDDEInitiate(HWND hwnd, WPARAM wp, LPARAM lp);
@@ -29,6 +40,9 @@ LRESULT OnCopyData(HWND hwnd, WPARAM wp, LPARAM lp);
 
 #define HIDE_FWDSRCHMARK_TIMER_ID 4
 #define HIDE_FWDSRCHMARK_DELAY_IN_MS 400
+// dest highlight after a link/bookmark jump (#5945): stay solid longer than
+// SyncTeX so the mark is still there after you look at the new page
+#define HIDE_LINKDESTMARK_DELAY_IN_MS 2000
 #define HIDE_FWDSRCHMARK_DECAYINTERVAL_IN_MS 100
 #define HIDE_FWDSRCHMARK_STEPS 5
 
@@ -39,31 +53,34 @@ bool NeedsFindUI(MainWindow* win);
 void ClearSearchResult(MainWindow* win);
 bool OnInverseSearch(MainWindow* win, int x, int y);
 void ShowForwardSearchResult(MainWindow* win, Str fileName, int line, int col, int ret, int page, Vec<Rect>& rects);
-void PaintForwardSearchMark(MainWindow* win, HDC hdc);
-void PaintAllFindMatches(MainWindow* win, HDC hdc);
+void ShowLinkDestHighlight(MainWindow* win, int pageNo, RectF dest);
+void PaintForwardSearchMark(MainWindow* win, Gfx* gfx);
+TempStr LinkDestHighlightResultTemp(int* exitCodeOut);
+void PaintAllFindMatches(MainWindow* win, Gfx* gfx);
 void InvalidateFindMatchPaintCache();
 
-// when true, paint every visible search match (current match in orange)
-extern bool gShowAllMatches;
 void FindPrev(MainWindow* win);
 void FindNext(MainWindow* win);
 void FindFirst(MainWindow* win);
 void FindToggleMatchCase(MainWindow* win);
 void FindToggleMatchWholeWord(MainWindow* win);
-// called when the user edits the find bar's text (find-as-you-type)
 void OnFindBarTextChanged(MainWindow* win);
-// fired by the debounce WM_TIMER on hwndFrame: runs the deferred search
+bool ParseFindPageRange(Str s, int nPages, Vec<bool>& allowedOut);
 void FindDebounceTimerFired(MainWindow* win);
-// if a debounced search is pending, cancel the timer and start it now (so Enter
-// forces the search to start immediately). Returns true if one was pending.
 bool FindFlushPendingSearch(MainWindow* win);
-// navigate to and select a match chosen from the floating results list
 void GoToFindMatch(MainWindow* win, int startPage, int startGlyph, int endPage, int endGlyph);
-// free the cached per-match snippets (win->findMatches)
 void ClearFindMatches(MainWindow* win);
+void InvalidateFindForDocumentChange(MainWindow* win);
 void FindSelection(MainWindow* win, TextSearch::Direction direction);
+void BrowserFindResultReceived(MainWindow* win, int gen, int current, int total);
+void BrowserFindAllResultReceived(MainWindow* win, Str payload);
 bool AbortFinding(MainWindow* win, bool hideMessage);
 void FindTextOnThread(MainWindow* win, TextSearch::Direction direction, bool showProgress);
 void FindTextOnThread(MainWindow* win, TextSearch::Direction direction, Str text, bool wasModified, bool showProgress);
+
+struct DropDown;
+void RememberFindQuery(Str);
+void ApplyFindHistory(DropDown*);
+TempStr FindHistoryResultTemp(int* exitCodeOut);
 extern bool gIsStartup;
 extern StrVec gDdeOpenOnStartup;

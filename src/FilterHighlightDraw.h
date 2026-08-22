@@ -2,12 +2,20 @@
    License: Simplified BSD (see COPYING.BSD) */
 
 struct StrVec;
+struct Gfx;
+struct PlatformFont;
+
+#include "FilterUtil.h"
 
 template <typename T>
-class Vec;
+struct Vec;
 
-void DrawMaybeHighlightedText(HDC hdc, RECT rc, Str text, const StrVec& filterWords, Vec<u8>& highlighted,
-                              COLORREF colBg, bool isRtl, bool matchWholeWord, uint drawFmt);
+void DrawMaybeHighlightedText(Gfx* gfx, Rect rc, Str text, const StrVec& filterWords, Vec<u8>& highlighted, Color colBg,
+                              bool isRtl, bool matchWholeWord, u32 drawFlags, PlatformFont* font,
+                              Color colText = kColorUnset);
 
-void SplitFilterToWords(Str filter, StrVec& words);
-bool FilterMatches(Str str, const StrVec& words);
+void DrawTreeItemFilterHighlight(Gfx* gfx, Rect labelRect, Str text, const StrVec& filterWords, Color bgCol,
+                                 Color txtCol, PlatformFont* font);
+
+void ResolveTreeFilterItemColors(HDC hdc, Rect itemRc, Color treeBg, Color treeTxt, bool isSelected, bool hasFocus,
+                                 Color* bgOut, Color* txtOut);

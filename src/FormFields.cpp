@@ -3,21 +3,25 @@
 
 #include "base/Base.h"
 #include "base/Win.h"
-#include "base/Dpi.h"
+#include "gui/Dpi.h"
 
 #include <mupdf/pdf.h>
 
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
+#include "gui/Gfx.h"
 
 #include "Settings.h"
+#include "GlobalPrefs.h"
 #include "DocController.h"
 #include "EngineBase.h"
+#include "base/GuessFileType.h"
 #include "EngineAll.h"
 #include "DisplayModel.h"
 #include "MainWindow.h"
 #include "Annotation.h"
 #include "SumatraPDF.h"
 #include "Toolbar.h"
+#include "SumatraDialogs.h"
 #include "FormFields.h"
 #include "RenderCache.h"
 
@@ -36,10 +40,62 @@ static ActiveFormEdit gEdit;
 static WNDPROC gDefCtrlProc = nullptr;
 static bool gCommitting = false;
 
+// True while a form field is being edited in place.
 bool IsFormFieldEditActive() {
     return gEdit.hwnd != nullptr;
 }
 
+// Acrobat / Chrome pale blue, translucent so the page still shows through.
+constexpr Color kFormFieldHighlightCol = MkRgb(166, 202, 240);
+constexpr u8 kFormFieldHighlightAlpha = 96;
+
+// Tint empty fillable fields so they are visible without hovering (issue #5966).
+void PaintFormFieldHighlights(MainWindow* win, Gfx* gfx) {
+    if (!gGlobalPrefs || !gGlobalPrefs->highlightFormFields || !gfx) {
+        return;
+    }
+    if (!win || !win->IsDocLoaded()) {
+        return;
+    }
+    DisplayModel* dm = win->AsFixed();
+    if (!dm) {
+        return;
+    }
+    EngineBase* engine = dm->GetEngine();
+    if (!EngineMupdfIsPdf(engine)) {
+        return;
+    }
+    Vec<Rect> screenRects;
+    int pageCount = dm->PageCount();
+    for (int pageNo = 1; pageNo <= pageCount; pageNo++) {
+        PageInfo* pi = dm->GetPageInfo(pageNo);
+        if (!pi || !pi->isShown || pi->visibleRatio == 0) {
+            continue;
+        }
+        Vec<RectF> pageRects;
+        EngineMupdfGetFormFieldHighlightRects(engine, pageNo, gEdit.widget, pageRects);
+        for (RectF& pr : pageRects) {
+            Rect rc = dm->CvtToScreen(pageNo, pr);
+            if (!rc.IsEmpty()) {
+                screenRects.Append(rc);
+            }
+        }
+    }
+    if (len(screenRects) > 0) {
+        gfx->FillRects(screenRects.els, len(screenRects), kFormFieldHighlightCol, kFormFieldHighlightAlpha);
+    }
+}
+
+// Cancel the active form edit if it is for this widget (no save). Safe no-op
+// when no edit is active or the widget does not match.
+void CancelFormFieldEditIfWidget(Annotation* widget) {
+    if (!widget || !gEdit.hwnd || gEdit.widget != widget) {
+        return;
+    }
+    CommitFormFieldEdit(false);
+}
+
+// Commit (save=true) or cancel (save=false) the active form-field edit, if any.
 void CommitFormFieldEdit(bool save) {
     if (!gEdit.hwnd || gCommitting) {
         return;
@@ -54,13 +110,11 @@ void CommitFormFieldEdit(bool save) {
     Str text;
     if (save) {
         if (isChoice) {
-            int sel = (int)SendMessageW(h, LB_GETCURSEL, 0, 0);
+            int sel = LbGetCurrentSelection(h);
             if (sel < 0) {
                 save = false; // nothing selected
             } else {
-                int len = (int)SendMessageW(h, LB_GETTEXTLEN, sel, 0);
-                TempWStr buf = AllocArrayTemp<WCHAR>((size_t)len + 1);
-                SendMessageW(h, LB_GETTEXT, sel, (LPARAM)buf.s);
+                TempWStr buf = LbGetTextTemp(h, sel);
                 text = ToUtf8Temp(buf);
             }
         } else {
@@ -125,7 +179,9 @@ static LRESULT CALLBACK WndProcFormCtrl(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
                 MainWindow* win = gEdit.win;
                 CommitFormFieldEdit(true);
                 DisplayModel* dm = win ? win->AsFixed() : nullptr;
-                if (dm && cur) {
+                // cur may be dead if commit triggered a document reload; only
+                // walk to the next field when the widget is still live.
+                if (dm && AnnotationIsLive(cur)) {
                     Annotation* next = EngineMupdfGetAdjacentWidget(dm->GetEngine(), cur, !back);
                     if (next) {
                         StartFormFieldEdit(win, next);
@@ -192,7 +248,7 @@ static bool StartTextEdit(MainWindow* win, Annotation* widget, Rect rc, int flag
     }
     HFONT font = MakeFieldFont(FieldFontPx(widget, rc));
     SetWindowFont(hEdit, font, TRUE);
-    int margin = DpiScale(win->hwndCanvas, 2);
+    int margin = DpiScale(2);
     SendMessageW(hEdit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(margin, margin));
     int maxLen = GetWidgetMaxLen(widget); // comb / limited fields (e.g. SSN)
     if (maxLen > 0) {
@@ -223,12 +279,12 @@ static bool StartChoiceEdit(MainWindow* win, Annotation* widget, Rect rc) {
         return false;
     }
     int fontPx = FieldFontPx(widget, rc);
-    int itemDy = fontPx + DpiScale(win->hwndCanvas, 6);
+    int itemDy = fontPx + DpiScale(6);
     int visN = std::min(n, 8);
-    int listDy = visN * itemDy + DpiScale(win->hwndCanvas, 4);
-    int listDx = std::max(rc.dx, DpiScale(win->hwndCanvas, 120));
+    int listDy = (visN * itemDy) + DpiScale(4);
+    int listDx = std::max(rc.dx, DpiScale(120));
     // drop down just below the field, or above if it would fall off the canvas
-    Rect canvasRc = ClientRect(win->hwndCanvas);
+    Rect canvasRc = HwndClientRect(win->hwndCanvas);
     int x = rc.x;
     int y = rc.y + rc.dy;
     if (y + listDy > canvasRc.dy && rc.y - listDy >= 0) {
@@ -243,18 +299,18 @@ static bool StartChoiceEdit(MainWindow* win, Annotation* widget, Rect rc) {
     }
     HFONT font = MakeFieldFont(fontPx);
     SetWindowFont(hLb, font, TRUE);
-    SendMessageW(hLb, LB_SETITEMHEIGHT, 0, (LPARAM)itemDy);
+    LbSetItemHeight(hLb, 0, itemDy);
 
     Str cur = GetWidgetValue(widget);
     int curIdx = -1;
     for (int i = 0; i < n; i++) {
-        Str o = opts.At(i);
-        SendMessageW(hLb, LB_ADDSTRING, 0, (LPARAM)CWStrTemp(o));
+        Str o = opts[i];
+        LbAddString(hLb, o);
         if (curIdx < 0 && str::Eq(o, cur)) {
             curIdx = i;
         }
     }
-    SendMessageW(hLb, LB_SETCURSEL, (WPARAM)curIdx, 0);
+    LbSetCurrentSelection(hLb, curIdx);
 
     gDefCtrlProc = (WNDPROC)GetWindowLongPtrW(hLb, GWLP_WNDPROC);
     SetWindowLongPtrW(hLb, GWLP_WNDPROC, (LONG_PTR)WndProcFormCtrl);
@@ -270,8 +326,39 @@ static bool StartChoiceEdit(MainWindow* win, Annotation* widget, Rect rc) {
     return true;
 }
 
+// Start editing a text form field in place (floats an edit box over the field).
+// Returns false if `widget` isn't an editable (non-read-only) text widget.
+// Clicking a signature field the document's author left unsigned opens Sign
+// Document with that field selected. Signed fields are left alone (clicking one
+// shouldn't offer to overwrite it), and so is everything else (issue #5964).
+bool StartSignatureFieldSigning(MainWindow* win, Annotation* widget) {
+    if (!win || !AnnotationIsLive(widget)) {
+        return false;
+    }
+    if (GetWidgetType(widget) != PDF_WIDGET_TYPE_SIGNATURE) {
+        return false;
+    }
+    if (GetWidgetFieldFlags(widget) & PDF_FIELD_IS_READ_ONLY) {
+        return false;
+    }
+    // signing rewrites the PDF, so it needs the same engine support annotations
+    // do - and the same gate that decides whether the Sign Document command is
+    // shown at all, so a click can't reach a dialog the menu is hiding
+    DisplayModel* dm = win->AsFixed();
+    if (!dm || !EngineSupportsAnnotations(dm->GetEngine()) || win->isFullScreen) {
+        return false;
+    }
+    TempStr fieldName;
+    if (!IsUnsignedSignatureWidget(widget, &fieldName)) {
+        return false;
+    }
+    CommitFormFieldEdit(true); // don't leave an in-place edit hanging
+    ShowSignDocumentDialog(win, fieldName, true);
+    return true;
+}
+
 bool StartFormFieldEdit(MainWindow* win, Annotation* widget) {
-    if (!win || !widget) {
+    if (!win || !AnnotationIsLive(widget)) {
         return false;
     }
     int wt = GetWidgetType(widget);

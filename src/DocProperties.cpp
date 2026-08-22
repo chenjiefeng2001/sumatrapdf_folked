@@ -5,127 +5,160 @@
 
 #include "DocProperties.h"
 
-Str kPropTitle = StrL("title");
-Str kPropAuthor = StrL("author");
-Str kPropCopyright = StrL("copyright");
-Str kPropSubject = StrL("subject");
-Str kPropCreationDate = StrL("creationDate");
-Str kPropModificationDate = StrL("modDate");
-Str kPropCreatorApp = StrL("creatorApp");
-Str kPropUnsupportedFeatures = StrL("unsupportedFeatures");
-Str kPropFontList = StrL("fontList");
-Str kPropPdfVersion = StrL("pdfVersion");
-Str kPropPdfProducer = StrL("pdfProducer");
-Str kPropPdfFileStructure = StrL("pdfFileStructure");
-Str kPropFiles = StrL("files");
-Str kPropKeywords = StrL("keywords");
-Str kPropEncryption = StrL("encryption");
-Str kPropSignatures = StrL("signatures");
-Str kPropImageSize = StrL("imageSize");
-Str kPropDpi = StrL("dpi");
-Str kPropComment = StrL("comment");
-Str kPropCameraMake = StrL("cameraMake");
-Str kPropCameraModel = StrL("cameraModel");
-Str kPropDateOriginal = StrL("dateOriginal");
-Str kPropExposureTime = StrL("exposureTime");
-Str kPropFNumber = StrL("fNumber");
-Str kPropIsoSpeed = StrL("isoSpeed");
-Str kPropFocalLength = StrL("focalLength");
-Str kPropFocalLength35mm = StrL("focalLength35mm");
-Str kPropFlash = StrL("flash");
-Str kPropOrientation = StrL("orientation");
-Str kPropExposureProgram = StrL("exposureProgram");
-Str kPropMeteringMode = StrL("meteringMode");
-Str kPropWhiteBalance = StrL("whiteBalance");
-Str kPropExposureBias = StrL("exposureBias");
-Str kPropBitsPerSample = StrL("bitsPerSample");
-Str kPropResolutionUnit = StrL("resolutionUnit");
-Str kPropSoftware = StrL("software");
-Str kPropDateTime = StrL("dateTime");
-Str kPropYCbCrPositioning = StrL("yCbCrPositioning");
-Str kPropExifVersion = StrL("exifVersion");
-Str kPropDateTimeDigitized = StrL("dateTimeDigitized");
-Str kPropComponentsConfig = StrL("componentsConfig");
-Str kPropCompressedBpp = StrL("compressedBpp");
-Str kPropMaxAperture = StrL("maxAperture");
-Str kPropLightSource = StrL("lightSource");
-Str kPropUserComment = StrL("userComment");
-Str kPropFlashpixVersion = StrL("flashpixVersion");
-Str kPropColorSpace = StrL("colorSpace");
-Str kPropPixelXDimension = StrL("pixelXDimension");
-Str kPropPixelYDimension = StrL("pixelYDimension");
-Str kPropFileSource = StrL("fileSource");
-Str kPropSceneType = StrL("sceneType");
-Str kPropImageFileSize = StrL("imageFileSize");
-Str kPropImagePath = StrL("imagePath");
+static SeqStrings gPropNames =
+    "title\0"
+    "author\0"
+    "copyright\0"
+    "subject\0"
+    "creationDate\0"
+    "modDate\0"
+    "creatorApp\0"
+    "unsupportedFeatures\0"
+    "fontList\0"
+    "pdfVersion\0"
+    "pdfProducer\0"
+    "pdfFileStructure\0"
+    "files\0"
+    "keywords\0"
+    "encryption\0"
+    "signatures\0"
+    "imageSize\0"
+    "dpi\0"
+    "comment\0"
+    "cameraMake\0"
+    "cameraModel\0"
+    "dateOriginal\0"
+    "exposureTime\0"
+    "fNumber\0"
+    "isoSpeed\0"
+    "focalLength\0"
+    "focalLength35mm\0"
+    "flash\0"
+    "orientation\0"
+    "exposureProgram\0"
+    "meteringMode\0"
+    "whiteBalance\0"
+    "exposureBias\0"
+    "bitsPerSample\0"
+    "resolutionUnit\0"
+    "software\0"
+    "dateTime\0"
+    "yCbCrPositioning\0"
+    "exifVersion\0"
+    "dateTimeDigitized\0"
+    "componentsConfig\0"
+    "compressedBpp\0"
+    "maxAperture\0"
+    "lightSource\0"
+    "userComment\0"
+    "flashpixVersion\0"
+    "colorSpace\0"
+    "pixelXDimension\0"
+    "pixelYDimension\0"
+    "fileSource\0"
+    "sceneType\0"
+    "imageFileSize\0"
+    "imagePath\0"
+    "\0";
 
 // clang-format off
-Str gAllProps[] = {
-     kPropTitle,
-     kPropAuthor,
-     kPropCopyright,
-     kPropSubject,
-     kPropCreationDate,
-     kPropModificationDate,
-     kPropCreatorApp,
-     kPropUnsupportedFeatures,
-     kPropFontList,
-     kPropPdfVersion,
-     kPropPdfProducer,
-     kPropPdfFileStructure,
-     Str(),
+DocProp gAllProps[] = {
+    DocProp::Title,
+    DocProp::Author,
+    DocProp::Copyright,
+    DocProp::Subject,
+    DocProp::CreationDate,
+    DocProp::ModificationDate,
+    DocProp::CreatorApp,
+    DocProp::UnsupportedFeatures,
+    DocProp::FontList,
+    DocProp::PdfVersion,
+    DocProp::PdfProducer,
+    DocProp::PdfFileStructure,
+    DocProp::None,
 };
-// clang-format off
+// clang-format on
 
 int PropsCount(const Props& props) {
     int n = len(props);
-    ReportIf(n < 0 || (n % 2) != 0);
-    return n / 2;
+    ReportIf(n < 0);
+    return n;
 }
 
-int GetPropIdx(const Props& props, Str name) {
+int GetPropIdx(const Props& props, DocProp prop) {
     int n = PropsCount(props);
     for (int i = 0; i < n; i++) {
-        int idx = i * 2;
-        if (str::Eq(props.At(idx), name)) {
-            return idx;
+        if (props[i].prop == prop) {
+            return i;
         }
     }
     return -1;
 }
 
-Str GetPropValueTemp(const Props& props, Str name) {
-    int idx = GetPropIdx(props, name);
+Str GetPropValueTemp(const Props& props, DocProp prop) {
+    int idx = GetPropIdx(props, prop);
     if (idx < 0) {
         return {};
     }
-    return props.At(idx + 1);
+    return props[idx].val;
 }
 
-void AddProp(Props& props, Str name, Str val, bool replaceIfExists) {
-    ReportIf(!name || !val);
-    int idx = GetPropIdx(props, name);
+void AddProp(Props& props, DocProp prop, Str val, bool replaceIfExists) {
+    ReportIf(prop == DocProp::None || !val);
+    int idx = GetPropIdx(props, prop);
     if (idx < 0) {
         // doesn't exsit
-        props.Append(name);
-        props.Append(val);
+        props.Append({prop, val});
         return;
     }
     if (!replaceIfExists) {
         return;
     }
-    props.SetAt(idx + 1, val);
+    props[idx].val = val;
 }
 
-// strings are pairs of str1, str2 laid in sequence, with empty Str to mark the end
-// we find str1 matching s and return str2 or empty Str if not found
-Str GetMatchingString(const Str* strings, Str s) {
-    while (*strings) {
-        Str str1 = *strings++;
-        Str str2 = *strings++;
-        if (str1.s == s.s || str::Eq(str1, s)) {
-            return str2;
-        }
+// like AddProp but stores an owned (heap) copy of val. Use when props must
+// outlive the buffer val points into (e.g. the temp arena). Free with FreeProps.
+void AddPropOwned(Props& props, DocProp prop, Str val, bool replaceIfExists) {
+    if (!val) {
+        return;
     }
-    return {};
+    int idx = GetPropIdx(props, prop);
+    if (idx >= 0 && !replaceIfExists) {
+        return;
+    }
+    Str owned = str::Dup(val);
+    if (idx < 0) {
+        props.Append({prop, owned});
+        return;
+    }
+    str::Free(props[idx].val);
+    props[idx].val = owned;
+}
+
+// frees values stored by AddPropOwned and empties props
+void FreeProps(Props& props) {
+    int n = PropsCount(props);
+    for (int i = 0; i < n; i++) {
+        str::Free(props[i].val);
+    }
+    props.Reset();
+}
+
+// gPropNames lists the names in DocProp order, so DocProp::Title (value 1) is
+// the first name (index 0); the value is index + 1.
+TempStr PropNameTemp(DocProp prop) {
+    int idx = (int)prop - 1;
+    if (idx < 0) {
+        return {};
+    }
+    return SeqStrByIndex(gPropNames, idx);
+}
+
+DocProp PropFromName(Str name) {
+    int idx = SeqStrIndex(gPropNames, name);
+    if (idx < 0) {
+        return DocProp::None;
+    }
+    return (DocProp)(idx + 1);
 }

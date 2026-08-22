@@ -8,8 +8,6 @@
 
 #include "HardwareProfile.h"
 
-#include "base/Log.h"
-
 // third-party hypervisor vendor strings reported by CPUID leaf 0
 // "Microsoft Hv" is deliberately NOT treated as a VM: Windows 11 enables
 // VBS/Hyper-V by default on bare metal, so it's not a reliable VM indicator.

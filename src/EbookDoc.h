@@ -3,37 +3,45 @@
 
 class GumboHtmlParser;
 struct HtmlToken;
+struct PropValue;
+enum class DocProp : u8;
+enum class FileType : u8;
 
 struct ImageData {
     Str base;
     // path by which content refers to this image
     Str fileName;
     // document specific id by whcih to find this image
-    size_t fileId{0};
+    int fileId{0};
 };
 
 TempStr NormalizeURLTemp(Str url, Str base);
+#if defined(DEBUG)
+bool EbookDoc_UnitTestNormalizeURL();
+#endif
 
 /* ********** EPUB ********** */
 
 struct EpubDoc {
-    MultiFormatArchive* archive = nullptr;
+    Archive* archive = nullptr;
     // zip and images are the only mutable members of EpubDoc after initialization;
     // access to them must be serialized for multi-threaded users
-    CRITICAL_SECTION zipAccess;
+    Mutex zipAccess;
 
     str::Builder htmlData;
     Vec<ImageData> images;
     Str tocPath;
     Str fileName;
-    Props props;
+    Vec<PropValue> props;
     bool isNcxToc = false;
     bool isRtlDoc = false;
+    // the spine carried page-progression-direction, whatever its value. A
+    // document that says "ltr" has still said something
+    bool hasReadingDir = false;
 
     bool Load();
 
     explicit EpubDoc(Str fileName);
-    explicit EpubDoc(IStream* stream);
     ~EpubDoc();
 
     Str GetHtmlData() const;
@@ -41,17 +49,18 @@ struct EpubDoc {
     Str GetImageData(Str fileName, Str pagePath);
     Str GetFileData(Str relPath, Str pagePath);
 
-    TempStr GetPropertyTemp(Str name) const;
+    TempStr GetPropertyTemp(DocProp prop) const;
     Str GetFileName() const;
     bool IsRTL() const;
+    bool HasReadingDirection() const;
 
     bool HasToc() const;
     bool ParseToc(EbookTocVisitor* visitor);
 
-    static bool IsSupportedFileType(Kind kind);
+    static bool IsSupportedFileType(FileType kind);
 
     static EpubDoc* CreateFromFile(Str path);
-    static EpubDoc* CreateFromStream(IStream* stream);
+    static EpubDoc* CreateFromData(Str data);
 };
 
 /* ********** FictionBook (FB2) ********** */
@@ -60,20 +69,18 @@ struct EpubDoc {
 
 struct Fb2Doc {
     Str fileName;
-    IStream* stream = nullptr;
 
     str::Builder xmlData;
     Vec<ImageData> images;
     Str coverImage;
-    Props props;
+    Vec<PropValue> props;
     bool isZipped = false;
     bool hasToc = false;
 
-    bool Load();
+    bool Load(Str data = {});
     void ExtractImage(GumboHtmlParser* parser, HtmlToken* tok);
 
     explicit Fb2Doc(Str fileName);
-    explicit Fb2Doc(IStream* stream);
     ~Fb2Doc();
 
     Str GetXmlData() const;
@@ -81,17 +88,17 @@ struct Fb2Doc {
     Str GetImageData(Str fileName) const;
     Str GetCoverImage() const;
 
-    TempStr GetPropertyTemp(Str name) const;
+    TempStr GetPropertyTemp(DocProp prop) const;
     Str GetFileName() const;
     bool IsZipped() const;
 
     bool HasToc() const;
     bool ParseToc(EbookTocVisitor* visitor) const;
 
-    static bool IsSupportedFileType(Kind kind);
+    static bool IsSupportedFileType(FileType kind);
 
     static Fb2Doc* CreateFromFile(Str path);
-    static Fb2Doc* CreateFromStream(IStream* stream);
+    static Fb2Doc* CreateFromData(Str data);
 };
 
 /* ********** PalmDOC (and TealDoc) ********** */
@@ -110,13 +117,13 @@ struct PalmDoc {
 
     Str GetHtmlData() const;
 
-    TempStr GetPropertyTemp(Str name) const;
+    TempStr GetPropertyTemp(DocProp prop) const;
     Str GetFileName() const;
 
     bool HasToc() const;
     bool ParseToc(EbookTocVisitor* visitor);
 
-    static bool IsSupportedFileType(Kind kind);
+    static bool IsSupportedFileType(FileType kind);
     static PalmDoc* CreateFromFile(Str path);
 };
 
@@ -127,7 +134,7 @@ struct HtmlDoc {
     Str htmlData;
     Str pagePath;
     Vec<ImageData> images;
-    Props props;
+    Vec<PropValue> props;
 
     bool Load();
     Str LoadURL(Str url);
@@ -140,11 +147,11 @@ struct HtmlDoc {
     Str GetImageData(Str fileName);
     Str GetFileData(Str relPath);
 
-    TempStr GetPropertyTemp(Str name) const;
+    TempStr GetPropertyTemp(DocProp prop) const;
     Str GetFileName() const;
 
-    static bool IsSupportedFileType(Kind kind);
-    static HtmlDoc* CreateFromFile(Str fileName);
+    static bool IsSupportedFileType(FileType kind);
+    static HtmlDoc* CreateFromFile(Str path);
 };
 
 /* ********** Plain Text (and RFCs and TCR) ********** */
@@ -161,13 +168,21 @@ struct TxtDoc {
 
     Str GetHtmlData() const;
 
-    TempStr GetPropertyTemp(Str name) const;
+    TempStr GetPropertyTemp(DocProp prop) const;
     Str GetFileName() const;
 
     bool IsRFC() const;
     bool HasToc() const;
     bool ParseToc(EbookTocVisitor* visitor);
 
-    static bool IsSupportedFileType(Kind kind);
-    static TxtDoc* CreateFromFile(Str fileName);
+    static bool IsSupportedFileType(FileType kind);
+    static TxtDoc* CreateFromFile(Str path);
 };
+
+// The reading direction an EPUB declares on its spine, without building a whole
+// EpubDoc. EPUBs are rendered by EngineMupdf, which doesn't parse it (#1264).
+struct EpubReadingDirection {
+    bool declared = false;
+    bool rtl = false;
+};
+EpubReadingDirection EpubGetReadingDirection(Str path);

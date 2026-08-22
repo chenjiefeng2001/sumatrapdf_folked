@@ -6,54 +6,60 @@
 #include "AppTools.h"
 
 #include "base/File.h"
-#include "base/Win.h"
-#include "base/ScopedWin.h"
 
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
+#include "gui/Layout.h"
 
 #include "Settings.h"
 #include "DocController.h"
+#include "DocProperties.h"
 #include "EngineBase.h"
 #include "GlobalPrefs.h"
 #include "Flags.h"
 #include "Commands.h"
 
-#include <float.h>
-#include <math.h>
-
 // must be last to over-write assert()
 #include "base/UtAssert.h"
 
-#define utassert_fequal(a, b) utassert(fabs(a - b) < FLT_EPSILON);
+#define utassert_fequal(a, b) utassert(fabs((a) - (b)) < FLT_EPSILON);
 
+#if defined(DEBUG)
+void PageRenderPolicy_UnitTests();
+void CommandPaletteModel_UnitTests();
+#if OS_LINUX
+void FileWatcher_UnitTests();
+#endif
+#endif
+
+#if OS_WIN
 static void ParseCommandLineTest() {
     {
         Flags i;
         ParseFlags(GetPermArena(), L"SumatraPDF.exe -bench foo.pdf", i);
         utassert(2 == len(i.pathsToBenchmark));
-        utassert(str::Eq("foo.pdf", i.pathsToBenchmark.At(0)));
-        utassert(str::IsEmpty(i.pathsToBenchmark.At(1)));
+        utassert(str::Eq("foo.pdf", i.pathsToBenchmark[0]));
+        utassert(len(i.pathsToBenchmark[1]) == 0);
     }
 
     {
         Flags i;
         ParseFlags(GetPermArena(), L"SumatraPDF.exe -bench foo.pdf -fwdsearch-width 5", i);
         utassert(len(i.globalPrefArgs) == 2);
-        Str s = i.globalPrefArgs.At(0);
-        utassert(str::Eq(s, "-fwdsearch-width"));
-        s = i.globalPrefArgs.At(1);
-        utassert(str::Eq(s, "5"));
+        Str s = i.globalPrefArgs[0];
+        utassert(str::Eq(s, StrL("-fwdsearch-width")));
+        s = i.globalPrefArgs[1];
+        utassert(str::Eq(s, StrL("5")));
         utassert(2 == len(i.pathsToBenchmark));
-        utassert(str::Eq("foo.pdf", i.pathsToBenchmark.At(0)));
-        utassert(str::IsEmpty(i.pathsToBenchmark.At(1)));
+        utassert(str::Eq("foo.pdf", i.pathsToBenchmark[0]));
+        utassert(len(i.pathsToBenchmark[1]) == 0);
     }
 
     {
         Flags i;
         ParseFlags(GetPermArena(), L"SumatraPDF.exe -bench bar.pdf loadonly", i);
         utassert(2 == len(i.pathsToBenchmark));
-        utassert(str::Eq("bar.pdf", i.pathsToBenchmark.At(0)));
-        utassert(str::Eq("loadonly", i.pathsToBenchmark.At(1)));
+        utassert(str::Eq("bar.pdf", i.pathsToBenchmark[0]));
+        utassert(str::Eq("loadonly", i.pathsToBenchmark[1]));
     }
 
     {
@@ -61,18 +67,18 @@ static void ParseCommandLineTest() {
         ParseFlags(GetPermArena(), L"SumatraPDF.exe -bench bar.pdf 1 -set-color-range 0x123456 #abCDef", i);
         utassert(len(i.globalPrefArgs) == 3);
         utassert(2 == len(i.pathsToBenchmark));
-        utassert(str::Eq("bar.pdf", i.pathsToBenchmark.At(0)));
-        utassert(str::Eq("1", i.pathsToBenchmark.At(1)));
+        utassert(str::Eq("bar.pdf", i.pathsToBenchmark[0]));
+        utassert(str::Eq("1", i.pathsToBenchmark[1]));
     }
 
     {
         Flags i;
         ParseFlags(GetPermArena(), L"SumatraPDF.exe -bench bar.pdf 1-5,3   -bench some.pdf 1,3,8-34", i);
         utassert(4 == len(i.pathsToBenchmark));
-        utassert(str::Eq("bar.pdf", i.pathsToBenchmark.At(0)));
-        utassert(str::Eq("1-5,3", i.pathsToBenchmark.At(1)));
-        utassert(str::Eq("some.pdf", i.pathsToBenchmark.At(2)));
-        utassert(str::Eq("1,3,8-34", i.pathsToBenchmark.At(3)));
+        utassert(str::Eq("bar.pdf", i.pathsToBenchmark[0]));
+        utassert(str::Eq("1-5,3", i.pathsToBenchmark[1]));
+        utassert(str::Eq("some.pdf", i.pathsToBenchmark[2]));
+        utassert(str::Eq("1,3,8-34", i.pathsToBenchmark[3]));
     }
 
     {
@@ -137,6 +143,7 @@ static void ParseCommandLineTest() {
         utassert(0 == len(i.fileNames));
     }
 }
+#endif
 
 static void BenchRangeTest() {
     utassert(IsBenchPagesInfo("1"));
@@ -177,32 +184,31 @@ static void hexstrTest() {
     u8 buf[6] = {1, 2, 33, 255, 0, 18};
     u8 buf2[6]{};
     TempStr s = str::MemToHexTemp(Str((const char*)buf, dimofi(buf)));
-    utassert(str::Eq(s, "010221ff0012"));
+    utassert(str::Eq(s, StrL("010221ff0012")));
     bool ok = str::HexToMem(s, Str((char*)buf2, dimofi(buf2)));
     utassert(ok);
-    utassert(memeq(buf, buf2, dimofi(buf)));
+    utassert(MemEq(buf, buf2, dimofi(buf)));
 
-    FILETIME ft1, ft2;
-    GetSystemTimeAsFileTime(&ft1);
-    s = str::MemToHexTemp(Str((const char*)&ft1, (int)sizeof(ft1)));
-    str::HexToMem(s, Str((char*)&ft2, (int)sizeof(ft2)));
+    FILETIME ft1{123, 456}, ft2;
+    s = str::MemToHexTemp(Str((const char*)&ft1, sizeofi(ft1)));
+    str::HexToMem(s, Str((char*)&ft2, sizeofi(ft2)));
     DWORD diff = FileTimeDiffInSecs(ft1, ft2);
     utassert(0 == diff);
     utassert(FileTimeEq(ft1, ft2));
 
     s = str::MemToHexTemp(Str());
-    utassert(str::Eq(s, ""));
+    utassert(str::Eq(s, StrL("")));
     ok = str::HexToMem(s, Str());
     utassert(ok);
 }
 
-static void assertSerializedColor(COLORREF c, Str s) {
+static void assertSerializedColor(Color c, Str s) {
     TempStr s2 = SerializeColorTemp(c);
     utassert(str::Eq(s2, s));
 }
 
 static void colorTest() {
-    COLORREF c = 0;
+    Color c = 0;
     bool ok = ParseColor(&c, "0x01020304");
     utassert(ok);
     assertSerializedColor(c, "#01020304");
@@ -211,11 +217,11 @@ static void colorTest() {
     utassert(ok);
     assertSerializedColor(c, "#01020304");
 
-    COLORREF c2 = MkColor(2, 3, 4, 1);
+    Color c2 = MkRgba(2, 3, 4, 1);
     assertSerializedColor(c2, "#01020304");
     utassert(c == c2);
 
-    c2 = MkColor(5, 7, 6, 8);
+    c2 = MkRgba(5, 7, 6, 8);
     assertSerializedColor(c2, "#08050706");
     ok = ParseColor(&c, "#08050706");
     utassert(ok);
@@ -223,17 +229,17 @@ static void colorTest() {
 }
 
 static void assertGoToNextPage3(int cmdId) {
-    auto cmd = FindCustomCommand(cmdId);
+    auto* cmd = FindCustomCommand(cmdId);
     utassert(cmd->origId == CmdGoToNextPage);
-    auto arg = GetCommandArg(cmd, kCmdArgN);
+    auto* arg = GetCommandArg(cmd, kCmdArgN);
     utassert(arg->intVal == 3);
 }
 
-void parseCommandsTest() {
+static void parseCommandsTest() {
     CommandArg* arg;
 
     {
-        auto cmd = CreateCommandFromDefinition(" CmdCreateAnnotHighlight   #00ff00 openEdit copytoclipboard");
+        auto* cmd = CreateCommandFromDefinition(" CmdCreateAnnotHighlight   #00ff00 openEdit copytoclipboard");
         utassert(cmd->origId == CmdCreateAnnotHighlight);
 
         arg = GetCommandArg(cmd, kCmdArgColor);
@@ -244,7 +250,7 @@ void parseCommandsTest() {
         utassert(GetCommandBoolArg(cmd, kCmdArgCopyToClipboard, false) == true);
     }
     {
-        auto cmd = CreateCommandFromDefinition(" CmdCreateAnnotHighlight   #00ff00 OpenEdit=yes");
+        auto* cmd = CreateCommandFromDefinition(" CmdCreateAnnotHighlight   #00ff00 OpenEdit=yes");
         utassert(cmd->origId == CmdCreateAnnotHighlight);
 
         utassert(GetCommandArg(cmd, kCmdArgColor) != nullptr);
@@ -253,28 +259,28 @@ void parseCommandsTest() {
     }
     {
         {
-            auto cmd = CreateCommandFromDefinition("CmdGoToNextPage 3");
+            auto* cmd = CreateCommandFromDefinition("CmdGoToNextPage 3");
             assertGoToNextPage3(cmd->id);
         }
         {
-            auto cmd = CreateCommandFromDefinition("CmdGoToNextPage n 3");
+            auto* cmd = CreateCommandFromDefinition("CmdGoToNextPage n 3");
             assertGoToNextPage3(cmd->id);
         }
         {
-            auto cmd = CreateCommandFromDefinition("CmdGoToNextPage n: 3");
+            auto* cmd = CreateCommandFromDefinition("CmdGoToNextPage n: 3");
             assertGoToNextPage3(cmd->id);
         }
         {
-            auto cmd = CreateCommandFromDefinition("CmdGoToNextPage n=3");
+            auto* cmd = CreateCommandFromDefinition("CmdGoToNextPage n=3");
             assertGoToNextPage3(cmd->id);
         }
     }
     {
         Str argStr = R"("C:\Program Files\FoxitReader\FoxitReader.exe" /A page=%p "%1)";
         Str s = str::JoinTemp(StrL("CmdExec   "), argStr);
-        auto cmd = CreateCommandFromDefinition(s);
+        auto* cmd = CreateCommandFromDefinition(s);
         utassert(cmd->origId == CmdExec);
-        auto cmd2 = FindCustomCommand(cmd->id);
+        auto* cmd2 = FindCustomCommand(cmd->id);
         utassert(cmd == cmd2);
         arg = GetCommandArg(cmd, kCmdArgExe);
         utassert(str::Eq(arg->strVal, argStr));
@@ -282,22 +288,48 @@ void parseCommandsTest() {
     {
         Str argStr = R"("C:\Program Files\FoxitReader\FoxitReader.exe" /A page=%p "%1)";
         Str s = str::JoinTemp(StrL("CmdExec  filter: *.jpeg "), argStr);
-        auto cmd = CreateCommandFromDefinition(s);
+        auto* cmd = CreateCommandFromDefinition(s);
         utassert(cmd->origId == CmdExec);
-        auto cmd2 = FindCustomCommand(cmd->id);
+        auto* cmd2 = FindCustomCommand(cmd->id);
         utassert(cmd == cmd2);
         arg = GetCommandArg(cmd, kCmdArgExe);
         utassert(str::Eq(arg->strVal, argStr));
         arg = GetCommandArg(cmd, kCmdArgFilter);
-        utassert(str::Eq(arg->strVal, "*.jpeg"));
+        utassert(str::Eq(arg->strVal, StrL("*.jpeg")));
     }
 }
 
+static void DocPropertiesTest() {
+    // gPropNames round-trips: first (Title=1), a middle one (FocalLength35mm=27)
+    // and the last property (ImagePath=53), both directions.
+    utassert(str::Eq(PropNameTemp(DocProp::Title), StrL("title")));
+    utassert(str::Eq(PropNameTemp(DocProp::FocalLength35mm), StrL("focalLength35mm")));
+    utassert(str::Eq(PropNameTemp(DocProp::ImagePath), StrL("imagePath")));
+    utassert(PropFromName("title") == DocProp::Title);
+    utassert(PropFromName("focalLength35mm") == DocProp::FocalLength35mm);
+    utassert(PropFromName("imagePath") == DocProp::ImagePath);
+    // a couple more, plus unknown/None
+    utassert(str::Eq(PropNameTemp(DocProp::CreationDate), StrL("creationDate")));
+    utassert(PropFromName("modDate") == DocProp::ModificationDate);
+    utassert(PropFromName("bogusPropName") == DocProp::None);
+}
+
 void SumatraPDF_UnitTests() {
+#if defined(DEBUG)
+    Layout_UnitTests();
+    PageRenderPolicy_UnitTests();
+    CommandPaletteModel_UnitTests();
+#if OS_LINUX
+    FileWatcher_UnitTests();
+#endif
+#endif
+    DocPropertiesTest();
     parseCommandsTest();
     colorTest();
     BenchRangeTest();
+#if OS_WIN
     ParseCommandLineTest();
+#endif
     versioncheck_test();
     hexstrTest();
 }

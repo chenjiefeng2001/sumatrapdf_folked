@@ -14,7 +14,7 @@
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { ControlCommand, runControlCommand } from "../cmd/control.ts";
+import { ControlCommand, runControlCommand } from "./control.ts";
 import { EXE, runStandalone } from "./util.ts";
 
 const PDF = join(import.meta.dir, "issue-annot-locking.pdf");
@@ -35,7 +35,7 @@ async function testSinglePageView(): Promise<void> {
 
 async function testToggleModeStress(): Promise<void> {
     // Rapid mode switch: open/close the file rapidly N times, each time
-    // exercising SetDisplayMode â†’ Relayout â†’ PageContentBox with annotations.
+    // exercising SetDisplayMode â†?Relayout â†?PageContentBox with annotations.
     //
     // This catches:
     //   - MuPDF cache corruption from concurrent RenderPage + PageContentBox
@@ -55,7 +55,7 @@ async function testToggleModeStress(): Promise<void> {
 }
 
 async function testTocAfterModeSwitch(): Promise<void> {
-    // Get TOC after display-mode switch exercises docLock Shared â†’ renderLock
+    // Get TOC after display-mode switch exercises docLock Shared â†?renderLock
     // consistency in the TOC resolution path.
     const res = await runControlCommand(EXE, ControlCommand.TestGetToc, [PDF]);
     const raw = String(res[0] ?? "").trim();
@@ -76,9 +76,9 @@ async function testDestAfterModeSwitch(): Promise<void> {
 
 async function testParallelRenderAndSwitch(): Promise<void> {
     // Launch parallel operations to stress lock ordering:
-    //   Path A: RenderPage (render thread)   â†’ pagesLock â†’ docLock Shared â†’ renderLock
-    //   Path B: PageContentBox / Relayout (UI) â†’ docLock Shared â†’ renderLock
-    //   Path C: GetToc / Dest / Search       â†’ docLock Shared â†’ renderLock
+    //   Path A: RenderPage (render thread)   â†?pagesLock â†?docLock Shared â†?renderLock
+    //   Path B: PageContentBox / Relayout (UI) â†?docLock Shared â†?renderLock
+    //   Path C: GetToc / Dest / Search       â†?docLock Shared â†?renderLock
     //
     // If lock ordering is violated this will deadlock or crash.
     console.log("  Parallel render + TOC + dest stress...");

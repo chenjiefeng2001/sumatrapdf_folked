@@ -11,11 +11,10 @@
 //
 // Run:  bun tests/issue-annot-cache.ts [--no-build]
 //
-// prompt: 使用标注功能之后页面渲染会崩溃
-
+// prompt: 使用标注功能之后页面渲染会崩�?
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { ControlCommand, runControlCommand } from "../cmd/control.ts";
+import { ControlCommand, runControlCommand } from "./control.ts";
 import { EXE, runStandalone } from "./util.ts";
 
 const PDF = join(import.meta.dir, "issue-annot-cache.pdf");
@@ -72,7 +71,7 @@ export async function testit(): Promise<void> {
 
     // Test 2: Multiple render cycles to stress the RenderCache
     // Each TestPageLinks call opens the file, renders, and closes.
-    // This exercises the full render lifecycle (create displayList → cache tiles → lookup + display).
+    // This exercises the full render lifecycle (create displayList �?cache tiles �?lookup + display).
     console.log(`\nTest 2: ${RENDER_LOOPS} open/render/close cycles (stress RenderCache lifecycle)`);
     for (let i = 0; i < RENDER_LOOPS; i++) {
         await testRenderAllPages(`Test 2 cycle ${i + 1}`);

@@ -7,12 +7,12 @@
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { runStandalone, tmpPath } from "./util.ts";
-import { launchSumatra, waitForFrame, sendCommand } from "./win-automation.ts";
+import { cmdId, runStandalone, tmpPath } from "./util.ts";
+import { launchSumatra, waitForFrame, sendCommand, killAndWait } from "./win-automation.ts";
 import { sleep, enumWindows, getWindowPid, captureWindowToPng, getClassName } from "./winapi.ts";
 
-const CmdFindFirst = 266;
-const CmdFindToggleMatchWholeWord = 445;
+const CmdFindFirst = cmdId("CmdFindFirst");
+const CmdFindToggleMatchWholeWord = cmdId("CmdFindToggleMatchWholeWord");
 
 const PDF = join(import.meta.dir, "issue-5597.pdf");
 
@@ -71,8 +71,7 @@ export async function testit(): Promise<void> {
 
     console.log("PASS: find bar shown and whole-word command toggled without crashing");
   } finally {
-    proc.kill();
-    await sleep(300);
+    await killAndWait(proc);
   }
 }
 

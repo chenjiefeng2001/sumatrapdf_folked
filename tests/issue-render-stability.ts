@@ -14,7 +14,7 @@
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { ControlCommand, runControlCommand } from "../cmd/control.ts";
+import { ControlCommand, runControlCommand } from "./control.ts";
 import { EXE, runStandalone } from "./util.ts";
 
 const PDF = join(import.meta.dir, "issue-render-stability.pdf");

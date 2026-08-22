@@ -25,7 +25,7 @@ function pmglEntry(path: string, space: number, start: number, length: number): 
   return [...encodeCword(bytes.length), ...bytes, ...encodeCword(space), ...encodeCword(start), ...encodeCword(length)];
 }
 
-// LZX bitstream writer matching ext/CHMLib/lzx.c READ_BITS (32-bit buffer, 16-bit input words LE).
+// LZX bitstream writer matching the LZX decoder in ext/chmdec/chm.c READ_BITS (32-bit buffer, 16-bit input words LE).
 class LzxBitWriter {
   private bits: number[] = [];
 
@@ -121,8 +121,8 @@ function buildChm(): Uint8Array {
   new DataView(rt.buffer).setBigUint64(0x28, BigInt(compressedLen), true);
 
   const systemData = new Uint8Array([
-    0x02, 0x00, 0x0a, 0x00, 0x2f, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64,
-    0x02, 0x00, 0x05, 0x00, 0x74, 0x65, 0x73, 0x74, 0x73,
+    0x02, 0x00, 0x0a, 0x00, 0x2f, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64, 0x02, 0x00, 0x05, 0x00, 0x74, 0x65, 0x73,
+    0x74, 0x73,
   ]);
 
   const dataObjects = cat(rt, controlData, lzx, systemData);

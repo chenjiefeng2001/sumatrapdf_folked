@@ -1,4 +1,4 @@
-﻿// Test for page geometry consistency during continuous scrolling.
+// Test for page geometry consistency during continuous scrolling.
 //
 // Uses the TestPageGeometry control command to open a multi-page PDF and
 // verify that each page's mediabox dimensions remain positive and stable
@@ -7,7 +7,7 @@
 // Run:  bun tests/issue-page-geometry-scroll.ts [--no-build]
 
 import { existsSync } from "node:fs";
-import { ControlCommand, withControlledSumatra } from "../cmd/control.ts";
+import { ControlCommand, withControlledSumatra } from "./control.ts";
 import { EXE, runStandalone } from "./util.ts";
 
 const PDF = "C:/Users/14977/Downloads/2403.04807v1.pdf";

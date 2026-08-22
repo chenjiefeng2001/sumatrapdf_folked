@@ -1,7 +1,7 @@
 // Test for annotation locking and rendering fixes.
 //
 // v6 production-grade test:
-//   - Verifies lock ordering (pagesLock â†’ docLock â†’ renderLock) with no deadlock.
+//   - Verifies lock ordering (pagesLock â†?docLock â†?renderLock) with no deadlock.
 //   - Stress-tests parallel render + TOC + dest resolution paths (path C).
 //   - Exercises deferred text extraction (ExtractTextLazy, uitask::Post path).
 //   - Multiple open/close cycles validate EngineBase lifecycle (drain & join).
@@ -23,7 +23,7 @@
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { ControlCommand, runControlCommand } from "../cmd/control.ts";
+import { ControlCommand, runControlCommand } from "./control.ts";
 import { EXE, runStandalone } from "./util.ts";
 
 const PDF = join(import.meta.dir, "issue-annot-locking.pdf");
@@ -66,7 +66,7 @@ async function testSearch(query: string): Promise<void> {
     const res = await runControlCommand(EXE, ControlCommand.TestSearch, [PDF, query, 0]);
     const raw = String(res[0] ?? "").trim();
     if (raw.includes("ERROR")) {
-        // Search returning no results is OK â€” we just need to exercise the text extraction path
+        // Search returning no results is OK â€?we just need to exercise the text extraction path
         console.log("  Search for '" + query + "': (no results/error: " + raw + ")");
         return;
     }

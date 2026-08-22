@@ -4,27 +4,24 @@
 // selection stayed on the previous item.
 //
 // This is GUI automation (there's no -dbg-control hook for palette TOC
-// navigation), so it lives as an ad-hoc test, not in tests/all.ts. Run directly:
+// navigation), so it lives as an ad-hoc test, not in tests/run-almost-all.ts. Run directly:
 //   bun tests/ad-hoc-toc-palette-sync.ts [--no-build]
 //
 // Reverting the fix (the selectInTree path in TableOfContents.cpp's GoToTocLink)
 // makes the tree selection stay put, so this throws.
 
 import { writeFileSync } from "node:fs";
-import { runStandalone, tmpPath, cmdId } from "./util.ts";
-import { launchSumatra, waitForFrame, findChildByClass, sendCommand, pressEnter } from "./win-automation.ts";
+import { cmdId, runStandalone, tmpPath } from "./util.ts";
 import {
-  sleep,
-  moveWindow,
-  treeGetSelection,
-  enumWindows,
-  getWindowPid,
-  findChildWindow,
-  sendText,
-} from "./winapi.ts";
+  launchSumatra,
+  waitForFrame,
+  findChildByClass,
+  sendCommand,
+  pressEnter,
+  killAndWait,
+} from "./win-automation.ts";
+import { sleep, moveWindow, treeGetSelection, enumWindows, getWindowPid, findChildWindow, sendText } from "./winapi.ts";
 
-// keep the TOC mode command id in sync with the generated Commands.h
-// (CmdCommandPaletteTOC moved from 434 to 435 when CmdOpenWithKnownExternalViewer* were added)
 const CmdCommandPaletteTOC = cmdId("CmdCommandPaletteTOC");
 
 // a 4-page PDF with 4 top-level bookmarks (one per page), /UseOutlines so the
@@ -118,12 +115,10 @@ export async function testit(): Promise<void> {
 
     const sel1 = treeGetSelection(tree);
     if (sel1 === sel0) {
-      throw new Error(
-        "issue #5716: Bookmarks panel selection did not move after navigating via the Command Palette",
-      );
+      throw new Error("issue #5716: Bookmarks panel selection did not move after navigating via the Command Palette");
     }
   } finally {
-    proc.kill();
+    await killAndWait(proc);
   }
 }
 

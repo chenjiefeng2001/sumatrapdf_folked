@@ -112,3 +112,6 @@ scripts/
 
 /mcps/tasks/tools
 /bin/resvg.exe
+
+# local build artifact: packed translations lzsa (VS PreBuild / MakeLZSA output)
+/translations/translations.txt.lzsa

@@ -1,7 +1,8 @@
 /* Copyright 2026 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
-#include "Base.h"
+#include "base/Base.h"
+#include <locale.h>
 
 #if defined(_MSC_VER)
 static _locale_t GetUtf8FormatLocale() {
@@ -92,13 +93,13 @@ static bool isLegalUTF8(const u8* src, int length) {
             if (a < 0x80 || a > 0xBF) {
                 return false;
             }
-            __fallthrough;
+            [[fallthrough]];
         case 3:
             a = (*--end);
             if (a < 0x80 || a > 0xBF) {
                 return false;
             }
-            __fallthrough;
+            [[fallthrough]];
         case 2:
             a = (*--end);
             if (a > 0xBF) {
@@ -131,7 +132,7 @@ static bool isLegalUTF8(const u8* src, int length) {
                         return false;
                     }
             }
-            __fallthrough;
+            [[fallthrough]];
         case 1:
             if (*src >= 0x80 && *src < 0xC2) {
                 return false;
@@ -146,6 +147,7 @@ int utf8RuneLen(const u8* s) {
     return n;
 }
 
+// note: include Base.h instead of including directly
 bool isLegalUTF8Sequence(const u8* source, const u8* sourceEnd) {
     int n = utf8RuneLen(source);
     if (source + n > sourceEnd) {
@@ -168,16 +170,16 @@ bool isLegalUTF8String(const u8** source, const u8* sourceEnd) {
 }
 
 int utf8StrLen(const u8* s) {
-    int len = 0;
+    int cch = 0;
     while (*s) {
         int n = utf8RuneLen(s);
         if (!isLegalUTF8(s, n)) {
             return -1;
         }
         s += n;
-        len++;
+        cch++;
     }
-    return len;
+    return cch;
 }
 
 // --- end of Unicode, Inc. utf8 code
@@ -200,6 +202,31 @@ void str::Utf8Encode(char* buf, int& off, int c) {
         *tmp++ = 0x80 + (u8)(c & 0x3F);
     }
     off = (int)((char*)tmp - buf);
+}
+
+bool Utf8IsContinuationByte(char c) {
+    return ((u8)c & 0xC0) == 0x80;
+}
+
+// the byte a sequence starts at, so that a byte index that landed in the middle
+// of one can be turned into a codepoint
+int Utf8CodepointStartByte(Str s, int byteIdx) {
+    if (byteIdx <= 0) {
+        return 0;
+    }
+    byteIdx = std::min(byteIdx, len(s));
+    while (byteIdx > 0 && Utf8IsContinuationByte(s.s[byteIdx])) {
+        byteIdx--;
+    }
+    return byteIdx;
+}
+
+// the codepoint the byte at byteIdx is part of, 0 if there is none
+int Utf8CodepointContaining(Str s, int byteIdx) {
+    if (!s || byteIdx < 0 || byteIdx >= len(s)) {
+        return 0;
+    }
+    return Utf8CodepointAtByte(s, Utf8CodepointStartByte(s, byteIdx));
 }
 
 int Utf8CodepointAtByte(Str s, int byteIdx, int* bytesOut) {
@@ -253,9 +280,7 @@ int Utf8CodepointPrev(Str s, int& byteIdx) {
     if (!s || byteIdx <= 0) {
         return 0;
     }
-    if (byteIdx > s.len) {
-        byteIdx = s.len;
-    }
+    byteIdx = std::min(byteIdx, s.len);
     int prevByte = byteIdx - 1;
     while (prevByte > 0 && (((u8)s.s[prevByte] & 0xc0) == 0x80)) {
         prevByte--;
@@ -294,9 +319,7 @@ Str Utf8SliceByCodepoints(Str s, int startCodepoint, int nCodepoints) {
     if (!s || nCodepoints <= 0) {
         return {};
     }
-    if (startCodepoint < 0) {
-        startCodepoint = 0;
-    }
+    startCodepoint = std::max(startCodepoint, 0);
     int startByte = Utf8CodepointToByteIndex(s, startCodepoint);
     int endByte = Utf8AdvanceCodepoints(s, startByte, nCodepoints);
     return Str(s.s + startByte, endByte - startByte);
@@ -325,9 +348,7 @@ TempStr ShortenStringUtf8Temp(Str s, int maxRunes) {
             return s;
         }
         int keep = maxRunes - 3;
-        if (keep < 0) {
-            keep = 0;
-        }
+        keep = std::max(keep, 0);
         char* ret = AllocArrayTemp<char>(keep + 4);
         memcpy(ret, s.s, keep);
         ret[keep] = '.';
@@ -340,10 +361,8 @@ TempStr ShortenStringUtf8Temp(Str s, int maxRunes) {
         return s;
     }
     int keep = maxRunes - 3;
-    if (keep < 0) {
-        keep = 0;
-    }
-    char* ret = AllocArrayTemp<char>(maxRunes * 4 + 1);
+    keep = std::max(keep, 0);
+    char* ret = AllocArrayTemp<char>((maxRunes * 4) + 1);
     int src = 0;
     int tmp = 0;
     int n;
@@ -356,13 +375,13 @@ TempStr ShortenStringUtf8Temp(Str s, int maxRunes) {
                 break;
             case 4:
                 ret[tmp++] = s.s[src++];
-                __fallthrough;
+                [[fallthrough]];
             case 3:
                 ret[tmp++] = s.s[src++];
-                __fallthrough;
+                [[fallthrough]];
             case 2:
                 ret[tmp++] = s.s[src++];
-                __fallthrough;
+                [[fallthrough]];
             case 1:
                 ret[tmp++] = s.s[src++];
         }
@@ -384,7 +403,7 @@ TempStr ShortenStringUtf8InTheMiddleTemp(Str s, int maxRunes) {
     }
     int toRemove = (nRunes - maxRunes) + 3;
     int removeStartingAt = (nRunes / 2) - (toRemove / 2);
-    char* ret = AllocArrayTemp<char>(maxRunes * 4 + 1);
+    char* ret = AllocArrayTemp<char>((maxRunes * 4) + 1);
     int src = 0;
     int tmp = 0;
     int n;
@@ -398,13 +417,13 @@ TempStr ShortenStringUtf8InTheMiddleTemp(Str s, int maxRunes) {
                     break;
                 case 4:
                     ret[tmp++] = s.s[src++];
-                    __fallthrough;
+                    [[fallthrough]];
                 case 3:
                     ret[tmp++] = s.s[src++];
-                    __fallthrough;
+                    [[fallthrough]];
                 case 2:
                     ret[tmp++] = s.s[src++];
-                    __fallthrough;
+                    [[fallthrough]];
                 case 1:
                     ret[tmp++] = s.s[src++];
             }
@@ -422,15 +441,62 @@ TempStr ShortenStringUtf8InTheMiddleTemp(Str s, int maxRunes) {
 
 static wchar_t emptyWideStr[1] = {0};
 
-Str ToUtf8(Arena* arena, WStr wide) {
-    if (IsEmpty(wide)) {
-        return Str();
+#if !OS_WIN
+static int Utf8BytesForCodepoint(int c) {
+    if (c < 0x80) {
+        return 1;
     }
-    int len = WideCharToMultiByte(CP_UTF8, 0, wide.s, wide.len, nullptr, 0, nullptr, nullptr);
-    char* utf8 = (char*)Alloc(arena, len + 1);
-    WideCharToMultiByte(CP_UTF8, 0, wide.s, wide.len, utf8, len, nullptr, nullptr);
-    utf8[len] = 0;
-    return Str(utf8, len);
+    if (c < 0x800) {
+        return 2;
+    }
+    if (c < 0x10000) {
+        return 3;
+    }
+    return 4;
+}
+
+static int WStrCodepointAt(WStr s, int& idx) {
+    int c = s.s[idx++];
+    if constexpr (sizeof(WCHAR) == 2) {
+        if (c >= 0xd800 && c <= 0xdbff && idx < s.len) {
+            int lo = s.s[idx];
+            if (lo >= 0xdc00 && lo <= 0xdfff) {
+                idx++;
+                return 0x10000 + ((c - 0xd800) << 10) + (lo - 0xdc00);
+            }
+            return 0xfffd;
+        }
+        if (c >= 0xdc00 && c <= 0xdfff) {
+            return 0xfffd;
+        }
+    }
+    return c;
+}
+#endif
+
+Str ToUtf8(Arena* arena, WStr wide) {
+    if (len(wide) == 0) {
+        return {};
+    }
+#if OS_WIN
+    int n = WideCharToMultiByte(CP_UTF8, 0, wide.s, wide.len, nullptr, 0, nullptr, nullptr);
+    char* utf8 = (char*)Alloc(arena, n + 1);
+    WideCharToMultiByte(CP_UTF8, 0, wide.s, wide.len, utf8, n, nullptr, nullptr);
+#else
+    int n = 0;
+    for (int i = 0; i < wide.len;) {
+        int c = WStrCodepointAt(wide, i);
+        n += Utf8BytesForCodepoint(c);
+    }
+    char* utf8 = (char*)Alloc(arena, n + 1);
+    int off = 0;
+    for (int i = 0; i < wide.len;) {
+        int c = WStrCodepointAt(wide, i);
+        str::Utf8Encode(utf8, off, c);
+    }
+#endif
+    utf8[n] = 0;
+    return Str(utf8, n);
 }
 
 Str ToUtf8Temp(WStr wide) {
@@ -438,12 +504,36 @@ Str ToUtf8Temp(WStr wide) {
 }
 
 WStr ToWStrTemp(Str s) {
-    if (IsEmpty(s)) {
+    if (len(s) == 0) {
         return WStr(&emptyWideStr[0], 0);
     }
+#if OS_WIN
     int wideLen = MultiByteToWideChar(CP_UTF8, 0, s.s, s.len, nullptr, 0);
-    wchar_t* wide = (wchar_t*)AllocTemp((wideLen + 1) * sizeof(wchar_t));
+    wchar_t* wide = (wchar_t*)AllocTemp((int)((wideLen + 1) * sizeof(wchar_t)));
     MultiByteToWideChar(CP_UTF8, 0, s.s, s.len, wide, wideLen);
+#else
+    int wideLen = 0;
+    for (int byteIdx = 0; byteIdx < s.len;) {
+        int c = Utf8CodepointNext(s, byteIdx);
+        wideLen += c >= 0x10000 && sizeof(WCHAR) == 2 ? 2 : 1;
+    }
+    wchar_t* wide = (wchar_t*)AllocTemp((wideLen + 1) * sizeof(wchar_t));
+    int dst = 0;
+    for (int byteIdx = 0; byteIdx < s.len;) {
+        int c = Utf8CodepointNext(s, byteIdx);
+        if constexpr (sizeof(WCHAR) == 2) {
+            if (c >= 0x10000) {
+                c -= 0x10000;
+                wide[dst++] = (WCHAR)(0xd800 + (c >> 10));
+                wide[dst++] = (WCHAR)(0xdc00 + (c & 0x3ff));
+            } else {
+                wide[dst++] = (WCHAR)c;
+            }
+        } else {
+            wide[dst++] = (WCHAR)c;
+        }
+    }
+#endif
     wide[wideLen] = 0;
     return WStr(wide, wideLen);
 }

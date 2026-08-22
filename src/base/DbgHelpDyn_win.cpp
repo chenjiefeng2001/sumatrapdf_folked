@@ -12,9 +12,6 @@
 #include "base/DbgHelpDyn.h"
 #include "base/File.h"
 #include "base/ScopedWin.h"
-#include "base/Win.h"
-
-#include "base/Log.h"
 
 /* Hard won wisdom: changing symbol path with SymSetSearchPath() after modules
    have been loaded (invideProcess=TRUE in SymInitialize() or SymRefreshModuleList())
@@ -28,7 +25,7 @@ namespace dbghelp {
 
 static char excNameBuf[512];
 
-Str ExceptionNameFromCode(DWORD excCode) {
+static Str ExceptionNameFromCode(DWORD excCode) {
 #define EXC(x) \
     case x:    \
         return Str(#x);
@@ -109,8 +106,8 @@ static bool CanStackWalk() {
 constexpr int kMaxSymLen = 512;
 
 // check if has access to valid .pdb symbols file by trying to resolve a symbol
-NO_INLINE bool CanSymbolizeAddress(DWORD64 addr) {
-    char buf[sizeof(SYMBOL_INFO) + kMaxSymLen * sizeof(char)];
+static NO_INLINE bool CanSymbolizeAddress(DWORD64 addr) {
+    char buf[sizeof(SYMBOL_INFO) + (kMaxSymLen * sizeof(char))];
     SYMBOL_INFO* symInfo = (SYMBOL_INFO*)buf;
 
     memset(buf, 0, sizeof(buf));
@@ -122,7 +119,7 @@ NO_INLINE bool CanSymbolizeAddress(DWORD64 addr) {
     if (!ok) {
         return false;
     }
-    int symLen = symInfo->NameLen;
+    int symLen = (int)symInfo->NameLen;
     if (symLen < 4) {
         return false;
     }
@@ -174,7 +171,8 @@ bool Initialize(WStr symPathW, bool force) {
     return true;
 }
 
-static BOOL CALLBACK OpenMiniDumpCallback(void*, PMINIDUMP_CALLBACK_INPUT input, PMINIDUMP_CALLBACK_OUTPUT output) {
+static BOOL CALLBACK OpenMiniDumpCallback(void* /*param*/, PMINIDUMP_CALLBACK_INPUT input,
+                                          PMINIDUMP_CALLBACK_OUTPUT output) {
     if (!input || !output) {
         return FALSE;
     }
@@ -269,7 +267,7 @@ static void AppendAddress(str::Builder& s, DWORD64 addr) {
 void GetAddressInfo(str::Builder& s, DWORD64 addr, bool compact) {
     static const int MAX_SYM_LEN = 512;
 
-    char buf[sizeof(SYMBOL_INFO) + MAX_SYM_LEN * sizeof(char)];
+    char buf[sizeof(SYMBOL_INFO) + (MAX_SYM_LEN * sizeof(char))];
     SYMBOL_INFO* symInfo = (SYMBOL_INFO*)buf;
 
     memset(buf, 0, sizeof(buf));
@@ -316,7 +314,7 @@ void GetAddressInfo(str::Builder& s, DWORD64 addr, bool compact) {
     s.Append("\n");
 }
 
-static bool GetStackFrameInfo(str::Builder& s, STACKFRAME64* stackFrame, CONTEXT* ctx, HANDLE hThread) {
+static bool GetStackFrameInfo(str::Builder& s, STACKFRAME64* stackFrame, CONTEXT* ctx, ThreadHandle hThread) {
 #if defined(_WIN64)
     int machineType = IMAGE_FILE_MACHINE_AMD64;
 #else
@@ -341,7 +339,7 @@ static bool GetStackFrameInfo(str::Builder& s, STACKFRAME64* stackFrame, CONTEXT
     return true;
 }
 
-static bool GetCallstack(str::Builder& s, CONTEXT& ctx, HANDLE hThread) {
+static bool GetCallstack(str::Builder& s, CONTEXT& ctx, ThreadHandle hThread) {
     if (!CanStackWalk()) {
         s.Append("GetCallstack(): CanStackWalk() returned false\n");
         return false;
@@ -383,7 +381,65 @@ static bool GetCallstack(str::Builder& s, CONTEXT& ctx, HANDLE hThread) {
     return true;
 }
 
-void GetThreadCallstack(str::Builder& s, DWORD threadId) {
+// Walks the callstack of a thread the caller has already suspended and stores
+// the raw addresses. Unlike GetThreadCallstack() this resolves no symbols and
+// allocates nothing, so it can run while every other thread is frozen (the hang
+// detector): symbolizing there could block on a heap or loader lock held by a
+// frozen thread. Resolve the addresses with GetAddressInfo() after resuming.
+// Returns the number of addresses stored.
+int GetSuspendedThreadCallstackAddrs(ThreadHandle hThread, u64* addrs, int maxAddrs) {
+    if (!CanStackWalk() || !addrs || maxAddrs <= 0) {
+        return 0;
+    }
+    CONTEXT ctx{};
+    ctx.ContextFlags = CONTEXT_FULL;
+    if (!GetThreadContext(hThread, &ctx)) {
+        return 0;
+    }
+
+    STACKFRAME64 stackFrame;
+    memset(&stackFrame, 0, sizeof(stackFrame));
+#if IS_INTEL_64 == 1
+    stackFrame.AddrPC.Offset = ctx.Rip;
+    stackFrame.AddrFrame.Offset = ctx.Rbp;
+    stackFrame.AddrStack.Offset = ctx.Rsp;
+#elif IS_INTEL_32 == 1
+    stackFrame.AddrPC.Offset = ctx.Eip;
+    stackFrame.AddrFrame.Offset = ctx.Ebp;
+    stackFrame.AddrStack.Offset = ctx.Esp;
+#elif IS_ARM_64 == 1
+    stackFrame.AddrPC.Offset = ctx.Pc;
+    stackFrame.AddrFrame.Offset = ctx.Fp;
+    stackFrame.AddrStack.Offset = ctx.Sp;
+#else
+#error "Unsupported CPU architecture"
+#endif
+    stackFrame.AddrPC.Mode = AddrModeFlat;
+    stackFrame.AddrFrame.Mode = AddrModeFlat;
+    stackFrame.AddrStack.Mode = AddrModeFlat;
+
+#if defined(_WIN64)
+    int machineType = IMAGE_FILE_MACHINE_AMD64;
+#else
+    int machineType = IMAGE_FILE_MACHINE_I386;
+#endif
+    int n = 0;
+    while (n < maxAddrs) {
+        BOOL ok = DynStackWalk64(machineType, GetCurrentProcess(), hThread, &stackFrame, &ctx, nullptr,
+                                 DynSymFunctionTableAccess64, DynSymGetModuleBase64, nullptr);
+        if (!ok) {
+            break;
+        }
+        u64 addr = (u64)stackFrame.AddrPC.Offset;
+        if (addr == 0 || addr == (u64)stackFrame.AddrReturn.Offset) {
+            break;
+        }
+        addrs[n++] = addr;
+    }
+    return n;
+}
+
+void GetThreadCallstack(str::Builder& s, ThreadId threadId) {
     if (threadId == GetCurrentThreadId()) {
         return;
     }
@@ -391,7 +447,7 @@ void GetThreadCallstack(str::Builder& s, DWORD threadId) {
     s.Append(fmt("\nThread: %x\n", threadId));
 
     DWORD access = THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION | THREAD_SUSPEND_RESUME;
-    HANDLE hThread = OpenThread(access, false, threadId);
+    ThreadHandle hThread = OpenThread(access, false, threadId);
     if (!hThread) {
         s.Append("Failed to OpenThread()\n");
         return;
@@ -412,7 +468,7 @@ void GetThreadCallstack(str::Builder& s, DWORD threadId) {
 
         ResumeThread(hThread);
     }
-    CloseHandle(hThread);
+    SafeCloseThreadHandle(&hThread);
 }
 
 // we disable optimizations for this function as it calls RtlCaptureContext()
@@ -425,22 +481,17 @@ void GetThreadCallstack(str::Builder& s, DWORD threadId) {
 #pragma warning(push)
 #pragma warning(disable : 4748)
 NO_INLINE bool GetCurrentThreadCallstack(str::Builder& s) {
-    // not available under Win2000
-    if (!DynRtlCaptureContext) {
-        return false;
-    }
-
     if (!Initialize(nullptr, false)) {
         return false;
     }
 
     CONTEXT ctx;
-    DynRtlCaptureContext(&ctx);
+    RtlCaptureContext(&ctx);
     return GetCallstack(s, ctx, GetCurrentThread());
 }
 #pragma optimize("", off)
 
-str::Builder* gCallstackLogs = nullptr;
+static str::Builder* gCallstackLogs = nullptr;
 
 TempStr GetCurrentThreadCallstackTemp() {
     str::Builder s(2048);
@@ -481,7 +532,7 @@ void LogCallstack() {
     }
 }
 
-void GetAllThreadsCallstacksExcept(str::Builder& s, DWORD skipThreadId) {
+void GetAllThreadsCallstacksExcept(str::Builder& s, ThreadId skipThreadId) {
     HANDLE threadSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
     if (threadSnap == INVALID_HANDLE_VALUE) {
         return;
@@ -546,7 +597,8 @@ void GetExceptionInfo(str::Builder& s, EXCEPTION_POINTERS* excPointers) {
             ctx->Rax, ctx->Rbx, ctx->Rcx, ctx->Rdx, ctx->Rsi, ctx->Rdi, ctx->R8, ctx->R9, ctx->R10, ctx->R11, ctx->R12,
             ctx->R13, ctx->R14, ctx->R15));
     s.Append(fmt("CS:RIP:%04X:%016I64X\n", ctx->SegCs, ctx->Rip));
-    s.Append(fmt("SS:RSP:%04X:%016X  RBP:%08X\n", ctx->SegSs, (unsigned int)ctx->Rsp, (unsigned int)ctx->Rbp));
+    // full 64-bit RSP/RBP (casting to unsigned int truncated high bits, issue #crash-format)
+    s.Append(fmt("SS:RSP:%04X:%016I64X  RBP:%016I64X\n", ctx->SegSs, ctx->Rsp, ctx->Rbp));
     s.Append(fmt("DS:%04X  ES:%04X  FS:%04X  GS:%04X\n", ctx->SegDs, ctx->SegEs, ctx->SegFs, ctx->SegGs));
     s.Append(fmt("Flags:%08X\n", ctx->EFlags));
 #elif IS_INTEL_32 == 1

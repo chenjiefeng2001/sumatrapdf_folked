@@ -26,6 +26,10 @@ the deserialization of such a settings file.
 
 enum class SettingType {
     Struct,
+    // an optional sub-struct, stored as a pointer that is null when unset.
+    // it's only written out when set, so a struct with many instances (e.g.
+    // FileState) doesn't carry an empty block per instance
+    StructPtr,
     Array,
     Compact,
     Bool,
@@ -38,8 +42,6 @@ enum class SettingType {
     IntArray,
     StringArray,
     Comment,
-    // same as Type_Struct but won't be written out in release builds
-    Prerelease,
 };
 
 struct FieldInfo {
@@ -48,6 +50,9 @@ struct FieldInfo {
     SettingType type = SettingType::Struct;
     // default value for primitive types and pointer to StructInfo for complex ones
     intptr_t value = 0;
+    // app-managed / deprecated setting: serialized like any other, but hidden
+    // from the advanced settings dialog
+    bool internal = false;
 };
 
 struct StructInfo {
@@ -57,6 +62,12 @@ struct StructInfo {
     // one string of fieldCount zero-terminated names of all fields
     // in the order of fields
     const char* fieldNames = nullptr;
+    // one string of fieldCount zero-terminated per-field doc comments, in the
+    // same order as fieldNames (empty entry if a field has no comment)
+    const char* fieldComments = nullptr;
+    // true if this struct has a Bool field named IsTemporary (array elements
+    // with that flag set are omitted when serializing)
+    bool couldBeTemporary = false;
 };
 
 Str SerializeStruct(const StructInfo* info, const void* strct, Str prevData = {});

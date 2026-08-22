@@ -26,7 +26,7 @@ void AnnotHitIndex::Build(const Vec<AnnotHitEntry>* entries, RectF mediabox) {
     cols_ = 0;
     rows_ = 0;
     extent_ = mediabox;
-    if (!entries || entries->empty() || mediabox.dx <= 0 || mediabox.dy <= 0) {
+    if (!entries || len(*entries) == 0 || mediabox.dx <= 0 || mediabox.dy <= 0) {
         return;
     }
 

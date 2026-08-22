@@ -5,10 +5,18 @@
 #include "base/FileWatcher.h"
 #include "base/ScopedWin.h"
 #include "base/File.h"
-#include "base/Thread.h"
 #include "base/Win.h"
 
-#include "base/Log.h"
+// Log file path we must not reload-on-change (set by SumatraLog).
+static Str gFileWatcherSkipPath;
+
+void FileWatcherSetSkipPath(Str path) {
+    gFileWatcherSkipPath = path;
+}
+
+static Str FileWatcherGetSkipPath() {
+    return gFileWatcherSkipPath;
+}
 
 /*
 This code is tricky, so here's a high-level overview. More info at:
@@ -70,6 +78,15 @@ struct WatchedDir {
     Str dirPath;
     HANDLE hDir = nullptr;
     bool startMonitoring = true;
+    // when removal was queued (GetTickCount64()), for shutdown diagnostics
+    u64 removalQueuedAt = 0;
+    // a ReadDirectoryChangesW() is in flight, so its completion routine is
+    // still going to run for this dir
+    bool ioPending = false;
+    // StartMonitoringDirForChangesAPC() calls queued but not run yet
+    int startApcQueued = 0;
+    // StopMonitoringDirAPC() ran: the dir is on its way out
+    bool stopped = false;
     OverlappedEx overlapped;
     char buf[16 * 1024]{};
 };
@@ -95,19 +112,24 @@ void WatchedFileSetIgnore(WatchedFile* wf, bool ignore) {
     }
 }
 
-static HANDLE gThreadHandle = nullptr;
+static ThreadHandle gThreadHandle = nullptr;
 
 static HANDLE gThreadControlHandle = nullptr;
 static AtomicBool gShouldExit = 0;
 
 // protects data structures shared between ui thread and file
 // watcher thread i.e. gWatchedDirs, gWatchedFiles
-static CRITICAL_SECTION gFileWatcherMutex;
+static Mutex gFileWatcherMutex;
 
 static WatchedDir* gWatchedDirs = nullptr;
 static WatchedFile* gWatchedFiles = nullptr;
 
-static LONG gRemovalsPending = 0;
+static AtomicInt gRemovalsPending = 0;
+
+// dirs unlinked from gWatchedDirs whose StopMonitoringDirAPC / cancel-io round
+// trip hasn't completed yet. Only used to report what shutdown is waiting for.
+// Protected by gFileWatcherMutex; reuses WatchedDir::next (it's off gWatchedDirs).
+static WatchedDir* gRemovalsPendingDirs = nullptr;
 
 static void StartMonitoringDirForChanges(WatchedDir* wd);
 
@@ -190,8 +212,23 @@ static void NotifyAboutFile(WatchedDir* d, Str fileName) {
 }
 
 static void DeleteWatchedDir(WatchedDir* wd) {
+    logf("DeleteWatchedDir() %s\n", wd->dirPath);
     str::Free(wd->dirPath);
     free(wd);
+}
+
+// A dir queued for removal can only be freed once nothing can still reach it:
+// no ReadDirectoryChangesW() completion is in flight and no re-arm APC is
+// queued. Shutdown waits for gRemovalsPending to drain, so every path that
+// could be the last one out has to come through here.
+// Callers hold gFileWatcherMutex.
+static void CompleteRemovalIfDone(WatchedDir* wd) {
+    if (!wd->stopped || wd->ioPending || wd->startApcQueued > 0) {
+        return;
+    }
+    ListRemove(&gRemovalsPendingDirs, wd);
+    DeleteWatchedDir(wd);
+    AtomicIntDec(&gRemovalsPending);
 }
 
 // clang-format off
@@ -203,7 +240,8 @@ SeqStrings gFileActionNames =
     "FILE_ACTION_RENAMED_NEW_NAME\0";
 // clang-format on
 
-TempStr GetFileActionNameTemp(int actionId) {
+// only used by the commented-out log in ReadDirectoryChangesNotification()
+__unused static TempStr GetFileActionNameTemp(int actionId) {
     if (actionId < 1 || actionId > 5) {
         return StrL("(unknown)");
     }
@@ -212,7 +250,7 @@ TempStr GetFileActionNameTemp(int actionId) {
 }
 
 static void CALLBACK ReadDirectoryChangesNotification(DWORD errCode, DWORD bytesTransfered, LPOVERLAPPED overlapped) {
-    ScopedCritSec cs(&gFileWatcherMutex);
+    ScopedMutex cs(&gFileWatcherMutex);
 
     OverlappedEx* over = (OverlappedEx*)overlapped;
     WatchedDir* wd = (WatchedDir*)over->data;
@@ -221,10 +259,18 @@ static void CALLBACK ReadDirectoryChangesNotification(DWORD errCode, DWORD bytes
 
     ReportIf(wd != wd->overlapped.data);
 
+    // whatever the outcome, this read is done
+    wd->ioPending = false;
+
     if (errCode == ERROR_OPERATION_ABORTED) {
         // logf("ReadDirectoryChangesNotification: ERROR_OPERATION_ABORTED\n");
-        DeleteWatchedDir(wd);
-        InterlockedDecrement(&gRemovalsPending);
+        CompleteRemovalIfDone(wd);
+        return;
+    }
+    if (wd->stopped) {
+        // removed while this completion was already queued: don't re-arm a
+        // handle that StopMonitoringDirAPC() closed
+        CompleteRemovalIfDone(wd);
         return;
     }
 
@@ -269,6 +315,14 @@ static void CALLBACK ReadDirectoryChangesNotification(DWORD errCode, DWORD bytes
 
 static void CALLBACK StartMonitoringDirForChangesAPC(ULONG_PTR arg) {
     WatchedDir* wd = (WatchedDir*)arg;
+    ScopedMutex cs(&gFileWatcherMutex);
+    wd->startApcQueued--;
+    if (wd->stopped) {
+        // removed while this was queued: the handle is closed, and this may be
+        // the last thing that was keeping the dir alive
+        CompleteRemovalIfDone(wd);
+        return;
+    }
     ZeroMemory(&wd->overlapped, sizeof(wd->overlapped));
 
     OVERLAPPED* overlapped = (OVERLAPPED*)&(wd->overlapped);
@@ -281,22 +335,37 @@ static void CALLBACK StartMonitoringDirForChangesAPC(ULONG_PTR arg) {
     }
 
     DWORD dwNotifyFilter = FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME;
-    ReadDirectoryChangesW(wd->hDir,
-                          wd->buf,                           // read results buffer
-                          sizeof(wd->buf),                   // length of buffer
-                          FALSE,                             // bWatchSubtree
-                          dwNotifyFilter,                    // filter conditions
-                          nullptr,                           // bytes returned
-                          overlapped,                        // overlapped buffer
-                          ReadDirectoryChangesNotification); // completion routine
+    BOOL ok = ReadDirectoryChangesW(wd->hDir,
+                                    wd->buf,                           // read results buffer
+                                    sizeof(wd->buf),                   // length of buffer
+                                    FALSE,                             // bWatchSubtree
+                                    dwNotifyFilter,                    // filter conditions
+                                    nullptr,                           // bytes returned
+                                    overlapped,                        // overlapped buffer
+                                    ReadDirectoryChangesNotification); // completion routine
+    // only a read that actually started will call back, and removal waits for
+    // that callback - so this has to be tracked, not assumed
+    wd->ioPending = (ok != FALSE);
+    if (!ok) {
+        LogLastError();
+        logf("StartMonitoringDirForChangesAPC: ReadDirectoryChangesW() failed for '%s'\n", wd->dirPath);
+    }
 }
 
+// callers hold gFileWatcherMutex
 static void StartMonitoringDirForChanges(WatchedDir* wd) {
-    QueueUserAPC(StartMonitoringDirForChangesAPC, gThreadHandle, (ULONG_PTR)wd);
+    wd->startApcQueued++;
+    if (QueueUserAPC(StartMonitoringDirForChangesAPC, gThreadHandle, (ULONG_PTR)wd)) {
+        return;
+    }
+    LogLastError();
+    logf("StartMonitoringDirForChanges: QueueUserAPC failed for '%s'\n", wd->dirPath);
+    wd->startApcQueued--;
+    CompleteRemovalIfDone(wd);
 }
 
 static DWORD GetTimeoutInMs() {
-    ScopedCritSec cs(&gFileWatcherMutex);
+    ScopedMutex cs(&gFileWatcherMutex);
     for (WatchedFile* wf = gWatchedFiles; wf; wf = wf->next) {
         if (wf->isManualCheck) {
             return FILEWATCH_DELAY_IN_MS;
@@ -305,17 +374,60 @@ static DWORD GetTimeoutInMs() {
     return INFINITE;
 }
 
-static void RunManualChecks() {
-    ScopedCritSec cs(&gFileWatcherMutex);
+static bool WatchedFileStillActive(WatchedFile* wf) {
+    for (WatchedFile* p = gWatchedFiles; p; p = p->next) {
+        if (p == wf) {
+            return true;
+        }
+    }
+    return false;
+}
 
-    for (WatchedFile* wf = gWatchedFiles; wf; wf = wf->next) {
-        if (!wf->isManualCheck) {
+// Manual checks use GetFileAttributesEx (via FileStateChanged), which is slow
+// on network drives. Hold gFileWatcherMutex only while collecting / applying;
+// never around the filesystem call.
+static void RunManualChecks() {
+    struct ManualCheckItem {
+        WatchedFile* wf = nullptr;
+        Str path;
+        FileWatcherState state{};
+        bool changed = false;
+    };
+    Vec<ManualCheckItem> items;
+    {
+        ScopedMutex cs(&gFileWatcherMutex);
+        for (WatchedFile* wf = gWatchedFiles; wf; wf = wf->next) {
+            if (!wf->isManualCheck) {
+                continue;
+            }
+            ManualCheckItem it;
+            it.wf = wf;
+            // Dup so we can use path after releasing the lock (wf may be freed).
+            it.path = str::Dup(wf->filePath);
+            it.state = wf->fileState;
+            items.Append(it);
+        }
+    }
+
+    for (ManualCheckItem& it : items) {
+        // slow path: no lock held
+        it.changed = FileStateChanged(it.path, &it.state);
+        str::Free(it.path);
+        it.path = {};
+    }
+
+    ScopedMutex cs(&gFileWatcherMutex);
+    for (ManualCheckItem& it : items) {
+        if (!it.changed) {
             continue;
         }
-        if (FileStateChanged(wf->filePath, &wf->fileState)) {
-            // logf("RunManualCheck() %s changed\n", wf->filePath);
-            wf->onFileChangedCb.Call();
+        // Unwatch may have removed/freed wf while we were querying attributes
+        if (!WatchedFileStillActive(it.wf)) {
+            continue;
         }
+        it.wf->fileState = it.state;
+        // logf("RunManualCheck() %s changed\n", it.wf->filePath);
+        it.wf->onFileChangedCb.Call();
     }
 }
 
@@ -371,20 +483,23 @@ static WatchedDir* FindExistingWatchedDir(Str dirPath) {
 
 static void CALLBACK StopMonitoringDirAPC(ULONG_PTR arg) {
     WatchedDir* wd = (WatchedDir*)arg;
+    ScopedMutex cs(&gFileWatcherMutex);
     // logf("StopMonitoringDirAPC() wd=0x%p\n", wd);
+    wd->stopped = true;
 
-    // this will cause ReadDirectoryChangesNotification() to be called
-    // with errCode = ERROR_OPERATION_ABORTED
-    BOOL ok = CancelIo(wd->hDir);
-    if (!ok) {
-        LogLastError();
+    // with a read in flight this makes ReadDirectoryChangesNotification() run
+    // with errCode = ERROR_OPERATION_ABORTED, which finishes the removal.
+    // With none in flight (the last read completed and its re-arm APC hasn't
+    // run yet, or the read never started) nothing calls back at all, and
+    // waiting for a callback that isn't coming stalled shutdown for 15s
+    if (wd->hDir) {
+        BOOL ok = CancelIo(wd->hDir);
+        if (!ok) {
+            LogLastError();
+        }
+        SafeCloseHandle(&wd->hDir);
     }
-    SafeCloseHandle(&wd->hDir);
-}
-
-static void CALLBACK SignalExitMonitoringThread(ULONG_PTR arg) {
-    logf("SignalExitMonitoringThread\n");
-    AtomicBoolSet(&gShouldExit, true);
+    CompleteRemovalIfDone(wd);
 }
 
 static WatchedDir* NewWatchedDir(Str dirPath) {
@@ -406,32 +521,36 @@ static WatchedDir* NewWatchedDir(Str dirPath) {
     return wd;
 }
 
+static WatchedDir* FindOrCreateWatchedDir(Str dirPath, bool* newDir) {
+    WatchedDir* wd = FindExistingWatchedDir(dirPath);
+    if (wd) {
+        return wd;
+    }
+    wd = NewWatchedDir(dirPath);
+    if (!wd) {
+        return nullptr;
+    }
+    wd->startMonitoring = true;
+    *newDir = true;
+    return wd;
+}
+
 static WatchedFile* NewWatchedFile(Str filePath, const Func0& onFileChangedCb, bool enableManualCheckOnNetworkDrives) {
     bool isManualCheck = !path::SupportsChangeNotifications(filePath);
     bool isNetworkDrive = path::IsOnNetworkDrive(filePath);
-    if (isManualCheck) {
-        // https://github.com/sumatrapdfreader/sumatrapdf/issues/5297#issuecomment-3810653582
-        // on network drives we don't want to do manually check if file changed
-        // because that generates network traffic
-        // unless tex has been explicitly enabled in which case we do want that
-        // for auto-reload of changed files
-        // but most people do not enable tex
-        if (isNetworkDrive && !enableManualCheckOnNetworkDrives) {
-            return nullptr;
-        }
+    // https://github.com/sumatrapdfreader/sumatrapdf/issues/5297#issuecomment-3810653582
+    // On network drives, avoid manual checks and their network traffic unless TeX
+    // support explicitly enables them for auto-reload.
+    if (isManualCheck && isNetworkDrive && !enableManualCheckOnNetworkDrives) {
+        return nullptr;
     }
     TempStr dirPath = path::GetDirTemp(filePath);
     WatchedDir* wd = nullptr;
     bool newDir = false;
     if (!isManualCheck) {
-        wd = FindExistingWatchedDir(dirPath);
+        wd = FindOrCreateWatchedDir(dirPath, &newDir);
         if (!wd) {
-            wd = NewWatchedDir(dirPath);
-            if (!wd) {
-                return nullptr;
-            }
-            wd->startMonitoring = true;
-            newDir = true;
+            return nullptr;
         }
     }
 
@@ -446,10 +565,8 @@ static WatchedFile* NewWatchedFile(Str filePath, const Func0& onFileChangedCb, b
     if (wf->isManualCheck) {
         GetFileState(filePath, &wf->fileState);
         AwakeWatcherThread();
-    } else {
-        if (newDir) {
-            StartMonitoringDirForChanges(wf->watchedDir);
-        }
+    } else if (newDir) {
+        StartMonitoringDirForChanges(wf->watchedDir);
     }
 
     return wf;
@@ -460,9 +577,7 @@ static void DeleteWatchedFile(WatchedFile* wf) {
     free(wf);
 }
 
-void FileWatcherInit(void) {
-    InitializeCriticalSection(&gFileWatcherMutex);
-}
+void FileWatcherInit(void) {}
 
 /* Subscribe for notifications about file changes. When a file changes, we'll
 call observer->OnFileChanged().
@@ -480,7 +595,7 @@ WatchedFile* FileWatcherSubscribe(Str path, const Func0& onFileChangedCb, bool e
         return nullptr;
     }
 
-    if (path::IsSame(gLogFilePath, path)) {
+    if (path::IsSame(FileWatcherGetSkipPath(), path)) {
         logf("FileWatcherSubscribe: '%s' is our own log file\n", path);
         return nullptr;
     }
@@ -491,9 +606,10 @@ WatchedFile* FileWatcherSubscribe(Str path, const Func0& onFileChangedCb, bool e
         return nullptr;
     }
 #endif
-    ScopedCritSec cs(&gFileWatcherMutex);
+    ScopedMutex cs(&gFileWatcherMutex);
     if (!gThreadHandle) {
         logf("FileWatcherSubscribe: starting a thread\n");
+        AtomicBoolSet(&gShouldExit, false);
         gThreadControlHandle = CreateEvent(nullptr, TRUE, FALSE, nullptr);
 
         auto fn = MkFunc0Void(FileWatcherThread);
@@ -520,8 +636,49 @@ static void RemoveWatchedDirIfNotReferenced(WatchedDir* wd) {
     bool ok = ListRemove(&gWatchedDirs, wd);
     ReportIf(!ok);
     // memory will be eventually freed in ReadDirectoryChangesNotification()
-    InterlockedIncrement(&gRemovalsPending);
-    QueueUserAPC(StopMonitoringDirAPC, gThreadHandle, (ULONG_PTR)wd);
+    AtomicIntInc(&gRemovalsPending);
+    wd->removalQueuedAt = GetTickCount64();
+    ListInsertFront(&gRemovalsPendingDirs, wd);
+    DWORD res = QueueUserAPC(StopMonitoringDirAPC, gThreadHandle, (ULONG_PTR)wd);
+    if (!res) {
+        LogLastError();
+        logf("RemoveWatchedDirIfNotReferenced: QueueUserAPC failed for '%s'\n", wd->dirPath);
+        // nothing is going to stop it, so retire it here rather than leave
+        // shutdown waiting on a removal that can't finish. Closing the handle
+        // completes any read in flight with ERROR_OPERATION_ABORTED.
+        wd->stopped = true;
+        SafeCloseHandle(&wd->hDir);
+        CompleteRemovalIfDone(wd);
+    }
+}
+
+// A pending removal is a WatchedDir that was unlinked from gWatchedDirs and handed
+// to StopMonitoringDirAPC(); it lives until CancelIo() reports back through
+// ReadDirectoryChangesNotification(ERROR_OPERATION_ABORTED). If that never happens
+// (APC not delivered because the watcher thread isn't alertable, or the handle is
+// on an unresponsive network share) shutdown spins here, so name the culprits.
+// returns false (and logs nothing) if nothing is pending anymore
+static bool LogPendingRemovals(Str when) {
+    // hold the mutex while reading the count too: ReadDirectoryChangesNotification()
+    // unlinks the dir and decrements under the same mutex, so an unlocked read of
+    // gRemovalsPending can disagree with the list
+    ScopedMutex cs(&gFileWatcherMutex);
+    int nPending = AtomicIntGet(&gRemovalsPending);
+    if (nPending <= 0) {
+        return false;
+    }
+    u64 now = GetTickCount64();
+    logf("FileWatcher: %s, %d removals pending\n", when, nPending);
+    int n = 0;
+    for (WatchedDir* wd = gRemovalsPendingDirs; wd; wd = wd->next) {
+        n++;
+        logf("  %d: dir '%s' hDir=%p startMonitoring=%d queued %d ms ago\n", n, wd->dirPath, (const void*)wd->hDir,
+             (int)wd->startMonitoring, (int)(now - wd->removalQueuedAt));
+    }
+    if (n != nPending) {
+        logf("  note: %d dirs on the pending list but gRemovalsPending is %d\n", n, nPending);
+    }
+    return true;
 }
 
 void FileWatcherWaitForShutdown(void) {
@@ -533,17 +690,37 @@ void FileWatcherWaitForShutdown(void) {
     ReportIf(gWatchedFiles != nullptr);
     ReportIf(gWatchedDirs != nullptr);
 
-    // signal the thread to exit and wake it up via APC
-    QueueUserAPC(SignalExitMonitoringThread, gThreadHandle, (ULONG_PTR)0);
+    u64 timeStart = GetTickCount64();
+    bool loggedPending = false;
+    while (AtomicIntGet(&gRemovalsPending) > 0 && (GetTickCount64() - timeStart) < 15000) {
+        if (!loggedPending) {
+            loggedPending = LogPendingRemovals(StrL("waiting for shutdown"));
+        }
+        SleepInMs(100);
+    }
+    if (loggedPending) {
+        u64 waitedMs = GetTickCount64() - timeStart;
+        TempStr when = fmt("gave up waiting after %d ms", (int)waitedMs);
+        if (!LogPendingRemovals(when)) {
+            logf("FileWatcher: all removals drained after %d ms\n", (int)waitedMs);
+        }
+    }
+
+    // Signal from this thread and wake the watcher through the control event.
+    // Relying on an APC to both set the flag and wake the thread is fragile
+    // during shutdown, especially when previous directory-cancel APCs are still
+    // pending or a debugger interrupted the drain above.
+    AtomicBoolSet(&gShouldExit, true);
+    AwakeWatcherThread();
 
     // wait for the thread to actually exit (up to 5 seconds)
     DWORD res = WaitForSingleObject(gThreadHandle, 5000);
     if (res == WAIT_TIMEOUT) {
         logf("FileWatcherWaitForShutdown: thread didn't exit in 5 seconds\n");
+        return;
     }
-    SafeCloseHandle(&gThreadHandle);
+    SafeCloseThreadHandle(&gThreadHandle);
     SafeCloseHandle(&gThreadControlHandle);
-    DeleteCriticalSection(&gFileWatcherMutex);
 }
 
 static void RemoveWatchedFile(WatchedFile* wf) {
@@ -566,7 +743,7 @@ void FileWatcherUnsubscribe(WatchedFile* wf) {
     }
     ReportIf(!gThreadHandle);
 
-    ScopedCritSec cs(&gFileWatcherMutex);
+    ScopedMutex cs(&gFileWatcherMutex);
 
     RemoveWatchedFile(wf);
 }

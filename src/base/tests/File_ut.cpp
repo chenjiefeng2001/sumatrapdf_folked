@@ -8,36 +8,37 @@
 #include "base/UtAssert.h"
 
 void FileUtilTest() {
+#if OS_WIN
     Str path1 = "C:\\Program Files\\SumatraPDF\\SumatraPDF.exe";
 
     TempStr baseName = path::GetBaseNameTemp(path1);
-    utassert(str::Eq(baseName, "SumatraPDF.exe"));
+    utassert(str::Eq(baseName, StrL("SumatraPDF.exe")));
 
     TempStr dirName = path::GetDirTemp(path1);
-    utassert(str::Eq(dirName, "C:\\Program Files\\SumatraPDF"));
+    utassert(str::Eq(dirName, StrL("C:\\Program Files\\SumatraPDF")));
     baseName = path::GetBaseNameTemp(dirName);
-    utassert(str::Eq(baseName, "SumatraPDF"));
+    utassert(str::Eq(baseName, StrL("SumatraPDF")));
 
     dirName = path::GetDirTemp("C:\\Program Files");
-    utassert(str::Eq(dirName, "C:\\"));
+    utassert(str::Eq(dirName, StrL("C:\\")));
     dirName = path::GetDirTemp(dirName);
-    utassert(str::Eq(dirName, "C:\\"));
+    utassert(str::Eq(dirName, StrL("C:\\")));
     dirName = path::GetDirTemp("\\\\server");
-    utassert(str::Eq(dirName, "\\\\server"));
+    utassert(str::Eq(dirName, StrL("\\\\server")));
     dirName = path::GetDirTemp("file.exe");
-    utassert(str::Eq(dirName, "."));
+    utassert(str::Eq(dirName, StrL(".")));
     dirName = path::GetDirTemp("/etc");
-    utassert(str::Eq(dirName, "/"));
+    utassert(str::Eq(dirName, StrL("/")));
 
     path1 = "C:\\Program Files";
     Str path2 = path::Join("C:\\", "Program Files");
     utassert(str::Eq(path1, path2));
     str::Free(path2);
     path2 = path::Join(path1, "SumatraPDF");
-    utassert(str::Eq(path2, "C:\\Program Files\\SumatraPDF"));
+    utassert(str::Eq(path2, StrL("C:\\Program Files\\SumatraPDF")));
     str::Free(path2);
     path2 = path::Join("C:\\", "\\Windows");
-    utassert(str::Eq(path2, "C:\\Windows"));
+    utassert(str::Eq(path2, StrL("C:\\Windows")));
     str::Free(path2);
 
     utassert(path::Match("C:\\file.pdf", "*.pdf"));
@@ -47,39 +48,51 @@ void FileUtilTest() {
     utassert(path::Match("C:\\file.pdf", "f??e.p?f"));
     utassert(!path::Match("C:\\file.pdf", "*.xps;*.djvu"));
     utassert(!path::Match("C:\\dir.xps\\file.pdf", "*.xps;*.djvu"));
+
+    utassert(path::IsEphemeralHostFile(StrL("C:\\Users\\x\\AppData\\Local\\Microsoft\\OneNote\\16.0\\cache\\a.pdf")));
+    utassert(path::IsEphemeralHostFile(StrL("C:\\Users\\x\\AppData\\Local\\Temp\\OneNote\\tmp\\a.pdf")));
+    utassert(path::IsEphemeralHostFile(
+        StrL("C:\\Users\\x\\AppData\\Local\\Microsoft\\Windows\\INetCache\\Content.Outlook\\ABC\\a.pdf")));
+    utassert(
+        path::IsEphemeralHostFile(StrL("C:\\Users\\x\\AppData\\Local\\Microsoft\\Windows\\INetCache\\IE\\xyz\\a.pdf")));
+    utassert(path::IsEphemeralHostFile(
+        StrL("C:\\Users\\x\\AppData\\Local\\Packages\\Microsoft.Office.OneNote_8wekyb3d8bbwe\\LocalState\\a.pdf")));
+    utassert(!path::IsEphemeralHostFile(StrL("C:\\docs\\paper.pdf")));
+    utassert(!path::IsEphemeralHostFile(StrL("C:\\docs\\OneNotePDFs\\a.pdf")));
+    utassert(!path::IsEphemeralHostFile(StrL("C:\\docs\\my-onenote-export.pdf")));
     utassert(!path::Match("C:\\file.pdf", "f??f.p?f"));
     utassert(!path::Match("C:\\.pdf", "?.pdf"));
     {
         TempStr path = path::JoinTemp("foo", "bar");
-        utassert(str::Eq(path, "foo\\bar"));
+        utassert(str::Eq(path, StrL("foo\\bar")));
 
         path = path::JoinTemp("foo\\", "bar");
-        utassert(str::Eq(path, "foo\\bar"));
+        utassert(str::Eq(path, StrL("foo\\bar")));
 
         path = path::JoinTemp("foo", "\\bar");
-        utassert(str::Eq(path, "foo\\bar"));
+        utassert(str::Eq(path, StrL("foo\\bar")));
 
         path = path::JoinTemp("foo\\", "\\bar");
-        utassert(str::Eq(path, "foo\\bar"));
+        utassert(str::Eq(path, StrL("foo\\bar")));
 
         path = path::JoinTemp("foo\\", "\\bar\\", "\\z");
-        utassert(str::Eq(path, "foo\\bar\\z"));
+        utassert(str::Eq(path, StrL("foo\\bar\\z")));
     }
     {
         Str path = path::Join("foo", "bar");
-        utassert(str::Eq(path, "foo\\bar"));
+        utassert(str::Eq(path, StrL("foo\\bar")));
         str::Free(path);
 
         path = path::Join("foo\\", "bar");
-        utassert(str::Eq(path, "foo\\bar"));
+        utassert(str::Eq(path, StrL("foo\\bar")));
         str::Free(path);
 
         path = path::Join("foo", "\\bar");
-        utassert(str::Eq(path, "foo\\bar"));
+        utassert(str::Eq(path, StrL("foo\\bar")));
         str::Free(path);
 
         path = path::Join("foo\\", "\\bar");
-        utassert(str::Eq(path, "foo\\bar"));
+        utassert(str::Eq(path, StrL("foo\\bar")));
         str::Free(path);
 
         // path = path::Join("foo\\", "\\bar\\", "\\z");
@@ -93,5 +106,62 @@ void FileUtilTest() {
         Str p = "C:\\foo\\prince of persia technical doc.pdf";
         TempStr norm = path::NormalizeTemp(p);
         utassert(str::EqI(norm, p));
+    }
+#else
+    Str path1 = "/Applications/SumatraPDF/SumatraPDF";
+
+    TempStr baseName = path::GetBaseNameTemp(path1);
+    utassert(str::Eq(baseName, StrL("SumatraPDF")));
+
+    TempStr dirName = path::GetDirTemp(path1);
+    utassert(str::Eq(dirName, StrL("/Applications/SumatraPDF")));
+    baseName = path::GetBaseNameTemp(dirName);
+    utassert(str::Eq(baseName, StrL("SumatraPDF")));
+
+    dirName = path::GetDirTemp("/etc");
+    utassert(str::Eq(dirName, StrL("/")));
+    dirName = path::GetDirTemp("file");
+    utassert(str::Eq(dirName, StrL(".")));
+
+    Str path2 = path::Join("/Applications", "SumatraPDF");
+    utassert(str::Eq(path2, StrL("/Applications/SumatraPDF")));
+    str::Free(path2);
+    path2 = path::Join("/Applications/", "/SumatraPDF");
+    utassert(str::Eq(path2, StrL("/Applications/SumatraPDF")));
+    str::Free(path2);
+
+    utassert(path::Match("/tmp/file.pdf", "*.pdf"));
+    utassert(path::Match("/tmp/file.pdf", "file.*"));
+    utassert(path::Match("/tmp/file.pdf", "*.xps;*.pdf"));
+    utassert(!path::Match("/tmp/file.pdf", "*.xps;*.djvu"));
+
+    TempStr path = path::JoinTemp("foo", "bar");
+    utassert(str::Eq(path, StrL("foo/bar")));
+    path = path::JoinTemp("foo/", "/bar");
+    utassert(str::Eq(path, StrL("foo/bar")));
+    path = path::JoinTemp("foo/", "/bar/", "/z");
+    utassert(str::Eq(path, StrL("foo/bar/z")));
+
+    Str joined = path::Join("foo", "bar");
+    utassert(str::Eq(joined, StrL("foo/bar")));
+    str::Free(joined);
+#endif
+
+    {
+        // write a temp file, map it and verify the view matches what was written
+        TempStr path = GetTempFilePathTemp("mmap-test");
+        utassert(len(path) > 0);
+        Str content = StrL("file::MemoryMap test content 0123456789");
+        bool ok = file::WriteFile(path, content);
+        utassert(ok);
+        file::Mapping m;
+        ok = file::MemoryMap(path, &m);
+        utassert(ok);
+        utassert(m.size == (i64)len(content));
+        utassert(m.data && memcmp(m.data, content.s, (size_t)len(content)) == 0);
+        file::MemoryUnmap(&m);
+        utassert(!m.data && m.size == 0);
+        ok = file::Delete(path);
+        utassert(ok);
     }
 }

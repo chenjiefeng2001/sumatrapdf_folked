@@ -78,49 +78,50 @@ struct HashTable {
     HashTableEntry** entries;
     HashTableEntry* freeList;
 
-    size_t nEntries;
-    size_t nUsed; // total number of inserted entries
+    int nEntries;
+    int nUsed; // total number of inserted entries
 
     // for debugging
-    size_t nResizes;
-    size_t nCollisions;
+    int nResizes;
+    int nCollisions;
 };
 
-static HashTable* NewHashTable(size_t size, Arena* allocator) {
-    ReportIf(!allocator); // we'll leak otherwise
-    HashTable* h = AllocArray<HashTable>(allocator, 1);
+static HashTable* NewHashTable(int size, Arena* a) {
+    ReportIf(!a); // we'll leak otherwise
+    HashTable* h = AllocArray<HashTable>(a, 1);
     // number of hash table entries should be power of 2
-    size = RoundToPowerOf2((int)size);
-    // entries are not allocated with allocator since those are large blocks
+    size = RoundToPowerOf2(size);
+    // entries are not allocated with the arena since those are large blocks
     // and we don't want to waste their memory after
-    h->entries = AllocArray<HashTableEntry*>((int)size);
+    h->entries = AllocArray<HashTableEntry*>(size);
     h->nEntries = size;
     return h;
 }
 
 static void DeleteHashTable(HashTable* h) {
-    free(h->entries);
-    // the rest is freed by allocator
+    free((void*)h->entries);
+    // the rest is freed by the arena
 }
 
 static void HashTableResize(HashTable* h, HasherComparator* hc) {
-    size_t newSize = RoundToPowerOf2((int)(h->nEntries + 1));
+    int newSize = RoundToPowerOf2(h->nEntries + 1);
     ReportIf(newSize <= h->nEntries);
-    HashTableEntry** newEntries = AllocArray<HashTableEntry*>((int)newSize);
+    HashTableEntry** newEntries = AllocArray<HashTableEntry*>(newSize);
     HashTableEntry *e, *next;
-    size_t hash, pos;
-    for (size_t i = 0; i < h->nEntries; i++) {
+    size_t hash;
+    int pos;
+    for (int i = 0; i < h->nEntries; i++) {
         e = h->entries[i];
         while (e) {
             next = e->next;
             hash = hc->Hash(e->key);
-            pos = hash % newSize;
+            pos = (int)(hash % (size_t)newSize);
             e->next = newEntries[pos];
             newEntries[pos] = e;
             e = next;
         }
     }
-    free(h->entries);
+    free((void*)h->entries);
     h->entries = newEntries;
     h->nEntries = newSize;
     h->nResizes += 1;
@@ -139,12 +140,11 @@ static inline void HashTableResizeIfNeeded(HashTable* h, HasherComparator* hc) {
     HashTableResize(h, hc);
 }
 
-// note: allocator must be nullptr for get, non-nullptr for create
-static HashTableEntry* GetOrCreateEntry(HashTable* h, HasherComparator* hc, uintptr_t key, Arena* allocator,
-                                        bool& newEntry) {
-    bool shouldCreate = (allocator != nullptr);
+// note: a must be nullptr for get, non-nullptr for create
+static HashTableEntry* GetOrCreateEntry(HashTable* h, HasherComparator* hc, uintptr_t key, Arena* a, bool& newEntry) {
+    bool shouldCreate = (a != nullptr);
     size_t hash = hc->Hash(key);
-    size_t pos = hash % h->nEntries;
+    int pos = (int)(hash % (size_t)h->nEntries);
     HashTableEntry* e = h->entries[pos];
     newEntry = false;
     while (e) {
@@ -161,7 +161,7 @@ static HashTableEntry* GetOrCreateEntry(HashTable* h, HasherComparator* hc, uint
         e = h->freeList;
         h->freeList = h->freeList->next;
     } else {
-        e = AllocArray<HashTableEntry>(allocator, 1);
+        e = AllocArray<HashTableEntry>(a, 1);
     }
     e->next = h->entries[pos];
     h->entries[pos] = e;
@@ -175,7 +175,7 @@ static HashTableEntry* GetOrCreateEntry(HashTable* h, HasherComparator* hc, uint
 
 static bool RemoveEntry(HashTable* h, HasherComparator* hc, uintptr_t key, uintptr_t* removedValOut) {
     size_t hash = hc->Hash(key);
-    size_t pos = hash % h->nEntries;
+    int pos = (int)(hash % (size_t)h->nEntries);
     HashTableEntry* e = h->entries[pos];
     while (e) {
         if (hc->Equal(key, e->key)) {
@@ -205,18 +205,18 @@ static bool RemoveEntry(HashTable* h, HasherComparator* hc, uintptr_t key, uintp
     return true;
 }
 
-MapStrToInt::MapStrToInt(size_t initialSize) {
+MapStrToInt::MapStrToInt(int initialSize) {
     // arena-allocate HashTableEntry entries and copies of string keys
-    allocator = ArenaNew();
-    h = NewHashTable(initialSize, allocator);
+    a = ArenaNew();
+    h = NewHashTable(initialSize, a);
 }
 
 MapStrToInt::~MapStrToInt() {
     DeleteHashTable(h);
-    ArenaDelete(allocator);
+    ArenaDelete(a);
 }
 
-size_t MapStrToInt::Count() const {
+int MapStrToInt::Count() const {
     return h->nUsed;
 }
 
@@ -227,14 +227,14 @@ size_t MapStrToInt::Count() const {
 
 // if a key doesn't exist:
 //   * returns true
-//   * inserts a copy of the key allocated with allocator
+//   * inserts a copy of the key allocated with the arena
 //   * sets existingKeyOut to (interned) key
 bool MapStrToInt::Insert(Str key, int val, int* existingValOut, Str* existingKeyOut) {
-    if (str::IsEmpty(key)) {
+    if (len(key) == 0) {
         return false;
     }
     bool newEntry;
-    HashTableEntry* e = GetOrCreateEntry(h, &gStrKeyHasherComparator, (uintptr_t)CStrTemp(key), allocator, newEntry);
+    HashTableEntry* e = GetOrCreateEntry(h, &gStrKeyHasherComparator, (uintptr_t)CStrTemp(key), a, newEntry);
     if (!newEntry) {
         if (existingValOut) {
             *existingValOut = (int)e->val;
@@ -244,7 +244,7 @@ bool MapStrToInt::Insert(Str key, int val, int* existingValOut, Str* existingKey
         }
         return false;
     }
-    e->key = (intptr_t)str::Dup(allocator, key).s;
+    e->key = (intptr_t)str::Dup(a, key).s;
     e->val = (intptr_t)val;
     if (existingKeyOut) {
         *existingKeyOut = KeyAsStr(e->key);
@@ -255,7 +255,7 @@ bool MapStrToInt::Insert(Str key, int val, int* existingValOut, Str* existingKey
 }
 
 bool MapStrToInt::Remove(Str key, int* removedValOut) const {
-    if (str::IsEmpty(key)) {
+    if (len(key) == 0) {
         return false;
     }
     uintptr_t removedVal;
@@ -267,7 +267,7 @@ bool MapStrToInt::Remove(Str key, int* removedValOut) const {
 }
 
 bool MapStrToInt::Get(Str key, int* valOut) const {
-    if (str::IsEmpty(key)) {
+    if (len(key) == 0) {
         return false;
     }
     StrKeyHasherComparator hc;

@@ -1,12 +1,14 @@
 /* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
+enum class FileType : u8;
+
 struct archive;
 struct archive_entry;
 
 // forward-declared so ArchiveExtractProgress below can reference
-// MultiFormatArchive::FileInfo, which is defined inside the class body.
-class MultiFormatArchive;
+// Archive::FileInfo, which is defined inside the class body.
+struct Archive;
 
 struct ArchiveExtractProgress;
 using ArchiveExtractProgressCb = Func1<ArchiveExtractProgress*>;
@@ -14,11 +16,10 @@ using ArchiveExtractProgressCb = Func1<ArchiveExtractProgress*>;
 // Thread-local progress callback honored by archive opens. Callers set
 // it before triggering a load that may open archives (e.g. cbx / epub /
 // fb2z); cleared afterwards. Archive openers pass it straight through to
-// MultiFormatArchive::Open without further indirection.
+// Archive::Open without further indirection.
 extern thread_local ArchiveExtractProgressCb gArchiveProgressCb;
 
-class MultiFormatArchive {
-  public:
+struct Archive {
     enum class Format {
         Unknown,
         Zip,
@@ -28,13 +29,14 @@ class MultiFormatArchive {
     };
 
     struct FileInfo {
-        size_t fileId = 0;
-        Str name = {};
+        int fileId = 0;
+        Str name;
         i64 fileTime = 0; // this is typedef'ed as time64_t in unrar.h
-        size_t fileSizeUncompressed = 0;
+        int fileSizeUncompressed = 0;
         bool isDir = false;
-        // set when eagerLoad extraction failed for this entry (bad data,
-        // OOM, etc.). `data` will be nullptr in that case.
+        // Permanent extract failure (no path to reopen, corrupt entry).
+        // Transient I/O (sleep, network drop) leaves this false so a later
+        // GetFileDataById retries. `data` is nullptr when failed.
         bool failed = false;
 
         // internal use
@@ -44,37 +46,21 @@ class MultiFormatArchive {
         FILETIME GetWinFileTime() const;
     };
 
-    MultiFormatArchive();
-    ~MultiFormatArchive();
+    Archive();
+    ~Archive();
 
     Format format = Format::Unknown;
 
-    bool Open(Str path, bool eagerLoad, Kind hintKind, const ArchiveExtractProgressCb& cbProgress);
-    bool Open(IStream* stream);
+    bool Open(Str path, bool eagerLoad, FileType hintType, const ArchiveExtractProgressCb& cbProgress);
+    bool OpenFromData(Str data, bool eagerLoad = true);
 
     Vec<FileInfo*> const& GetFileInfos();
 
-    size_t GetFileId(Str fileName);
+    int GetFileId(Str fileName);
 
-    // Return the FileInfo record for a given entry, loading its data into
-    // fileInfo->data on demand (on a miss, re-opens the archive unless
-    // that was disabled by eager-load mode).
-    //
-    // Ownership: the returned FileInfo* is owned by this archive. By
-    // default fileInfo->data is *not* transferred to the caller — a later
-    // call for the same entry returns the same cached buffer, and the
-    // archive destructor frees it. If the caller wants the buffer to
-    // outlive the archive, they should set fileInfo->data = nullptr after
-    // saving the pointer; they then become responsible for free()ing it.
-    //
-    // Returns nullptr for an unknown name / out-of-range fileId. For an
-    // entry whose decompression failed check fileInfo->failed — data will
-    // be nullptr in that case.
     FileInfo* GetFileDataByName(Str filename);
-    FileInfo* GetFileDataById(size_t fileId);
-    Str GetFileDataPartById(size_t fileId, size_t sizeHint);
-
-    Str GetComment();
+    FileInfo* GetFileDataById(int fileId);
+    Str GetFileDataPartById(int fileId, int sizeHint);
 
     // password for encrypted archives (owned by this object)
     Str password;
@@ -82,12 +68,13 @@ class MultiFormatArchive {
     // set after Open() if the archive contains encrypted entries
     bool isEncrypted = false;
 
-  protected:
     // used for allocating strings that are referenced by ArchFileInfo::name
-    Arena* allocator_ = nullptr;
+    Arena* a = nullptr;
     Vec<FileInfo*> fileInfos_;
 
     Str archivePath_;
+    // compressed bytes when opened from memory; kept so we can re-open for lazy extract
+    Str archiveData_;
 
     // only set when we loaded file infos using unrar.dll fallback
     Str rarFilePath_;
@@ -96,11 +83,9 @@ class MultiFormatArchive {
     bool ParseEntries(struct archive* a, bool eagerLoad, const ArchiveExtractProgressCb& cbProgress);
 
     bool OpenUnrarFallback(Str rarPathUtf, bool eagerLoad, const ArchiveExtractProgressCb& cbProgress);
-    // Populate fileInfos_[fileId]->data via the respective backend; set
-    // ->failed when extraction didn't produce the expected bytes.
-    void LoadFileDataByIdUnrarDll(size_t fileId);
-    void LoadFileDataByIdLibarchive(size_t fileId);
-    Str GetFileDataPartByIdUnrarDll(size_t fileId, size_t sizeHint);
+    void LoadFileDataByIdUnrarDll(int fileId);
+    void LoadFileDataByIdLibarchive(int fileId);
+    Str GetFileDataPartByIdUnrarDll(int fileId, int sizeHint);
     bool LoadedUsingUnrarDll() const { return (bool)rarFilePath_; }
 };
 
@@ -111,11 +96,11 @@ class MultiFormatArchive {
 // knows the total at the end, so most callbacks carry -1 and a final
 // callback carries nDecoded == nTotal).
 struct ArchiveExtractProgress {
-    MultiFormatArchive::FileInfo* fileInfo;
+    Archive::FileInfo* fileInfo;
     int nDecoded;
     int nTotal;
 };
 
-MultiFormatArchive* OpenArchiveFromFile(Str path, bool eagerLoad, const ArchiveExtractProgressCb& cbProgress);
+Archive* OpenArchiveFromFile(Str path, bool eagerLoad, const ArchiveExtractProgressCb& cbProgress);
 
-MultiFormatArchive* OpenArchiveFromStream(IStream* stream);
+Archive* OpenArchiveFromData(Str data);

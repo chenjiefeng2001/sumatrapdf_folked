@@ -2,17 +2,19 @@
    License: Simplified BSD (see COPYING.BSD) */
 
 class ZipCreator {
-    ISequentialStream* stream;
     str::Builder centraldir;
+    str::Builder zipData;
+    str::Builder* zipOut;
+    Str zipFilePath;
     size_t bytesWritten;
     size_t fileCount;
 
     bool WriteData(const void* data, size_t size);
-    bool AddFileData(Str name, Str data, u32 dosdate = 0);
 
   public:
+    bool AddFileData(Str name, Str data, u32 dosdate = 0);
     explicit ZipCreator(Str zipFilePath);
-    explicit ZipCreator(ISequentialStream* stream);
+    explicit ZipCreator(str::Builder& zipOut);
     ~ZipCreator();
 
     ZipCreator(ZipCreator const&) = delete;
@@ -24,6 +26,6 @@ class ZipCreator {
     bool Finish();
 };
 
-IStream* OpenDirAsZipStream(Str dirPath, bool recursive = false);
+Str ZipDirToData(Str dirPath, bool recursive = false);
 
-Str Ungzip(const Str&);
+Str Ungzip(const Str&, int maxSize);

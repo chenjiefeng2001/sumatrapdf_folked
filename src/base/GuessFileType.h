@@ -2,47 +2,52 @@
 /* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
-extern Kind kindFilePDF;
-extern Kind kindFilePS;
-extern Kind kindFileXps;
-extern Kind kindFileDjVu;
-extern Kind kindFileChm;
+enum class FileType : u8 {
+    Unknown = 0,
+    PDF = 1,
+    PS = 2,
+    Xps = 3,
+    DjVu = 4,
+    Chm = 5,
 
-extern Kind kindFileZip;
-extern Kind kindFileCbz;
-extern Kind kindFileCbr;
-extern Kind kindFileRar;
-extern Kind kindFile7Z;
-extern Kind kindFileCb7;
-extern Kind kindFileTar;
-extern Kind kindFileCbt;
+    Zip = 6,
+    Cbz = 7,
+    Cbr = 8,
+    Rar = 9,
+    SevenZ = 10,
+    Cb7 = 11,
+    Tar = 12,
+    Cbt = 13,
 
-extern Kind kindFilePng;
-extern Kind kindFileJpeg;
-extern Kind kindFileGif;
-extern Kind kindFileTiff;
-extern Kind kindFileBmp;
-extern Kind kindFileTga;
-extern Kind kindFileJxr;
-extern Kind kindFileHdp;
-extern Kind kindFileWdp;
-extern Kind kindFileWebp;
-extern Kind kindFileJxl;
-extern Kind kindFileJp2;
+    Png = 14,
+    Jpeg = 15,
+    Gif = 16,
+    Tiff = 17,
+    Bmp = 18,
+    Tga = 19,
+    Jxr = 20,
+    Hdp = 21,
+    Wdp = 22,
+    Webp = 23,
+    Jxl = 24,
+    Jp2 = 25,
 
-extern Kind kindFileFb2;
-extern Kind kindFileFb2z;
-extern Kind kindFileEpub;
-extern Kind kindFileMarkdown;
-extern Kind kindFileMobi;
-extern Kind kindFilePalmDoc;
-extern Kind kindFileHTML;
-extern Kind kindFileSvg;
-extern Kind kindFileHeic;
-extern Kind kindFileAvif;
-extern Kind kindFileTxt;
+    Fb2 = 26,
+    Fb2z = 27,
+    Epub = 28,
+    Markdown = 29,
+    Mobi = 30,
+    PalmDoc = 31,
+    HTML = 32,
+    Svg = 33,
+    Heic = 34,
+    Avif = 35,
+    Txt = 36,
 
-extern Kind kindDirectory;
+    Directory = 37,
+    Lit = 38,
+};
+constexpr int kFileTypeCount = (int)FileType::Lit + 1;
 
 // embedded PDF files have paths like "c:/foo.pdf:${pdfStreamNo}"
 // or "c:/foo.pdf:${pdfStreamNo}:attachname=${hexUtf8Name}"
@@ -52,15 +57,34 @@ struct EmbeddedPdfName {
 };
 EmbeddedPdfName ParseEmbeddedPdfName(Str path);
 
-Kind GuessFileTypeFromFile(Str path);
-Kind GuessFileTypeFromContent(Str d);
-Kind GuessFileTypeFromName(Str path);
-Kind GuessFileType(Str path, bool sniff);
+struct Size;
+
+struct FileTypeInfo {
+    FileType ft = FileType::Unknown;
+    // if false, callers can fall back to a more expensive way of getting the size
+    bool hasImageSize = false;
+    int imageDx = 0;     // only for single-image files: image width, after applying orientation
+    int imageDy = 0;     // only for single-image files: image height, after applying orientation
+    int nImages = 0;     // only for image files: number of images
+    int orientation = 0; // EXIF orientation (1-8) for jpeg/webp/jxl, 0 if not present
+    // per-image sizes, only allocated for multi-image files (nImages > 1,
+    // nImages entries); free with FreeFileTypeInfo()
+    Size* imageSizes = nullptr;
+};
+
+FileTypeInfo GuessFileInfoFromData(Str d);
+void FreeFileTypeInfo(FileTypeInfo*);
+int WebpExifOrientation(Str d);
+bool FindWebpChunk(Str d, const char fourcc[4], Str& out);
+bool ExifOrientationSwapsDimensions(int orientation);
+FileType GuessFileTypeFromFile(Str path);
+FileType GuessFileTypeFromData(Str d);
+FileType GuessFileTypeFromName(Str path, bool notDir = false);
+FileType GuessFileType(Str path, bool sniff);
 TempStr GfxFileExtFromDataTemp(Str);
-TempStr GfxFileExtFromKindTemp(Kind);
-TempStr GetExtForKindTemp(Kind kind);
+TempStr GfxFileExtFromTypeTemp(FileType);
+TempStr GetExtForFileTypeTemp(FileType);
 
-int KindIndexOf(Kind* kinds, int nKinds, Kind kind);
+int FileTypeIndexOf(const FileType* types, int nTypes, FileType ft);
 
-// Headless test helper: compare GuessFileTypeFromName to an expected kind name.
-TempStr FileKindResultTemp(Str path, Str expectedKindName, int* exitCodeOut = nullptr);
+TempStr FileKindResultTemp(Str path, Str expectedExt, int* exitCodeOut = nullptr);

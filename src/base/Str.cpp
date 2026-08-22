@@ -1,7 +1,7 @@
 /* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
-#include "Base.h"
+#include "base/Base.h"
 
 #if !defined(_MSC_VER)
 #define _strdup strdup
@@ -10,6 +10,246 @@
 // TODO: not sure if that's correct
 #define sscanf_s sscanf
 #endif
+
+// StrArena: u32 handle from ArenaPtrCompress. Arena layout is unsigned LEB128
+// length, length bytes of payload, trailing 0 for C APIs. 0 is the null handle.
+
+static int StrArenaUlebSize(u32 n) {
+    int i = 1;
+    while (n >= 0x80) {
+        n >>= 7;
+        i++;
+    }
+    return i;
+}
+
+static int StrArenaUlebEncode(u8* dst, u32 n) {
+    int i = 0;
+    for (;;) {
+        u8 b = (u8)(n & 0x7f);
+        n >>= 7;
+        if (n) {
+            b |= 0x80;
+        }
+        dst[i++] = b;
+        if (!n) {
+            return i;
+        }
+    }
+}
+
+static bool StrArenaUlebDecode(const u8*& p, u32* out) {
+    u32 n = 0;
+    int shift = 0;
+    for (;;) {
+        u8 b = *p++;
+        n |= (u32)(b & 0x7f) << shift;
+        if (!(b & 0x80)) {
+            *out = n;
+            return true;
+        }
+        shift += 7;
+        if (shift >= 35) {
+            return false;
+        }
+    }
+}
+
+// Allocate [uleb(size)][size bytes][0]. Body is uninitialized; terminator is set.
+// Caller fills via StrArenaToStr(a, handle).s.
+StrArena StrArenaAlloc(Arena* a, int size) {
+    if (!a || size < 0) {
+        return 0;
+    }
+    int vlen = StrArenaUlebSize((u32)size);
+    int total = vlen + size + 1;
+    u8* mem = (u8*)a->Push((u64)total, 1, false);
+    if (!mem) {
+        return 0;
+    }
+    StrArenaUlebEncode(mem, (u32)size);
+    mem[vlen + size] = 0;
+    return ArenaPtrCompress(a, mem);
+}
+
+StrArena StrArenaDupStr(Arena* a, Str s) {
+    if (!a) {
+        return 0;
+    }
+    int size = s.len;
+    size = std::max(size, 0);
+    StrArena sa = StrArenaAlloc(a, size);
+    if (!sa) {
+        return 0;
+    }
+    if (size > 0 && s.s) {
+        Str out = StrArenaToStr(a, sa);
+        memcpy(out.s, s.s, (size_t)size);
+    }
+    return sa;
+}
+
+Str StrArenaToStr(Arena* a, StrArena sa) {
+    if (!a || !sa) {
+        return {};
+    }
+    u8* mem = (u8*)ArenaPtrUncompress(a, sa);
+    if (!mem) {
+        return {};
+    }
+    const u8* p = mem;
+    u32 size = 0;
+    if (!StrArenaUlebDecode(p, &size)) {
+        return {};
+    }
+    return Str((char*)p, (int)size);
+}
+
+// Locale-independent Unicode lowercase fold for one WCHAR.
+// On Windows, CharLowerBuffW matches FoldCaseWInPlace; on POSIX a small table
+// covers Latin/Cyrillic/Greek used by tests and falls back to towlower().
+static WCHAR FoldCaseWChar(WCHAR c) {
+#if OS_WIN
+    WCHAR ch = c;
+    CharLowerBuffW(&ch, 1);
+    return ch;
+#else
+    if (c >= L'A' && c <= L'Z') {
+        return c + 32;
+    }
+    if (c >= 0x00C0 && c <= 0x00DE && c != 0x00D7) {
+        return c + 32;
+    }
+    if (c >= 0x0410 && c <= 0x042F) {
+        return c + 32;
+    }
+    if (c == 0x0401) {
+        return 0x0451;
+    }
+    if ((c >= 0x0391 && c <= 0x03A1) || (c >= 0x03A3 && c <= 0x03AB)) {
+        return c + 32;
+    }
+    return (WCHAR)towlower(c);
+#endif
+}
+
+// Locale-independent Unicode lowercase folding for case-insensitive matching.
+static void FoldCaseWInPlace(WStr s) {
+#if OS_WIN
+    CharLowerBuffW(s.s, (DWORD)s.len);
+#else
+    for (int i = 0; i < s.len; i++) {
+        s.s[i] = FoldCaseWChar(s.s[i]);
+    }
+#endif
+    for (int i = 0; i < s.len; i++) {
+        if (s.s[i] == 0x0130) {
+            s.s[i] = L'i';
+        }
+    }
+}
+
+static int Utf8ByteOffsetForWCharOffset(Str s, int wcharOff) {
+    if (wcharOff <= 0) {
+        return 0;
+    }
+    int byteOff = 0;
+    int nWide = 0;
+    while (byteOff < s.len && nWide < wcharOff) {
+        int prevByteOff = byteOff;
+        int codepoint = Utf8CodepointNext(s, byteOff);
+        int wcharUnits = sizeof(wchar_t) == 2 && codepoint > 0xffff ? 2 : 1;
+        if (nWide + wcharUnits > wcharOff) {
+            return prevByteOff;
+        }
+        nWide += wcharUnits;
+    }
+    return byteOff;
+}
+
+#if !OS_WIN
+static bool IsRtlCodepoint(wchar_t c) {
+    return (c >= 0x0590 && c <= 0x08ff) || (c >= 0xfb1d && c <= 0xfdff) || (c >= 0xfe70 && c <= 0xfeff) ||
+           (c >= 0x10800 && c <= 0x10fff) || (c >= 0x1e800 && c <= 0x1edff);
+}
+
+static bool IsLtrCodepoint(wchar_t c) {
+    return (c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z') || (c >= 0x00c0 && c <= 0x02af) ||
+           (c >= 0x0370 && c <= 0x052f) || (c >= 0x1e00 && c <= 0x1fff);
+}
+#endif
+
+// One allocation: sizeofi(StrNode) + s.len + 1. a==null => malloc; else arena.
+StrNode* AllocStrNode(Arena* a, Str s) {
+    int n = s.len;
+    n = std::max(n, 0);
+    int cb = sizeofi(StrNode) + n + 1;
+    auto* node = (StrNode*)Alloc(a, cb);
+    if (!node) {
+        return nullptr;
+    }
+    char* dst = (char*)node + sizeofi(StrNode);
+    if (n > 0 && s.s) {
+        memcpy(dst, s.s, (size_t)n);
+    }
+    dst[n] = 0;
+    node->next = nullptr;
+    node->s = Str(dst, n);
+    return node;
+}
+
+// first node whose string equals s (case-sensitive), null if none
+StrNode* FindStrNode(StrNode* root, Str s) {
+    StrNode* curr = root;
+    while (curr) {
+        if (str::Eq(curr->s, s)) {
+            return curr;
+        }
+        curr = curr->next;
+    }
+    return nullptr;
+}
+
+// Malloc path (a==null): free each node. Arena path: no per-node free.
+// Frees the list with free() when a==null (malloc path). Arena path is a no-op.
+void FreeStrNode(Arena* a, StrNode* head) {
+    if (a) {
+        return;
+    }
+    while (head) {
+        StrNode* next = head->next;
+        free(head);
+        head = next;
+    }
+}
+
+// Append n as the new last node. Clears n->next. List does not free nodes.
+void StrNodeListPush(StrNodeList* list, StrNode* n) {
+    ReportIf(!list || !n);
+    n->next = nullptr;
+    if (list->tail) {
+        list->tail->next = n;
+    } else {
+        list->head = n;
+    }
+    list->tail = n;
+}
+
+// Unlink the last node. Does not free it; list becomes empty if it was the only node.
+void StrNodeListPop(StrNodeList* list) {
+    ReportIf(!list || !list->tail);
+    if (list->head == list->tail) {
+        list->head = nullptr;
+        list->tail = nullptr;
+        return;
+    }
+    StrNode* prev = list->head;
+    while (prev->next != list->tail) {
+        prev = prev->next;
+    }
+    prev->next = nullptr;
+    list->tail = prev;
+}
 
 namespace str {
 
@@ -43,22 +283,22 @@ void FreePtr(WStr* s) {
 } // namespace wstr
 namespace str {
 
-static Str WrapAllocated(char* s, size_t cch = (size_t)-1) {
+static Str WrapAllocated(char* s, int cch = -1) {
     if (!s) {
         return {};
     }
-    if (cch == (size_t)-1) {
+    if (cch < 0) {
         return Str(s);
     }
-    return Str(s, (int)cch);
+    return Str(s, cch);
 }
 
 Str Dup(Arena* a, Str s) {
     if (str::IsNull(s) || s.len < 0) {
         return {};
     }
-    size_t cch = (size_t)s.len;
-    return WrapAllocated((char*)MemDup(a, s.s, cch * sizeof(char), sizeof(char)), cch);
+    int cch = s.len;
+    return WrapAllocated((char*)MemDup(a, s.s, (size_t)cch * sizeof(char), sizeof(char)), cch);
 }
 
 Str Dup(Str s) {
@@ -68,22 +308,22 @@ Str Dup(Str s) {
 } // namespace str
 namespace wstr {
 
-static WStr WrapAllocatedW(WCHAR* s, size_t cch = (size_t)-1) {
+static WStr WrapAllocatedW(WCHAR* s, int cch = -1) {
     if (!s) {
         return {};
     }
-    if (cch == (size_t)-1) {
+    if (cch < 0) {
         return WStr(s);
     }
-    return WStr(s, (int)cch);
+    return WStr(s, cch);
 }
 
 WStr Dup(Arena* a, WStr s) {
     if (wstr::IsNull(s) || s.len < 0) {
         return {};
     }
-    size_t cch = (size_t)s.len;
-    return WrapAllocatedW((WCHAR*)MemDup(a, s.s, cch * sizeof(WCHAR), sizeof(WCHAR)), cch);
+    int cch = s.len;
+    return WrapAllocatedW((WCHAR*)MemDup(a, s.s, (size_t)cch * sizeof(WCHAR), sizeof(WCHAR)), cch);
 }
 
 WStr Dup(WStr s) {
@@ -119,7 +359,7 @@ bool Eq(Str s1, Str s2) {
     if (str::IsNull(s1) || str::IsNull(s2)) {
         return false;
     }
-    return memeq(s1.s, s2.s, len1);
+    return MemEq(s1.s, s2.s, len1);
 }
 
 // return true if s1 == s2, case insensitive
@@ -137,6 +377,47 @@ bool EqI(Str s1, Str s2) {
         return false;
     }
     return 0 == _strnicmp(s1.s, s2.s, (size_t)s1.len);
+}
+
+// strcmp-style (<0, 0, >0). Empty/null sorts before non-empty. Prefer Eq when only equality matters.
+int Cmp(Str a, Str b) {
+    if (a.s == b.s) {
+        return 0;
+    }
+    if (str::IsNull(a) || a.len == 0) {
+        return (str::IsNull(b) || b.len == 0) ? 0 : -1;
+    }
+    if (str::IsNull(b) || b.len == 0) {
+        return 1;
+    }
+    int n = std::min(a.len, b.len);
+    int r = memcmp(a.s, b.s, (size_t)n);
+    if (r != 0) {
+        return r;
+    }
+    return a.len - b.len;
+}
+
+// strcasecmp-style (<0, 0, >0). Prefer EqI when only equality matters.
+int CmpI(Str a, Str b) {
+    if (a.s == b.s) {
+        return 0;
+    }
+    if (str::IsNull(a) || a.len == 0) {
+        return (str::IsNull(b) || b.len == 0) ? 0 : -1;
+    }
+    if (str::IsNull(b) || b.len == 0) {
+        return 1;
+    }
+    int n = std::min(a.len, b.len);
+    for (int i = 0; i < n; i++) {
+        int c1 = tolower((u8)a.s[i]);
+        int c2 = tolower((u8)b.s[i]);
+        if (c1 != c2) {
+            return c1 - c2;
+        }
+    }
+    return a.len - b.len;
 }
 
 // compares two strings ignoring case and whitespace
@@ -175,30 +456,30 @@ bool EqIS(Str s1, Str s2) {
     return i1 >= s1.len && i2 >= s2.len;
 }
 
-bool EqN(Str s1, Str s2, int len) {
+bool EqN(Str s1, Str s2, int n) {
     if (s1.s == s2.s) {
         return true;
     }
-    if (!s1 || !s2 || len == 0) {
-        return len == 0;
+    if (!s1 || !s2 || n == 0) {
+        return n == 0;
     }
-    if (s1.len < len || s2.len < len) {
+    if (s1.len < n || s2.len < n) {
         return false;
     }
-    return memeq(s1.s, s2.s, len);
+    return MemEq(s1.s, s2.s, n);
 }
 
-bool EqNI(Str s1, Str s2, int len) {
+bool EqNI(Str s1, Str s2, int n) {
     if (s1.s == s2.s) {
         return true;
     }
-    if (!s1 || !s2 || len == 0) {
-        return len == 0;
+    if (!s1 || !s2 || n == 0) {
+        return n == 0;
     }
-    if (s1.len < len || s2.len < len) {
+    if (s1.len < n || s2.len < n) {
         return false;
     }
-    for (int i = 0; i < len; i++) {
+    for (int i = 0; i < n; i++) {
         if (tolower(s1.s[i]) != tolower(s2.s[i])) {
             return false;
         }
@@ -206,16 +487,18 @@ bool EqNI(Str s1, Str s2, int len) {
     return true;
 }
 
-bool IsNull(const Str& s) {
-    return !s.s;
-}
-
-bool IsEmpty(Str s) {
-    return str::IsNull(s) || s.len == 0 || (0 == *s.s);
-}
-
 bool StartsWith(Str s, Str prefix) {
     return EqN(s, prefix, len(prefix));
+}
+
+// Removes prefix from the string view, without modifying the underlying data.
+bool TrimPrefix(Str& s, Str prefix) {
+    if (!StartsWith(s, prefix)) {
+        return false;
+    }
+    s.s += prefix.len;
+    s.len -= prefix.len;
+    return true;
 }
 
 /* return true if 'str' starts with 'txt', NOT case-sensitive */
@@ -223,12 +506,12 @@ bool StartsWithI(Str s, Str prefix) {
     return EqNI(s, prefix, len(prefix));
 }
 
-bool Contains(Str s, Str txt) {
-    return str::IndexOf(s, txt) >= 0;
+bool Contains(Str s, Str sub) {
+    return str::IndexOf(s, sub) >= 0;
 }
 
-bool ContainsI(Str s, Str txt) {
-    return str::IndexOfI(s, txt) >= 0;
+bool ContainsI(Str s, Str sub) {
+    return str::IndexOfI(s, sub) >= 0;
 }
 
 bool EndsWith(Str txt, Str end) {
@@ -255,26 +538,8 @@ bool EndsWithI(Str txt, Str end) {
     return str::EqI(Str(txt.s + txtLen - endLen, endLen), end);
 }
 
-bool EqNIx(Str s, int len, Str s2) {
-    return ::len(s2) == len && str::StartsWithI(s, s2);
-}
-
-// Locale-independent Unicode lowercase folding for case-insensitive matching.
-// CharLowerBuffW folds accented / Cyrillic / Greek letters regardless of the
-// CRT locale (unlike towlower()), and U+0130 is special-cased to 'i' the same
-// way as our full-text search (see TextSearch.cpp's FoldCaseForSearch), so the
-// two stay consistent. Folding is 1:1 in WCHAR count, so it doesn't change
-// character offsets.
-static void FoldCaseForFindW(WStr s) {
-    if (!s) {
-        return;
-    }
-    CharLowerBuffW(s.s, (DWORD)s.len);
-    for (int i = 0; i < s.len; i++) {
-        if (s.s[i] == 0x0130) {
-            s.s[i] = L'i';
-        }
-    }
+bool EqNIx(Str s, int n, Str s2) {
+    return len(s2) == n && str::StartsWithI(s, s2);
 }
 
 // case-insensitive variant of IndexOf: returns the byte offset of the first
@@ -307,10 +572,8 @@ int IndexOfI(Str s, Str toFind) {
     if (asciiNeedle) {
         for (int off = 0; off < s.len && s.s[off]; off++) {
             char c = (char)tolower(s.s[off]);
-            if (c == first) {
-                if (str::StartsWithI(Str(s.s + off, s.len - off), toFind)) {
-                    return off;
-                }
+            if (c == first && str::StartsWithI(Str(s.s + off, s.len - off), toFind)) {
+                return off;
             }
         }
         return -1;
@@ -320,27 +583,22 @@ int IndexOfI(Str s, Str toFind) {
     // match position back to a byte offset in the original UTF-8 string so the
     // returned offset keeps IndexOfI's contract (an offset into s).
     //
-    // Scratch buffers come from the temporary arena; we restore it to its entry
-    // position before returning so repeated calls (e.g. the command palette
-    // filtering every item) don't grow the arena unbounded.
-    ArenaSavepoint sp = ArenaGetSavepoint(GetTempArena());
+    // Scratch buffers come from the temporary arena; AutoArenaSavepoint restores
+    // it to its entry position on return so repeated calls (e.g. the command
+    // palette filtering every item) don't grow the arena unbounded.
+    AutoArenaSavepoint scratch;
 
     TempWStr ws = ToWStrTemp(s); // unfolded, used to map the match back to bytes
     TempWStr wsLo = str::DupTemp(ws);
     TempWStr wfLo = ToWStrTemp(toFind);
-    FoldCaseForFindW(wsLo);
-    FoldCaseForFindW(wfLo);
+    FoldCaseWInPlace(wsLo);
+    FoldCaseWInPlace(wfLo);
 
     int res = -1;
     int idx = WStrFindSubstr(wsLo, wfLo); // common/str_util.cpp
     if (idx >= 0) {
-        int nbytes = 0;
-        if (idx > 0) {
-            nbytes = WideCharToMultiByte(CP_UTF8, 0, ws.s, idx, nullptr, 0, nullptr, nullptr);
-        }
-        res = nbytes;
+        res = Utf8ByteOffsetForWCharOffset(s, idx);
     }
-    ArenaRestoreSavepoint(sp);
     return res;
 }
 
@@ -359,14 +617,14 @@ void ReplaceWithCopy(Str* s, Str snew) {
     *s = dup;
 }
 
-Str Join(Arena* allocator, Str s1, Str s2, Str s3, Str s4, Str s5) {
+Str Join(Arena* a, Str s1, Str s2, Str s3, Str s4, Str s5) {
     int s1Len = len(s1);
     int s2Len = len(s2);
     int s3Len = len(s3);
     int s4Len = len(s4);
     int s5Len = len(s5);
-    int len = s1Len + s2Len + s3Len + s4Len + s5Len + 1;
-    char* res = (char*)Alloc(allocator, len);
+    int n = s1Len + s2Len + s3Len + s4Len + s5Len + 1;
+    char* res = (char*)Alloc(a, n);
 
     char* s = res;
     memcpy(s, s1.s, s1Len);
@@ -381,11 +639,11 @@ Str Join(Arena* allocator, Str s1, Str s2, Str s3, Str s4, Str s5) {
     s += s5Len;
     *s = 0;
 
-    return Str(res, len - 1);
+    return Str(res, n - 1);
 }
 
-Str Join(Arena* allocator, Str s1, Str s2, Str s3) {
-    return Join(allocator, s1, s2, s3, Str{}, Str{});
+Str Join(Arena* a, Str s1, Str s2, Str s3) {
+    return Join(a, s1, s2, s3, Str{}, Str{});
 }
 
 /* Concatenate 2 strings. Any string can be nullptr.
@@ -430,13 +688,13 @@ namespace wstr {
 
 /* Concatenate 2 strings. Any string can be nullptr.
    Caller needs to free() memory. */
-WStr Join(Arena* allocator, WStr s1, WStr s2, WStr s3) {
-    size_t s1Len = (size_t)s1.len, s2Len = (size_t)s2.len, s3Len = (size_t)s3.len;
-    size_t len = s1Len + s2Len + s3Len + 1;
-    WCHAR* res = (WCHAR*)Alloc(allocator, len * sizeof(WCHAR));
-    memcpy(res, s1.s, s1Len * sizeof(WCHAR));
-    memcpy(res + s1Len, s2.s, s2Len * sizeof(WCHAR));
-    memcpy(res + s1Len + s2Len, s3.s, s3Len * sizeof(WCHAR));
+WStr Join(Arena* a, WStr s1, WStr s2, WStr s3) {
+    int s1Len = s1.len, s2Len = s2.len, s3Len = s3.len;
+    int n = s1Len + s2Len + s3Len + 1;
+    WCHAR* res = (WCHAR*)Alloc(a, n * sizeofi(WCHAR));
+    memcpy(res, s1.s, (size_t)s1Len * sizeof(WCHAR));
+    memcpy(res + s1Len, s2.s, (size_t)s2Len * sizeof(WCHAR));
+    memcpy(res + s1Len + s2Len, s3.s, (size_t)s3Len * sizeof(WCHAR));
     res[s1Len + s2Len + s3Len] = '\0';
     return WStr(res);
 }
@@ -477,9 +735,6 @@ bool IsWs(char c) {
 }
 
 int IndexOfChar(Str s, char c) {
-    if (!s) {
-        return -1;
-    }
     for (int i = 0; i < s.len; i++) {
         if (s.s[i] == c) {
             return i;
@@ -492,6 +747,8 @@ bool ContainsChar(Str s, char c) {
     return IndexOfChar(s, c) >= 0;
 }
 
+// true if s contains any one of the chars (each char of `chars` is a candidate,
+// not a substring to find)
 bool ContainsCharAny(Str s, Str chars) {
     for (int i = 0; i < s.len; i++) {
         if (IndexOfChar(chars, s.s[i]) >= 0) {
@@ -510,9 +767,6 @@ Str SliceFromChar(Str str, char c) {
 }
 
 Str SliceFromCharLast(Str str, char c) {
-    if (!str) {
-        return {};
-    }
     for (int i = str.len - 1; i >= 0; i--) {
         if (str.s[i] == c) {
             return Str(str.s + i, str.len - i);
@@ -532,7 +786,7 @@ int IndexOf(Str buf, Str toFind) {
     char c = toFind.s[0];
     int end = buf.len - toFindLen;
     for (int i = 0; i <= end; i++) {
-        if (buf.s[i] == c && memeq(buf.s + i, toFind.s, toFindLen)) {
+        if (buf.s[i] == c && MemEq(buf.s + i, toFind.s, toFindLen)) {
             return i;
         }
     }
@@ -593,7 +847,7 @@ bool CutCharLast(Str s, char c, Str* before, Str* after) {
 // terminator. Returns false when s is empty. Safe to alias s and rest, e.g.
 // while (str::NextLine(rest, line, rest)) { ... }
 bool NextLine(Str s, Str& line, Str& rest) {
-    if (str::IsEmpty(s)) {
+    if (len(s) == 0) {
         return false;
     }
     int idx = -1;
@@ -619,28 +873,27 @@ bool NextLine(Str s, Str& line, Str& rest) {
     return true;
 }
 
-/* replace in <str> the chars from <oldChars> with their equivalents
-   from <newChars> (similar to UNIX's tr command)
-   Returns the number of replaced characters. */
-int TransCharsInPlace(Str str, Str oldChars, Str newChars) {
-    if (!str) {
-        return 0;
-    }
-    int findCount = 0;
+// replace in str the chars from oldChars with their equivalents from newChars
+// (similar to UNIX's tr command).
+void TransCharsInPlace(Str& str, Str oldChars, Str newChars) {
+    int nDiff = len(oldChars) - len(newChars);
+    ReportIf(nDiff < 0);
+    int nChanged = 0;
     for (int i = 0; i < str.len; i++) {
         int idx = str::IndexOfChar(oldChars, str.s[i]);
         if (idx >= 0) {
             str.s[i] = newChars.s[idx];
-            findCount++;
+            nChanged++;
         }
     }
-
-    return findCount;
+    if (nChanged * nDiff > 0) {
+        str.s[str.len] = '\0';
+    }
 }
 
 // Trim whitespace characters, in-place, inside s.
-// Returns number of trimmed characters.
-int TrimWSInPlace(Str s, TrimOpt opt) {
+// Updates s.len. Returns number of trimmed characters.
+int TrimWSInPlace(Str& s, TrimOpt opt) {
     if (str::IsNull(s)) {
         return 0;
     }
@@ -664,6 +917,7 @@ int TrimWSInPlace(Str s, TrimOpt opt) {
     if (start != 0) {
         memmove(s.s, s.s + start, (size_t)(end - start) + 1);
     }
+    s.len = end - start;
     return trimmed;
 }
 
@@ -695,15 +949,38 @@ int NormalizeWSInPlace(Str s) {
     return s.len - dst;
 }
 
+// like NormalizeWSInPlace but non-mutating: returns s with whitespace runs
+// collapsed to single spaces and leading/trailing whitespace removed. Allocates
+// a temp copy only when normalization would change something; otherwise returns
+// s unchanged (no allocation).
+TempStr NormalizeWSTemp(Str s) {
+    int n = s.len;
+    if (n == 0) {
+        return s;
+    }
+    // decide whether normalizing changes anything, so we can skip allocating
+    bool changed = IsWs(s.s[0]) || IsWs(s.s[n - 1]);
+    for (int i = 0; !changed && i < n; i++) {
+        char c = s.s[i];
+        if (IsWs(c)) {
+            // a non-space whitespace char becomes ' ', or a run collapses to one
+            changed = (c != ' ') || (i + 1 < n && IsWs(s.s[i + 1]));
+        }
+    }
+    if (!changed) {
+        return s;
+    }
+    TempStr res = DupTemp(s);
+    res.len -= NormalizeWSInPlace(res);
+    return res;
+}
+
 static bool isNl(char c) {
     return '\r' == c || '\n' == c;
 }
 
 // replaces '\r\n' and '\r' with just '\n' and removes empty lines
 int NormalizeNewlinesInPlace(Str s, Str endExclusive) {
-    if (!s) {
-        return 0;
-    }
     int endOff = endExclusive.s ? (int)(endExclusive.s - s.s) : s.len;
     int read = 0;
     while (read < endOff && isNl(s.s[read])) {
@@ -786,15 +1063,15 @@ namespace str {
 
 /* Convert binary data in <buf> to a hex-encoded string */
 TempStr MemToHexTemp(Str buf) {
-    size_t len = (size_t)buf.len;
+    int n = buf.len;
     /* 2 hex chars per byte, +1 for terminating 0 */
-    char* ret = AllocArrayTemp<char>(2 * len + 1);
+    char* ret = AllocArrayTemp<char>((2 * n) + 1);
     if (!ret) {
         return {};
     }
     static const char hex[] = "0123456789abcdef";
     int dst = 0;
-    for (size_t i = 0; i < len; i++) {
+    for (int i = 0; i < n; i++) {
         u8 b = (u8)buf.s[i];
         ret[dst++] = hex[b >> 4];
         ret[dst++] = hex[b & 0x0f];
@@ -821,13 +1098,13 @@ static int HexDigitVal(char c) {
 }
 
 bool HexToMem(Str s, Str buf) {
-    size_t bufLen = (size_t)buf.len;
-    size_t needed = bufLen * 2;
-    if (s.len < (int)needed) {
+    int bufLen = buf.len;
+    int needed = bufLen * 2;
+    if (s.len < needed) {
         return false;
     }
-    for (size_t i = 0; i < bufLen; i++) {
-        int off = (int)(i * 2);
+    for (int i = 0; i < bufLen; i++) {
+        int off = i * 2;
         int hi = HexDigitVal(s.s[off]);
         int lo = HexDigitVal(s.s[off + 1]);
         if (hi < 0 || lo < 0) {
@@ -835,7 +1112,7 @@ bool HexToMem(Str s, Str buf) {
         }
         buf.s[i] = (char)((hi << 4) | lo);
     }
-    return s.len == (int)needed || (s.len > (int)needed && s.s[needed] == '\0');
+    return s.len == needed || (s.len > needed && s.s[needed] == '\0');
 }
 
 bool IsAlNum(char c) {
@@ -949,24 +1226,12 @@ int CmpNatural(Str aIn, Str bIn) {
 }
 
 bool IsEmptyOrWhiteSpace(Str s) {
-    if (!s) {
-        return true;
-    }
     for (int i = 0; i < s.len; i++) {
         if (!str::IsWs(s.s[i])) {
             return false;
         }
     }
     return true;
-}
-
-bool Skip(Str& s, Str toSkip) {
-    if (str::StartsWith(s, toSkip)) {
-        s.s += toSkip.len;
-        s.len -= toSkip.len;
-        return true;
-    }
-    return false;
 }
 
 // advances s past any leading toSkip chars (in place); returns whether it skipped any
@@ -984,23 +1249,32 @@ bool SkipChar(Str& s, char toSkip) {
 
 namespace url {
 
-void DecodeInPlace(Str url) {
+// Percent-decodes url into the temp arena ("%20" -> ' ', "%C3%A4" -> the two
+// UTF-8 bytes of 'ä'); an escape that isn't two hex digits is left as is.
+// Returns a new (NUL-terminated) string rather than decoding in place because
+// decoding shrinks the string: the in-place version this replaces could only
+// shorten its caller's buffer, and a caller left holding the encoded length
+// carried the bytes past the NUL along (a markdown file named "a ä.md" looked
+// up "a ä.md\0.md" and was reported as missing; #5926).
+TempStr DecodeTemp(Str url) {
     if (str::IsNull(url)) {
-        return;
+        return {};
     }
+    TempStr res = str::DupTemp(url);
+    int n = res.len;
     int dst = 0;
-    for (int src = 0; src < url.len; src++) {
+    for (int src = 0; src < n; src++) {
         int val;
-        if (url.s[src] == '%' && src + 2 < url.len &&
-            !str::IsNull(str::Parse(Str(url.s + src, url.len - src), "%%%2x", &val))) {
-            url.s[dst++] = (char)val;
+        if (res.s[src] == '%' && src + 2 < n && !str::IsNull(str::Parse(Str(res.s + src, n - src), "%%%2x", &val))) {
+            res.s[dst++] = (char)val;
             src += 2;
         } else {
-            url.s[dst++] = url.s[src];
+            res.s[dst++] = res.s[src];
         }
     }
-    url.s[dst] = '\0';
-    url.len = dst;
+    res.s[dst] = '\0';
+    res.len = dst;
+    return res;
 }
 } // namespace url
 
@@ -1015,7 +1289,7 @@ TempStr SeqStrAt(SeqStrings strs, int off) {
     if (!strs || off < 0 || !strs[off]) {
         return {};
     }
-    return Str(strs + off);
+    return {strs + off};
 }
 
 bool SeqStrAdvance(SeqStrings strs, int& off, int* idxInOut) {
@@ -1128,9 +1402,9 @@ TempStr MimeTypeFromExtTemp(Str ext, Str imgExt) {
 }
 
 // unsigned LEB128 of zigzag-encoded i64
-static size_t VarIntEncode(u8* dst, i64 val) {
+static int VarIntEncode(u8* dst, i64 val) {
     u64 n = ((u64)val << 1) ^ (u64)(val >> 63);
-    size_t i = 0;
+    int i = 0;
     for (;;) {
         u8 b = (u8)(n & 0x7f);
         n >>= 7;
@@ -1187,8 +1461,8 @@ void SeqStrNumAppend(str::Builder* b, Str s, i64 num) {
     b->Append(s);
     b->AppendChar('\0');
     u8 buf[12];
-    size_t n = VarIntEncode(buf, num);
-    b->Append(Str((char*)buf, (int)n));
+    int n = VarIntEncode(buf, num);
+    b->Append(Str((char*)buf, n));
 }
 
 void SeqStrNumFinish(str::Builder* b) {
@@ -1296,63 +1570,65 @@ TempStr SeqStrNumStrByNumber(SeqStrNum strs, i64 num) {
 
 // for compatibility with C string, the last character is always 0
 // kPadding is number of characters needed for terminating character
-static constexpr size_t kPadding = 1;
+static constexpr int kPadding = 1;
 
-static char* EnsureCap(str::Builder* s, size_t needed) {
-    bool isInlineBuf = !s->els || (s->els == s->buf);
-    // only use the inline buffer if we haven't moved to the heap yet.
-    // RemoveAt() can shrink len enough for needed to fit in buf again and
-    // switching back would lose the data and leak the heap allocation
-    if (isInlineBuf && (needed + kPadding <= str::Builder::kBufChars)) {
-        s->els = s->buf;
-        return s->buf;
-    }
+// using external scratch, or no storage yet (not heap)
+static bool IsExternalOrEmpty(const str::Builder* s) {
+    return !s->els || (s->buf.s && s->els == s->buf.s);
+}
 
-    size_t capacityHint = s->cap;
-    // tricky: to save sapce we reuse cap for capacityHint
-    if (isInlineBuf) {
-        // on first expand cap might be capacityHint
-        s->cap = 0;
-    }
-
-    if (s->cap >= needed) {
+static char* EnsureCap(str::Builder* s, int needed) {
+    // only use external buf if we haven't moved to the heap yet.
+    // RemoveAt() can shrink len enough for needed to fit again and switching
+    // back would lose the data and leak the heap allocation.
+    if (IsExternalOrEmpty(s) && s->buf.s && needed + kPadding <= s->buf.len) {
+        s->els = s->buf.s;
         return s->els;
     }
 
-    size_t newCap = s->cap * 2;
-    if (needed > newCap) {
-        newCap = needed;
-    }
-    if (newCap < capacityHint) {
-        newCap = capacityHint;
+    int capacityHint = s->cap;
+    // tricky: to save space we reuse cap for capacityHint while still on
+    // external/empty storage (cap was set from constructor hint)
+    if (IsExternalOrEmpty(s)) {
+        s->cap = 0;
     }
 
-    size_t newElCount = newCap + kPadding;
+    if (s->els && s->cap >= needed) {
+        return s->els;
+    }
+
+    int newCap = s->cap * 2;
+    newCap = std::max(needed, newCap);
+    newCap = std::max(newCap, capacityHint);
+
+    int newElCount = newCap + kPadding;
 
     s->nReallocs++;
 
-    size_t allocSize = newElCount;
+    int allocSize = newElCount;
     char* newEls;
-    if (s->buf == s->els) {
-        newEls = (char*)Alloc(s->allocator, allocSize);
-        if (newEls) {
-            memcpy(newEls, s->buf, s->len + 1);
+    if (IsExternalOrEmpty(s)) {
+        newEls = (char*)Alloc(s->a, allocSize);
+        if (newEls && s->els && s->len > 0) {
+            memcpy(newEls, s->els, (size_t)s->len + 1);
+        } else if (newEls) {
+            newEls[0] = 0;
         }
     } else {
-        newEls = (char*)Realloc(s->allocator, s->els, allocSize);
+        newEls = (char*)Realloc(s->a, s->els, (size_t)allocSize, (size_t)s->len + kPadding);
     }
     if (!newEls) {
-        ReportIf(InterlockedExchangeAdd(&gAllowAllocFailure, 0) == 0);
+        ReportIf(AtomicIntGet(&gAllowAllocFailure) == 0);
         return nullptr;
     }
     s->els = newEls;
-    s->cap = (u32)newCap;
+    s->cap = newCap;
     return newEls;
 }
 
-static char* MakeSpaceAt(str::Builder* s, size_t idx, size_t count) {
+static char* MakeSpaceAt(str::Builder* s, int idx, int count) {
     ReportIf(count == 0);
-    u32 newLen = std::max(s->len, (u32)idx) + (u32)count;
+    int newLen = std::max(s->len, idx) + count;
     char* buf = EnsureCap(s, newLen);
     if (!buf) {
         return nullptr;
@@ -1363,7 +1639,7 @@ static char* MakeSpaceAt(str::Builder* s, size_t idx, size_t count) {
         // inserting in the middle of string, have to copy
         char* src = buf + idx;
         char* dst = buf + idx + count;
-        memmove(dst, src, s->len - idx);
+        memmove(dst, src, (size_t)(s->len - idx));
     }
     s->len = newLen;
     // ZeroMemory(res, count);
@@ -1372,24 +1648,26 @@ static char* MakeSpaceAt(str::Builder* s, size_t idx, size_t count) {
 
 static void StrBuilderReset(str::Builder* s) {
     s->len = 0;
-    // if we never moved to the heap, keep pointing els at the inline buf (the
-    // pre-Reset() behavior made begin() stable right after construction); if
-    // on the heap, keep the allocation for re-use (see Reset() fix in 5853)
-    if (!s->els || (s->els == s->buf)) {
-        s->els = s->buf;
+    // keep an existing heap buffer for re-use; only bind external buf when
+    // we have not allocated heap yet
+    if (!s->els || (s->buf.s && s->els == s->buf.s)) {
+        s->els = s->buf.s; // may be null when no external buf
     }
-    s->els[0] = 0;
+    if (s->els) {
+        s->els[0] = 0;
+    }
 }
 
 static void StrBuilderFree(str::Builder* s) {
-    bool isInlineBuf = !s->els || (s->els == s->buf);
-    if (!isInlineBuf) {
-        Free(s->allocator, s->els);
+    if (s->els && !(s->buf.s && s->els == s->buf.s)) {
+        Free(s->a, s->els);
     }
     s->len = 0;
     s->cap = 0;
-    s->els = s->buf;
-    s->buf[0] = 0;
+    s->els = s->buf.s;
+    if (s->els) {
+        s->els[0] = 0;
+    }
 }
 
 void str::Builder::Reset(Str s) {
@@ -1397,16 +1675,19 @@ void str::Builder::Reset(Str s) {
     Append(s); // no-op if s is empty
 }
 
-// allocator is not owned by Vec and must outlive it
-str::Builder::Builder(int capHint, Arena* a) {
-    allocator = a;
+// arena is not owned by Builder; set .a after construction if needed
+// capHint: preferred capacity after first grow
+// capHint: preferred capacity after first grow
+str::Builder::Builder(Str externalBuf) {
+    this->buf = externalBuf;
     Reset();
-    cap = (u32)(capHint + kPadding); // + kPadding for terminating 0
 }
 
-str::Builder::Builder(Str s) {
+// capHint: preferred capacity after first grow
+// capHint: preferred capacity after first grow
+str::Builder::Builder(int capHint) {
     Reset();
-    Append(s);
+    cap = capHint + kPadding; // + kPadding for terminating 0
 }
 
 str::Builder::~Builder() {
@@ -1414,12 +1695,12 @@ str::Builder::~Builder() {
 }
 
 char& str::Builder::operator[](int idx) const {
-    ReportIf(idx < 0 || idx >= (int)len);
+    ReportIf(idx < 0 || idx >= len);
     return els[idx];
 }
 
 int len(const str::Builder& b) {
-    return (int)b.len;
+    return b.len;
 }
 
 bool str::Builder::InsertAt(int idx, char el) {
@@ -1432,7 +1713,7 @@ bool str::Builder::InsertAt(int idx, char el) {
 }
 
 bool str::Builder::AppendChar(char c) {
-    return InsertAt((int)len, c);
+    return InsertAt(len, c);
 }
 
 bool str::Builder::Append(Str src) {
@@ -1443,20 +1724,20 @@ bool str::Builder::Append(Str src) {
     if (!dst) {
         return false;
     }
-    memcpy(dst, src.s, src.len);
+    memcpy(dst, src.s, (size_t)src.len);
     return true;
 }
 
 char str::Builder::RemoveAt(int idx, int count) {
     char res = els[idx];
-    if ((int)len > idx + count) {
+    if (len > idx + count) {
         char* dst = els + idx;
         char* src = els + idx + count;
-        int nToMove = (int)len - idx - count;
-        memmove(dst, src, nToMove);
+        int nToMove = len - idx - count;
+        memmove(dst, src, (size_t)nToMove);
     }
-    len -= (u32)count;
-    memset(els + len, 0, count);
+    len -= count;
+    memset(els + len, 0, (size_t)count);
     return res;
 }
 
@@ -1464,7 +1745,7 @@ char str::Builder::RemoveLast() {
     if (len == 0) {
         return 0;
     }
-    return RemoveAt((int)len - 1);
+    return RemoveAt(len - 1);
 }
 
 char& str::Builder::Last() const {
@@ -1477,22 +1758,27 @@ char& str::Builder::Last() const {
 // is likely to use more memory than strictly necessary, but in most cases
 // it doesn't matter
 Str str::Builder::TakeStr() {
-    int n = (int)len;
+    int n = len;
     char* res = els;
-    if (els == buf) {
-        // data is in the inline buffer, so we have to duplicate it
-        res = (char*)MemDup(this->allocator, els, len + kPadding);
+    if (!els || n == 0) {
+        Reset();
+        return Str{};
+    }
+    if (buf.s && els == buf.s) {
+        // data is in the external buffer, so we have to duplicate it
+        res = (char*)MemDup(this->a, els, (size_t)n + kPadding);
+        els = buf.s;
     } else {
-        // we're returning els, so reset to small buf
-        els = buf;
+        // we're returning the heap allocation; rebind to external if any
+        els = buf.s;
     }
 
     Reset();
     return Str(res, n);
 }
 
-bool str::Contains(const str::Builder& b, Str s) {
-    return str::Contains(ToStr(b), s);
+bool str::Contains(const str::Builder& b, Str sub) {
+    return str::Contains(ToStr(b), sub);
 }
 
 bool str::Builder::IsEmpty() const {
@@ -1507,48 +1793,54 @@ char str::Builder::LastChar() const {
     return els[n - 1];
 }
 
-static WCHAR* EnsureCap(wstr::Builder* s, size_t needed) {
-    bool isInlineBuf = !s->els || (s->els == s->buf);
-    // see the comment in str::Builder's EnsureCap()
-    if (isInlineBuf && (needed + kPadding <= wstr::Builder::kBufChars)) {
-        s->els = s->buf;
-        return s->buf;
-    }
+// using external scratch, or no storage yet (not heap)
+static bool IsExternalOrEmpty(const wstr::Builder* s) {
+    return !s->els || (s->buf.s && s->els == s->buf.s);
+}
 
-    size_t capacityHint = s->cap;
-    // tricky: to save sapce we reuse cap for capacityHint
-    if (isInlineBuf) {
-        // on first expand cap might be capacityHint
-        s->cap = 0;
-    }
-
-    if (s->cap >= needed) {
+static WCHAR* EnsureCap(wstr::Builder* s, int needed) {
+    // only use external buf if we haven't moved to the heap yet.
+    // RemoveAt() can shrink len enough for needed to fit again and switching
+    // back would lose the data and leak the heap allocation.
+    if (IsExternalOrEmpty(s) && s->buf.s && needed + kPadding <= s->buf.len) {
+        s->els = s->buf.s;
         return s->els;
     }
 
-    size_t newCap = s->cap * 2;
-    if (needed > newCap) {
-        newCap = needed;
-    }
-    if (newCap < capacityHint) {
-        newCap = capacityHint;
+    int capacityHint = (int)s->cap;
+    // tricky: to save space we reuse cap for capacityHint while still on
+    // external/empty storage (cap was set from constructor hint)
+    if (IsExternalOrEmpty(s)) {
+        s->cap = 0;
     }
 
-    size_t newElCount = newCap + kPadding;
+    if (s->els && (int)s->cap >= needed) {
+        return s->els;
+    }
 
-    size_t allocSize = newElCount * wstr::Builder::kElSize;
+    int newCap = (int)s->cap * 2;
+    newCap = std::max(needed, newCap);
+    newCap = std::max(newCap, capacityHint);
+
+    int newElCount = newCap + kPadding;
+
+    s->nReallocs++;
+
+    int allocSize = newElCount * wstr::Builder::kElSize;
     WCHAR* newEls;
-    if (s->buf == s->els) {
-        newEls = (WCHAR*)Alloc(s->allocator, allocSize);
-        if (newEls) {
-            memcpy(newEls, s->buf, wstr::Builder::kElSize * (s->len + 1));
+    if (IsExternalOrEmpty(s)) {
+        newEls = (WCHAR*)Alloc(s->a, allocSize);
+        if (newEls && s->els && s->len > 0) {
+            memcpy(newEls, s->els, (size_t)wstr::Builder::kElSize * (s->len + 1));
+        } else if (newEls) {
+            newEls[0] = 0;
         }
     } else {
-        newEls = (WCHAR*)Realloc(s->allocator, s->els, allocSize);
+        newEls = (WCHAR*)Realloc(s->a, s->els, (size_t)allocSize, (size_t)wstr::Builder::kElSize * (s->len + kPadding));
     }
 
     if (!newEls) {
-        ReportIf(InterlockedExchangeAdd(&gAllowAllocFailure, 0) == 0);
+        ReportIf(AtomicIntGet(&gAllowAllocFailure) == 0);
         return nullptr;
     }
     s->els = newEls;
@@ -1556,42 +1848,46 @@ static WCHAR* EnsureCap(wstr::Builder* s, size_t needed) {
     return newEls;
 }
 
-static WCHAR* MakeSpaceAt(wstr::Builder* s, size_t idx, size_t count) {
+static WCHAR* MakeSpaceAt(wstr::Builder* s, int idx, int count) {
     ReportIf(count == 0);
-    u32 newLen = std::max(s->len, (u32)idx) + (u32)count;
+    int newLen = std::max((int)s->len, idx) + count;
     WCHAR* buf = EnsureCap(s, newLen);
     if (!buf) {
         return nullptr;
     }
     buf[newLen] = 0;
     WCHAR* res = &(buf[idx]);
-    if (s->len > idx) {
+    if ((int)s->len > idx) {
         WCHAR* src = buf + idx;
         WCHAR* dst = buf + idx + count;
-        memmove(dst, src, (s->len - idx) * wstr::Builder::kElSize);
+        memmove(dst, src, (size_t)((int)s->len - idx) * wstr::Builder::kElSize);
     }
-    s->len = newLen;
+    s->len = (u32)newLen;
     return res;
 }
 
 static void WStrBuilderReset(wstr::Builder* s) {
     s->len = 0;
-    // see the comment in StrBuilderReset()
-    if (!s->els || (s->els == s->buf)) {
-        s->els = s->buf;
+    // keep an existing heap buffer for re-use; only bind external buf when
+    // we have not allocated heap yet
+    if (!s->els || (s->buf.s && s->els == s->buf.s)) {
+        s->els = s->buf.s; // may be null when no external buf
     }
-    s->els[0] = 0;
+    if (s->els) {
+        s->els[0] = 0;
+    }
 }
 
 static void WStrBuilderFree(wstr::Builder* s) {
-    bool isInlineBuf = !s->els || (s->els == s->buf);
-    if (!isInlineBuf) {
-        Free(s->allocator, s->els);
+    if (s->els && !(s->buf.s && s->els == s->buf.s)) {
+        Free(s->a, s->els);
     }
     s->len = 0;
     s->cap = 0;
-    s->els = s->buf;
-    s->buf[0] = 0;
+    s->els = s->buf.s;
+    if (s->els) {
+        s->els[0] = 0;
+    }
 }
 
 void wstr::Builder::Reset(WStr s) {
@@ -1599,40 +1895,19 @@ void wstr::Builder::Reset(WStr s) {
     Append(s); // no-op if s is empty
 }
 
-// allocator is not owned by Vec and must outlive it
-wstr::Builder::Builder(int capHint, Arena* a) {
-    allocator = a;
+// arena is not owned by Builder; set .a after construction if needed
+// capHint: preferred capacity after first grow
+// capHint: preferred capacity after first grow
+wstr::Builder::Builder(WStr externalBuf) {
+    this->buf = externalBuf;
+    Reset();
+}
+
+// capHint: preferred capacity after first grow
+// capHint: preferred capacity after first grow
+wstr::Builder::Builder(int capHint) {
     Reset();
     cap = (u32)(capHint + kPadding); // + kPadding for terminating 0
-}
-
-// ensure that a Vec never shares its els buffer with another after a clone/copy
-// note: we don't inherit allocator as it's not needed for our use cases
-wstr::Builder::Builder(const wstr::Builder& that) {
-    Reset();
-    WCHAR* s = EnsureCap(this, that.cap);
-    WStr sOrig = ToWStr(that);
-    len = that.len;
-    size_t n = (len + kPadding) * kElSize;
-    memcpy(s, sOrig.s, n);
-}
-
-wstr::Builder::Builder(WStr s) {
-    Reset();
-    Append(s);
-}
-
-wstr::Builder& wstr::Builder::operator=(const wstr::Builder& that) {
-    if (this == &that) {
-        return *this;
-    }
-    Reset();
-    WCHAR* s = EnsureCap(this, that.cap);
-    WStr sOrig = ToWStr(that);
-    len = that.len;
-    size_t n = (len + kPadding) * kElSize;
-    memcpy(s, sOrig.s, n);
-    return *this;
 }
 
 wstr::Builder::~Builder() {
@@ -1665,11 +1940,11 @@ bool wstr::Builder::Append(WStr src) {
     if (wstr::IsNull(src) || 0 == src.len) {
         return true;
     }
-    WCHAR* dst = MakeSpaceAt(this, len, src.len);
+    WCHAR* dst = MakeSpaceAt(this, (int)len, src.len);
     if (!dst) {
         return false;
     }
-    memcpy(dst, src.s, src.len * kElSize);
+    memcpy(dst, src.s, (size_t)src.len * kElSize);
     return true;
 }
 
@@ -1678,10 +1953,10 @@ WCHAR wstr::Builder::RemoveAt(int idx, int count) {
     if ((int)len > idx + count) {
         WCHAR* dst = els + idx;
         WCHAR* src = els + idx + count;
-        memmove(dst, src, ((int)len - idx - count) * kElSize);
+        memmove(dst, src, (size_t)((int)len - idx - count) * kElSize);
     }
     len -= (u32)count;
-    memset(els + len, 0, count * kElSize);
+    memset(els + len, 0, (size_t)count * kElSize);
     return res;
 }
 
@@ -1699,10 +1974,18 @@ WCHAR wstr::Builder::RemoveLast() {
 WStr wstr::Builder::TakeWStr() {
     int n = (int)len;
     WCHAR* res = els;
-    if (els == buf) {
-        res = (WCHAR*)MemDup(allocator, buf, (len + kPadding) * kElSize);
+    if (!els || n == 0) {
+        Reset();
+        return WStr{};
     }
-    els = buf;
+    if (buf.s && els == buf.s) {
+        // data is in the external buffer, so we have to duplicate it
+        res = (WCHAR*)MemDup(a, els, (size_t)(n + kPadding) * kElSize);
+        els = buf.s;
+    } else {
+        // we're returning the heap allocation; rebind to external if any
+        els = buf.s;
+    }
     Reset();
     return WStr(res, n);
 }
@@ -1728,10 +2011,10 @@ namespace wstr {
 // returns true if was replaced
 bool Replace(wstr::Builder& s, WStr toReplace, WStr replaceWith) {
     // fast path: nothing to replace
-    if (!wstr::FindFrom(WStr(s.els), toReplace)) {
+    if (!s.els || !wstr::FindFrom(ToWStr(s), toReplace)) {
         return false;
     }
-    WStr newStr = wstr::Replace(WStr(s.els), toReplace, replaceWith);
+    WStr newStr = wstr::Replace(ToWStr(s), toReplace, replaceWith);
     s.Reset();
     if (newStr) {
         s.Append(newStr);
@@ -1755,13 +2038,16 @@ bool IsNonCharacter(WCHAR c) {
 } // namespace wstr
 namespace str {
 
-// hack: to fool CodeQL which doesn't approve of char* => WCHAR* casts
-// and doesn't allow any way to disable that warning
-WStr CastToWCHAR(Str s) {
+// Reinterpret a UTF-16 byte buffer held in a Str as a WStr without a
+// char*→WCHAR* cast (CodeQL cpp/incorrect-string-type-conversion).
+WStr CastStrToWStr(Str s) {
     if (!s) {
         return {};
     }
-    return WStr((WCHAR*)s.s, s.len / (int)sizeof(WCHAR));
+    WCHAR* w = nullptr;
+    static_assert(sizeof(char*) == sizeof(WCHAR*), "pointer sizes must match");
+    memcpy((void*)&w, (const void*)&s.s, sizeof(w));
+    return WStr(w, s.len / sizeofi(WCHAR));
 }
 
 } // namespace str
@@ -1780,6 +2066,33 @@ bool Eq(WStr s1, WStr s2) {
     return true;
 }
 
+bool EqNI(WStr s1, WStr s2, int n) {
+    if (s1.s == s2.s) {
+        return true;
+    }
+    if (!s1 || !s2) {
+        return n == 0;
+    }
+    if (n == 0) {
+        return true;
+    }
+    if (s1.len < n || s2.len < n) {
+        return false;
+    }
+    WCHAR* a = AllocArrayTemp<WCHAR>(n);
+    WCHAR* b = AllocArrayTemp<WCHAR>(n);
+    if (!a || !b) {
+        return false;
+    }
+    memcpy(a, s1.s, (size_t)n * sizeof(WCHAR));
+    memcpy(b, s2.s, (size_t)n * sizeof(WCHAR));
+    WStr wa(a, n);
+    WStr wb(b, n);
+    FoldCaseWInPlace(wa);
+    FoldCaseWInPlace(wb);
+    return EqN(wa, wb, n);
+}
+
 // return true if s1 == s2, case insensitive
 bool EqI(WStr s1, WStr s2) {
     if (s1.s == s2.s) {
@@ -1794,25 +2107,59 @@ bool EqI(WStr s1, WStr s2) {
     if (wstr::IsNull(s1) || wstr::IsNull(s2)) {
         return false;
     }
-    return 0 == _wcsnicmp(s1.s, s2.s, (size_t)s1.len);
+    return EqNI(s1, s2, s1.len);
 }
 
-bool EqN(WStr s1, WStr s2, int len) {
+// wcscmp-style (<0, 0, >0). Empty/null sorts before non-empty.
+int Cmp(WStr a, WStr b) {
+    if (a.s == b.s) {
+        return 0;
+    }
+    if (wstr::IsNull(a) || a.len == 0) {
+        return (wstr::IsNull(b) || b.len == 0) ? 0 : -1;
+    }
+    if (wstr::IsNull(b) || b.len == 0) {
+        return 1;
+    }
+    int n = std::min(a.len, b.len);
+    for (int i = 0; i < n; i++) {
+        if (a.s[i] != b.s[i]) {
+            return a.s[i] < b.s[i] ? -1 : 1;
+        }
+    }
+    return a.len - b.len;
+}
+
+// case-insensitive WCHAR compare (<0, 0, >0). Prefer EqI when only equality matters.
+int CmpI(WStr a, WStr b) {
+    if (a.s == b.s) {
+        return 0;
+    }
+    if (wstr::IsNull(a) || a.len == 0) {
+        return (wstr::IsNull(b) || b.len == 0) ? 0 : -1;
+    }
+    if (wstr::IsNull(b) || b.len == 0) {
+        return 1;
+    }
+    int n = std::min(a.len, b.len);
+    for (int i = 0; i < n; i++) {
+        WCHAR c1 = FoldCaseWChar(a.s[i]);
+        WCHAR c2 = FoldCaseWChar(b.s[i]);
+        if (c1 != c2) {
+            return c1 < c2 ? -1 : 1;
+        }
+    }
+    return a.len - b.len;
+}
+
+bool EqN(WStr s1, WStr s2, int n) {
     if (s1.s == s2.s) {
         return true;
     }
     if (!s1 || !s2) {
         return false;
     }
-    return 0 == wcsncmp(s1.s, s2.s, (size_t)len);
-}
-
-bool IsNull(const WStr& s) {
-    return !s.s;
-}
-
-bool IsEmpty(WStr s) {
-    return wstr::IsNull(s) || s.len == 0;
+    return 0 == wcsncmp(s1.s, s2.s, (size_t)n);
 }
 
 bool StartsWith(WStr str, WStr prefix) {
@@ -1822,7 +2169,7 @@ bool StartsWith(WStr str, WStr prefix) {
     if (!str || prefix.len > str.len) {
         return false;
     }
-    return EqN(str, prefix, (size_t)prefix.len);
+    return EqN(str, prefix, prefix.len);
 }
 
 /* return true if 'str' starts with 'txt', NOT case-sensitive */
@@ -1836,7 +2183,7 @@ bool StartsWithI(WStr str, WStr prefix) {
     if (!str || prefix.len > str.len) {
         return false;
     }
-    return 0 == _wcsnicmp(str.s, prefix.s, (size_t)prefix.len);
+    return EqNI(str, prefix, prefix.len);
 }
 
 bool EndsWith(WStr txt, WStr end) {
@@ -1846,7 +2193,7 @@ bool EndsWith(WStr txt, WStr end) {
     if (end.len > txt.len) {
         return false;
     }
-    return Eq(WStr(txt.s + txt.len - end.len, (int)end.len), end);
+    return Eq(WStr(txt.s + txt.len - end.len, end.len), end);
 }
 
 bool EndsWithI(WStr txt, WStr end) {
@@ -1856,13 +2203,10 @@ bool EndsWithI(WStr txt, WStr end) {
     if (end.len > txt.len) {
         return false;
     }
-    return EqI(WStr(txt.s + txt.len - end.len, (int)end.len), end);
+    return EqI(WStr(txt.s + txt.len - end.len, end.len), end);
 }
 
 int IndexOfChar(WStr s, WCHAR c) {
-    if (!s) {
-        return -1;
-    }
     for (int i = 0; i < s.len; i++) {
         if (s.s[i] == c) {
             return i;
@@ -1899,9 +2243,6 @@ WStr FindFrom(WStr str, WStr find) {
 namespace str {
 
 Str ToUpperInPlace(Str s) {
-    if (!s) {
-        return {};
-    }
     for (int i = 0; i < s.len; i++) {
         s.s[i] = (char)toupper((u8)s.s[i]);
     }
@@ -1912,9 +2253,6 @@ Str ToUpperInPlace(Str s) {
 namespace wstr {
 
 WStr ToLowerInPlace(WStr s) {
-    if (!s) {
-        return {};
-    }
     for (int i = 0; i < s.len; i++) {
         s.s[i] = towlower(s.s[i]);
     }
@@ -1926,29 +2264,29 @@ WStr ToLower(WStr s) {
     return ToLowerInPlace(s2);
 }
 
-int TransCharsInPlace(WStr str, WStr oldChars, WStr newChars) {
-    if (!str) {
-        return 0;
-    }
-    int nReplaced = 0;
+void TransCharsInPlace(WStr& str, WStr oldChars, WStr newChars) {
+    int nDiff = len(oldChars) - len(newChars);
+    ReportIf(nDiff < 0);
+    int nChanged = 0;
     for (int i = 0; i < str.len; i++) {
         int idx = wstr::IndexOfChar(oldChars, str.s[i]);
         if (idx >= 0) {
             str.s[i] = newChars.s[idx];
-            nReplaced++;
+            nChanged++;
         }
     }
-
-    return nReplaced;
+    if (nChanged * nDiff > 0) {
+        str.s[str.len] = L'\0';
+    }
 }
 
 // free() the result via str::Free(s) or str::FreePtr(&s)
 WStr Replace(WStr s, WStr toReplace, WStr replaceWith) {
-    if (!s || wstr::IsEmpty(toReplace) || !replaceWith) {
+    if (!s || len(toReplace) == 0 || !replaceWith) {
         return {};
     }
 
-    wstr::Builder result((size_t)s.len);
+    wstr::Builder result(s.len);
     int findLen = toReplace.len;
     int start = 0;
     while (start < s.len) {
@@ -1999,12 +2337,16 @@ int NormalizeWSInPlace(WStr s) {
 } // namespace wstr
 namespace str {
 
-// Note: BufSet() should only be used when absolutely necessary (e.g. when
-// handling buffers in OS-defined structures)
-// returns the number of characters written (without the terminating \0)
+// Bounded null-terminated copy into a fixed buffer (replaces lstrcpyn / strcpy_s /
+// StringCchCopy). Only for OS structs with fixed fields —prefer owned Str/WStr
+// otherwise. dst.len is capacity including the terminator. Returns chars written
+// excluding the terminator.
 int BufSet(Str dst, Str src) {
     int cchDst = dst.len;
-    ReportIf(0 == cchDst || !dst.s);
+    if (0 == cchDst || !dst.s) {
+        ReportIf(true);
+        return 0;
+    }
     if (!src) {
         *dst.s = 0;
         return 0;
@@ -2012,8 +2354,8 @@ int BufSet(Str dst, Str src) {
 
     int toCopy = std::min(cchDst - 1, src.len);
 
-    errno_t err = strncpy_s(dst.s, (size_t)cchDst, src.s, (size_t)toCopy);
-    ReportIf(err || dst.s[toCopy] != '\0');
+    memcpy(dst.s, src.s, (size_t)toCopy);
+    dst.s[toCopy] = '\0';
 
     return toCopy;
 }
@@ -2021,9 +2363,13 @@ int BufSet(Str dst, Str src) {
 } // namespace str
 namespace wstr {
 
+// WCHAR overload of BufSet —replaces lstrcpynW / wcscpy_s / wcsncpy_s / StringCchCopyW.
 int BufSet(WStr dst, WStr src) {
     int cchDst = dst.len;
-    ReportIf(0 == cchDst || !dst.s);
+    if (0 == cchDst || !dst.s) {
+        ReportIf(true);
+        return 0;
+    }
     if (!src) {
         *dst.s = 0;
         return 0;
@@ -2039,6 +2385,7 @@ int BufSet(WStr dst, WStr src) {
 } // namespace wstr
 namespace str {
 
+// UTF-8 Str →fixed WCHAR buffer (converts then BufSet).
 int BufSet(WCHAR* dst, int dstCchSize, Str src) {
     return wstr::BufSet(WStr(dst, dstCchSize), ToWStrTemp(src));
 }
@@ -2056,8 +2403,8 @@ int BufAppend(Str dst, Str s) {
     int left = dstCch - currDstCchLen - 1;
     int toCopy = std::min(left, s.len);
 
-    errno_t err = strncat_s(dst.s, dstCch, s.s, toCopy);
-    ReportIf(err || dst.s[currDstCchLen + toCopy] != '\0');
+    memcpy(dst.s + currDstCchLen, s.s, (size_t)toCopy);
+    dst.s[currDstCchLen + toCopy] = '\0';
 
     return toCopy;
 }
@@ -2079,8 +2426,7 @@ TempStr GetFullPathTemp(Str url) {
     TempStr path = str::DupTemp(url);
     str::TransCharsInPlace(path, StrL("#?"), StrL("\0\0"));
     path.len = len(path.s);
-    DecodeInPlace(path);
-    return path;
+    return DecodeTemp(path);
 }
 
 TempStr GetFileNameTemp(Str url) {
@@ -2094,12 +2440,10 @@ TempStr GetFileNameTemp(Str url) {
         }
     }
     Str baseStr(path.s + base, path.len - base);
-    if (str::IsEmpty(baseStr)) {
+    if (len(baseStr) == 0) {
         return {};
     }
-    TempStr res = str::DupTemp(baseStr);
-    DecodeInPlace(res);
-    return res;
+    return DecodeTemp(baseStr);
 }
 
 } // namespace url
@@ -2116,7 +2460,7 @@ int ParseInt(Str s) {
     int value = 0;
     int overflowCheck = negative ? 1 : 0;
     for (; off < s.len && str::IsDigit(s.s[off]); off++) {
-        value = value * 10 + (s.s[off] - '0');
+        value = (value * 10) + (s.s[off] - '0');
         // return 0 on overflow
         if (value - overflowCheck < 0) {
             return 0;
@@ -2136,7 +2480,7 @@ i64 ParseInt64(Str s) {
     }
     i64 value = 0;
     for (; off < s.len && str::IsDigit(s.s[off]); off++) {
-        value = value * 10 + (s.s[off] - '0');
+        value = (value * 10) + (s.s[off] - '0');
     }
     return negative ? -value : value;
 }
@@ -2144,23 +2488,23 @@ i64 ParseInt64(Str s) {
 // the only valid chars are 0-9, . and newlines.
 // a valid version has to match the regex /^\d+(\.\d+)*(\r?\n)?$/
 // Return false if it contains anything else.
-bool IsValidProgramVersion(Str txt) {
-    if (!txt || !str::IsDigit(txt.s[0])) {
+bool IsValidProgramVersion(Str ver) {
+    if (!ver || !str::IsDigit(ver.s[0])) {
         return false;
     }
 
-    for (int i = 0; i < txt.len; i++) {
-        char c = txt.s[i];
+    for (int i = 0; i < ver.len; i++) {
+        char c = ver.s[i];
         if (str::IsDigit(c)) {
             continue;
         }
-        if (c == '.' && i + 1 < txt.len && str::IsDigit(txt.s[i + 1])) {
+        if (c == '.' && i + 1 < ver.len && str::IsDigit(ver.s[i + 1])) {
             continue;
         }
-        if (c == '\r' && i + 1 < txt.len && txt.s[i + 1] == '\n') {
+        if (c == '\r' && i + 1 < ver.len && ver.s[i + 1] == '\n') {
             continue;
         }
-        if (c == '\n' && i + 1 == txt.len) {
+        if (c == '\n' && i + 1 == ver.len) {
             continue;
         }
         return false;
@@ -2171,7 +2515,11 @@ bool IsValidProgramVersion(Str txt) {
 
 static unsigned int ExtractNextNumber(Str txt, int& off) {
     unsigned int val = 0;
-    Str slice = off < txt.len ? Str(txt.s + off, txt.len - off) : Str{};
+    if (off >= txt.len) {
+        off = txt.len;
+        return 0;
+    }
+    Str slice(txt.s + off, txt.len - off);
     Str next = str::Parse(slice, "%u%?.", &val);
     if (next) {
         off += (int)(next.s - slice.s);
@@ -2187,12 +2535,12 @@ static unsigned int ExtractNextNumber(Str txt, int& off) {
 //   0.9.3.900 is greater than 0.9.3
 //   1.09.300 is greater than 1.09.3 which is greater than 1.9.1
 //   1.2.0 is the same as 1.2
-int CompareProgramVersion(Str txt1, Str txt2) {
+int CompareProgramVersion(Str ver1, Str ver2) {
     int off1 = 0;
     int off2 = 0;
-    while (off1 < txt1.len || off2 < txt2.len) {
-        unsigned int v1 = ExtractNextNumber(txt1, off1);
-        unsigned int v2 = ExtractNextNumber(txt2, off2);
+    while (off1 < ver1.len || off2 < ver2.len) {
+        unsigned int v1 = ExtractNextNumber(ver1, off1);
+        unsigned int v2 = ExtractNextNumber(ver2, off2);
         if (v1 != v2) {
             return (int)v1 - (int)v2;
         }
@@ -2208,14 +2556,15 @@ bool IsTextRtl(WStr s) {
     if (!s) {
         return false;
     }
-    int len = s.len > 40 ? 40 : s.len;
+    int n = s.len > 40 ? 40 : s.len;
     int nRtl = 0;
     int nLtr = 0;
-    WORD* charTypes = AllocArray<WORD>(GetTempArena(), len + 1);
-    if (!GetStringTypeExW(LOCALE_INVARIANT, CT_CTYPE2, s.s, len, charTypes)) {
+#if OS_WIN
+    WORD* charTypes = AllocArrayTemp<WORD>(n + 1);
+    if (!GetStringTypeExW(LOCALE_INVARIANT, CT_CTYPE2, s.s, n, charTypes)) {
         return false; // API failure
     }
-    for (int i = 0; i < len; ++i) {
+    for (int i = 0; i < n; ++i) {
         WORD type = charTypes[i];
         if (type == C2_LEFTTORIGHT) {
             nLtr++;
@@ -2223,6 +2572,16 @@ bool IsTextRtl(WStr s) {
             nRtl++;
         }
     }
+#else
+    for (int i = 0; i < n; i++) {
+        wchar_t c = s.s[i];
+        if (IsRtlCodepoint(c)) {
+            nRtl++;
+        } else if (IsLtrCodepoint(c)) {
+            nLtr++;
+        }
+    }
+#endif
     return nRtl > nLtr;
 }
 
@@ -2259,7 +2618,7 @@ TempWStr JoinTemp(WStr s1, WStr s2, WStr s3) {
 }
 
 TempStr ReplaceTemp(Str s, Str toReplace, Str replaceWith) {
-    if (str::IsNull(s) || str::IsEmpty(toReplace) || str::IsNull(replaceWith)) {
+    if (str::IsNull(s) || len(toReplace) == 0 || str::IsNull(replaceWith)) {
         return {};
     }
 
@@ -2277,7 +2636,7 @@ TempStr ReplaceTemp(Str s, Str toReplace, Str replaceWith) {
         lenDiff = replLen - findLen;
     }
     // heuristic: allow 6 replacements without reallocating
-    int capHint = s.len + 1 + lenDiff * 6;
+    int capHint = s.len + 1 + (lenDiff * 6);
     str::Builder result(capHint);
     bool ok;
     while (idx >= 0) {
@@ -2306,7 +2665,7 @@ TempStr ReplaceNoCaseTemp(Str s, Str toReplace, Str replaceWith) {
         return s;
     }
     char* pos = s.s + idx;
-    if (!memeq(pos, toReplace.s, n)) {
+    if (!MemEq(pos, toReplace.s, n)) {
         toReplace = str::DupTemp(Str(pos, n));
     }
     return str::ReplaceTemp(s, toReplace, replaceWith);
@@ -2315,6 +2674,11 @@ TempStr ReplaceNoCaseTemp(Str s, Str toReplace, Str replaceWith) {
 
 // Temporary, guaranteed zero-terminated copy, for passing to C / win32 APIs
 // that require a NUL-terminated string.
+// Temporary, guaranteed zero-terminated copy of s (lives in the temp arena).
+// Use when passing a Str/WStr to a C or win32 API that requires a
+// NUL-terminated string; the name documents that intent at the call site.
+// Returns non-const so it implicitly converts to both char* and const char*
+// (some C/win32 APIs take non-const), avoiding casts at the call site.
 char* CStrTemp(Str s) {
     return str::DupTemp(s).s;
 }
@@ -2330,11 +2694,16 @@ WCHAR* CWStrTemp(WStr s, int& cch) {
 }
 
 // handles embedded 0 in the string
+// str::Builder/wstr::Builder always keep their data NUL-terminated.
+// ToStr() returns a {ptr,len} view (may contain embedded NULs).
+// ToCStr() returns the NUL-terminated buffer, for passing to C/win32 code we
+// don't control that expects a zero-terminated char*/WCHAR*.
 Str ToStr(const str::Builder& b) {
     return Str(b.els, (int)b.len);
 }
 
 // NO_INLINE: this is called in many places; keeping it out of line trims code size
+// owning temp-arena copy of the builder's content (unlike ToStr()'s view)
 NO_INLINE TempStr ToStrTemp(const str::Builder& b) {
     return str::DupTemp(ToStr(b));
 }
@@ -2342,6 +2711,10 @@ NO_INLINE TempStr ToStrTemp(const str::Builder& b) {
 // str::Builder always keeps its data NUL-terminated, so we can hand out the
 // buffer directly for C/win32 APIs we don't control that want a char*
 char* ToCStr(const str::Builder& b) {
+    if (!b.els) {
+        static char empty = 0;
+        return &empty;
+    }
     return b.els;
 }
 
@@ -2349,7 +2722,13 @@ WStr ToWStr(const wstr::Builder& b) {
     return WStr(b.els, (int)b.len);
 }
 
+// wstr::Builder always keeps its data NUL-terminated, so we can hand out the
+// buffer directly for C/win32 APIs we don't control that want a WCHAR*
 WCHAR* ToWCStr(const wstr::Builder& b) {
+    if (!b.els) {
+        static WCHAR empty = 0;
+        return &empty;
+    }
     return b.els;
 }
 
@@ -2360,7 +2739,7 @@ wchar_t ToLowerW(wchar_t c) {
 }
 
 int WStrFindSubstr(WStr str, WStr substr) {
-    if (IsEmpty(substr)) return -1; // Empty search - no highlight
+    if (len(substr) == 0) return -1; // Empty search - no highlight
     if (substr.len > str.len) return -1;
 
     for (int i = 0; i <= str.len - substr.len; i++) {
@@ -2386,19 +2765,8 @@ int WStrCmpNoCase(WStr a, WStr b) {
     return a.len - b.len;
 }
 
-bool IsWhiteSpace(char c) {
-    switch (c) {
-        case ' ':
-        case '\t':
-        case '\n':
-        case '\r':
-            return true;
-        default:
-            return false;
-    }
-}
-
 // Format file size with comma separators, returns Str
+// Str utilities
 Str FormatFileSize(Arena* arena, u64 size) {
     char buf[32];
 
@@ -2410,7 +2778,7 @@ Str FormatFileSize(Arena* arena, u64 size) {
     char temp[32];
     int i = 0;
     while (size > 0 && i < 31) {
-        temp[i++] = '0' + (size % 10);
+        temp[i++] = (char)('0' + (size % 10));
         size /= 10;
     }
     int numDigits = i;
@@ -2479,6 +2847,7 @@ void FormatFileSizeToWstrBuf(u64 size, WStr buf) {
 int FormatSizeHumanIntoBuf(u64 size, Str buf) {
     if (buf.len < 2) return 0;
 
+    const u64 TB = 1024ULL * 1024 * 1024 * 1024;
     const u64 GB = 1024ULL * 1024 * 1024;
     const u64 MB = 1024ULL * 1024;
     const u64 KB = 1024ULL;
@@ -2486,7 +2855,10 @@ int FormatSizeHumanIntoBuf(u64 size, Str buf) {
     Str suffix;
     u64 divisor;
 
-    if (size >= GB) {
+    if (size >= TB) {
+        suffix = StrL(" TB");
+        divisor = TB;
+    } else if (size >= GB) {
         suffix = StrL(" GB");
         divisor = GB;
     } else if (size >= MB) {
@@ -2497,8 +2869,8 @@ int FormatSizeHumanIntoBuf(u64 size, Str buf) {
         divisor = KB;
     } else {
         // Bytes - just format as integer
-        int len = snprintf(buf.s, buf.len, "%llu B", size);
-        return len < buf.len ? len : buf.len - 1;
+        int n = snprintf(buf.s, buf.len, "%llu B", size);
+        return n < buf.len ? n : buf.len - 1;
     }
 
     // Calculate with 2 decimal precision
@@ -2506,26 +2878,26 @@ int FormatSizeHumanIntoBuf(u64 size, Str buf) {
     u64 remainder = size % divisor;
     int frac = (int)((remainder * 100) / divisor);
 
-    int len;
+    int n;
     if (frac == 0) {
-        len = snprintf(buf.s, buf.len, "%llu%s", whole, suffix.s);
+        n = snprintf(buf.s, buf.len, "%llu%s", whole, suffix.s);
     } else if (frac % 10 == 0) {
-        len = snprintf(buf.s, buf.len, "%llu.%d%s", whole, frac / 10, suffix.s);
+        n = snprintf(buf.s, buf.len, "%llu.%d%s", whole, frac / 10, suffix.s);
     } else {
-        len = snprintf(buf.s, buf.len, "%llu.%02d%s", whole, frac, suffix.s);
+        n = snprintf(buf.s, buf.len, "%llu.%02d%s", whole, frac, suffix.s);
     }
-    return len < buf.len ? len : buf.len - 1;
+    return n < buf.len ? n : buf.len - 1;
 }
 
 // Wrapper that formats into wide string buffer
 void FormatSizeHumanIntoWBuf(u64 size, WStr wbuf) {
     char temp[32];
-    int len = FormatSizeHumanIntoBuf(size, Str(temp, 32));
+    int n = FormatSizeHumanIntoBuf(size, Str(temp, 32));
 
     // Copy to wide buffer
     int maxLen = wbuf.len - 1;
     int i = 0;
-    while (i < len && i < maxLen) {
+    while (i < n && i < maxLen) {
         wbuf.s[i] = (wchar_t)temp[i];
         i++;
     }

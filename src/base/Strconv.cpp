@@ -1,29 +1,38 @@
 /* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
-#include "Base.h"
+#include "base/Base.h"
 
 namespace strconv {
 
-static WStr WrapAllocatedWStr(WCHAR* s, int len) {
+#if !OS_WIN
+static bool IsSupportedCodePage(uint codePage) {
+    return codePage == CP_UTF8 || codePage == CP_ACP || codePage == 20127;
+}
+#endif
+
+#if OS_WIN
+static WStr WrapAllocatedWStr(WCHAR* s, int n) {
     if (!s) {
         return {};
     }
-    return WStr(s, len);
+    return WStr(s, n);
 }
 
-static Str WrapAllocatedStr(char* s, int len) {
+static Str WrapAllocatedStr(char* s, int n) {
     if (!s) {
         return {};
     }
-    return Str(s, len);
+    return Str(s, n);
 }
+#endif
 
 WStr Utf8ToWStr(Str s, Arena* a) {
     // subtle: if s.s is nullptr, we return empty. if empty string => we return empty string
     if (str::IsNull(s)) {
         return {};
     }
+#if OS_WIN
     if (s.len == 0) {
         WCHAR* res = AllocArray<WCHAR>(a, 1);
         return WrapAllocatedWStr(res, 0);
@@ -40,6 +49,10 @@ WStr Utf8ToWStr(Str s, Arena* a) {
     // triggers in Dune.epub
     // ReportIf(cchConverted != s.len);
     return WrapAllocatedWStr(res, cchConverted);
+#else
+    TempWStr res = ToWStrTemp(s);
+    return wstr::Dup(a, res);
+#endif
 }
 
 Str WStrToCodePage(uint codePage, WStr s, Arena* a) {
@@ -47,6 +60,7 @@ Str WStrToCodePage(uint codePage, WStr s, Arena* a) {
     if (wstr::IsNull(s)) {
         return {};
     }
+#if OS_WIN
     if (s.len == 0) {
         char* res = AllocArray<char>(a, 1);
         return WrapAllocatedStr(res, 0);
@@ -63,6 +77,13 @@ Str WStrToCodePage(uint codePage, WStr s, Arena* a) {
     int cbConverted = WideCharToMultiByte(codePage, 0, s.s, s.len, res, cbNeeded, nullptr, nullptr);
     ReportIf(cbConverted != cbNeeded);
     return WrapAllocatedStr(res, cbConverted);
+#else
+    if (!IsSupportedCodePage(codePage)) {
+        return {};
+    }
+    TempStr res = ToUtf8Temp(s);
+    return str::Dup(a, res);
+#endif
 }
 
 Str WStrToUtf8(WStr s, Arena* a) {
@@ -76,16 +97,24 @@ WStr StrCPToWStr(Str src, uint codePage) {
         return {};
     }
 
+#if OS_WIN
     int requiredBufSize = MultiByteToWideChar(codePage, 0, src.s, src.len, nullptr, 0);
     if (0 == requiredBufSize) {
         return {};
     }
-    WCHAR* res = AllocArray<WCHAR>((size_t)requiredBufSize + 1);
+    WCHAR* res = AllocArray<WCHAR>(requiredBufSize + 1);
     if (!res) {
         return {};
     }
     MultiByteToWideChar(codePage, 0, src.s, src.len, res, requiredBufSize);
     return WrapAllocatedWStr(res, requiredBufSize);
+#else
+    if (!IsSupportedCodePage(codePage)) {
+        return {};
+    }
+    TempWStr res = ToWStrTemp(src);
+    return wstr::Dup(nullptr, res);
+#endif
 }
 
 TempWStr StrCPToWStrTemp(Str src, uint codePage) {
@@ -94,16 +123,23 @@ TempWStr StrCPToWStrTemp(Str src, uint codePage) {
         return {};
     }
 
+#if OS_WIN
     int requiredBufSize = MultiByteToWideChar(codePage, 0, src.s, src.len, nullptr, 0);
     if (0 == requiredBufSize) {
         return {};
     }
-    WCHAR* res = AllocArrayTemp<WCHAR>((size_t)requiredBufSize + 1);
+    WCHAR* res = AllocArrayTemp<WCHAR>(requiredBufSize + 1);
     if (!res) {
         return {};
     }
     MultiByteToWideChar(codePage, 0, src.s, src.len, res, requiredBufSize);
     return WrapAllocatedWStr(res, requiredBufSize);
+#else
+    if (!IsSupportedCodePage(codePage)) {
+        return {};
+    }
+    return ToWStrTemp(src);
+#endif
 }
 
 TempStr ToMultiByteTemp(Str src, uint codePageSrc, uint codePageDest) {
@@ -144,24 +180,23 @@ TempStr UnknownToUtf8Temp(Str s) {
         return str::DupTemp(s);
     }
 
-    if (str::StartsWith(s, Str(UTF8_BOM))) {
-        return str::DupTemp(Str(s.s + 3, s.len - 3));
+    if (str::TrimPrefix(s, Str(UTF8_BOM))) {
+        return str::DupTemp(s);
     }
 
-    if (str::StartsWith(s, Str(UTF16_BOM))) {
-        int bomOff = 2;
-        int cch = (s.len - bomOff) / 2;
-        return ToUtf8Temp(WStr((wchar_t*)(s.s + bomOff), cch));
+    if (str::TrimPrefix(s, Str(UTF16_BOM))) {
+        WStr ws = str::CastStrToWStr(s);
+        return ToUtf8Temp(ws);
     }
 
-    if (str::StartsWith(s, Str(UTF16BE_BOM))) {
+    if (str::TrimPrefix(s, Str(UTF16BE_BOM))) {
         // convert from utf16 big endian to utf16
-        int bomOff = 2;
-        int n = (s.len - bomOff) / 2;
-        TempWStr tmpW = str::DupTemp(WStr((wchar_t*)(s.s + bomOff), n));
+        WStr ws = str::CastStrToWStr(s);
+        TempWStr tmpW = str::DupTemp(ws);
+        int n = ws.len;
         u8* bytes = (u8*)tmpW.s;
         for (int i = 0; i < n; i++) {
-            int idx = i * (int)sizeof(WCHAR);
+            int idx = i * sizeofi(WCHAR);
             std::swap(bytes[idx], bytes[idx + 1]);
         }
         return ToUtf8Temp(WStr(tmpW.s, n));
@@ -207,6 +242,8 @@ Str Utf8ToAnsi(Str s) {
 } // namespace strconv
 
 // short names because frequently used
+// shorter names
+// TODO: eventually we want to migrate all strconv:: to them
 Str ToUtf8(WStr s, Arena* a) {
     return strconv::WStrToUtf8(s, a);
 }

@@ -15,7 +15,7 @@
 #include "base/Base.h"
 #include "base/Win.h"
 
-#include "wingui/Layout.h"
+#include "gui/Layout.h"
 
 // must be last due to assert() over-write
 #include "base/UtAssert.h"
@@ -28,7 +28,6 @@ struct FakeWrapBox : ILayout {
     int lineH = 10;
     int width = 120;
 
-    Kind GetKind() override { return nullptr; }
     void SetVisibility(Visibility) override {}
     Visibility GetVisibility() override { return Visibility::Visible; }
 
@@ -45,13 +44,21 @@ struct FakeWrapBox : ILayout {
     void SetBounds(Rect) override {}
 };
 
+// word-wrapping text measurement: narrower width -> more lines -> taller result
+static Size MeasureWrapped(HDC hdc, Str txt, int maxDx, HFONT font) {
+    if (len(txt) == 0) {
+        return {};
+    }
+    return HdcMeasureText(hdc, txt, maxDx, DT_WORDBREAK | DT_NOPREFIX | DT_WORD_ELLIPSIS, font);
+}
+
 static void WrappedTextMeasureTest() {
     HDC hdc = CreateCompatibleDC(nullptr);
     HFONT font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
 
     Str txt = StrL("The quick brown fox jumps over the lazy dog while the sun is shining");
-    Size wide = HdcMeasureWrappedText(hdc, txt, 600, font);
-    Size narrow = HdcMeasureWrappedText(hdc, txt, 80, font);
+    Size wide = MeasureWrapped(hdc, txt, 600, font);
+    Size narrow = MeasureWrapped(hdc, txt, 80, font);
     utassert(wide.dx > 0 && wide.dy > 0);
     utassert(narrow.dx > 0 && narrow.dy > 0);
     // wrapped text is taller than single-line text
@@ -61,13 +68,13 @@ static void WrappedTextMeasureTest() {
     // heights are monotonic: a wider box never needs more lines than a narrower one
     int prevH = Inf;
     for (int w = 30; w <= 600; w += 30) {
-        int h = HdcMeasureWrappedText(hdc, txt, w, font).dy;
+        int h = MeasureWrapped(hdc, txt, w, font).dy;
         utassert(h <= prevH);
         prevH = h;
     }
 
     // a single long unbreakable word is truncated to fit (DT_WORD_ELLIPSIS)
-    Size word = HdcMeasureWrappedText(hdc, StrL("supercalifragilisticexpialidocious"), 40, font);
+    Size word = MeasureWrapped(hdc, StrL("supercalifragilisticexpialidocious"), 40, font);
     utassert(word.dx > 0 && word.dx <= 40);
     // min-content width: wrapping at the narrowest width reports the widest
     // unbreakable word (what Static::MinIntrinsicWidth uses)
@@ -75,7 +82,7 @@ static void WrappedTextMeasureTest() {
     utassert(wordMin.dx > 40);
 
     // empty text measures as empty
-    Size empty = HdcMeasureWrappedText(hdc, StrL(""), 80, font);
+    Size empty = MeasureWrapped(hdc, StrL(""), 80, font);
     utassert(empty.dx == 0 && empty.dy == 0);
 
     DeleteDC(hdc);

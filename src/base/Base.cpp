@@ -2,9 +2,6 @@
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "base/Base.h"
-#include "base/ScopedWin.h"
-
-#include "base/Log.h"
 
 #ifdef DEBUG
 // TLS counter defined here (shared across all TUs via extern in ScopedWin.h).
@@ -14,16 +11,7 @@ __declspec(thread) int g_tlsCritSecDepth = 0;
 Kind kindNone = "none";
 
 // if > 1 we won't crash when memory allocation fails
-LONG gAllowAllocFailure = 0;
-
-// returns count after adding
-int AtomicRefCountAdd(AtomicRefCount* v) {
-    return (int)InterlockedIncrement(v);
-}
-
-int AtomicRefCountDec(AtomicRefCount* v) {
-    return (int)InterlockedDecrement(v);
-}
+AtomicInt gAllowAllocFailure = 0;
 
 // This exits so that I can add temporary instrumentation
 // to catch allocations of a given size and it won't cause
@@ -32,21 +20,8 @@ void* AllocZero(int count, int size) {
     return calloc(count, size);
 }
 
-// extraBytes will be filled with 0. Useful for copying zero-terminated strings
-void* memdup(const void* data, int len, int extraBytes) {
-    // to simplify callers, if data is nullptr, ignore the sizes
-    if (!data) {
-        return nullptr;
-    }
-    void* dup = AllocZero(len + extraBytes, 1);
-    if (dup) {
-        memcpy(dup, data, len);
-    }
-    return dup;
-}
-
-bool memeq(const void* s1, const void* s2, int len) {
-    return 0 == memcmp(s1, s2, len);
+bool MemEq(const void* s1, const void* s2, int n) {
+    return 0 == memcmp(s1, s2, n);
 }
 
 int RoundUp(int n, int rounding) {
@@ -68,11 +43,11 @@ void* RoundUp(void* d, int rounding) {
 int RoundToPowerOf2(int size) {
     int n = 1;
     while (n < size) {
-        n *= 2;
-        if (n <= 0) {
-            // overflow: no power of 2 fits in an int
+        // Check before doubling so signed overflow is never UB.
+        if (n > (INT_MAX / 2)) {
             return -1;
         }
+        n *= 2;
     }
     return n;
 }
@@ -89,8 +64,8 @@ int RoundToPowerOf2(int size) {
  */
 static u32 hash_function_seed = 5381;
 
-u32 MurmurHash2(const void* key, int len) {
-    if (len <= 0) {
+u32 MurmurHash2(const void* key, int n) {
+    if (n <= 0) {
         return 0;
     }
     /* 'm' and 'r' are mixing constants generated offline.
@@ -99,12 +74,12 @@ u32 MurmurHash2(const void* key, int len) {
     const int r = 24;
 
     /* Initialize the hash to a 'random' value */
-    u32 h = hash_function_seed ^ (u32)len;
+    u32 h = hash_function_seed ^ (u32)n;
 
     /* Mix 4 bytes at a time into the hash */
     const u8* data = (const u8*)key;
 
-    while (len >= 4) {
+    while (n >= 4) {
         u32 k = *(u32*)data;
 
         k *= m;
@@ -115,11 +90,11 @@ u32 MurmurHash2(const void* key, int len) {
         h ^= k;
 
         data += 4;
-        len -= 4;
+        n -= 4;
     }
 
     /* Handle the last few bytes of the input array  */
-    switch (len) {
+    switch (n) {
         case 3:
             h ^= data[2] << 16;
         case 2:
@@ -143,13 +118,13 @@ u32 MurmurHash2(Str s) {
 }
 
 u32 MurmurHash2(WStr s) {
-    return MurmurHash2(s.s, s.len * (int)sizeof(wchar_t));
+    return MurmurHash2(s.s, s.len * sizeofi(wchar_t));
 }
 
 // variation of MurmurHash2 which deals with strings that are
 // mostly ASCII and should be treated case independently
 u32 MurmurHashWStrI(WStr str) {
-    auto a = GetTempArena();
+    auto* a = GetTempArena();
     u8* data = (u8*)a->Alloc(str.len);
     u8* dst = data;
     for (int i = 0; i < str.len; i++) {
@@ -225,7 +200,7 @@ float limitValue(float val, float min, float max) {
 Func0 MkFunc0Void(funcVoidPtr fn) {
     auto res = Func0{};
     res.fn = (void*)fn;
-    res.userData = kFuncNoArg;
+    res.userData = Func0::kFuncNoArg;
     return res;
 }
 
@@ -234,50 +209,13 @@ template <typename T>
 Func0 MkMethod0Void(funcVoidPtr fn, T* self) {
     UINT_PTR fnTagged = (UINT_PTR)fn;
     res.fn = (void*)fn;
-    res.userData = kFuncNoArg;
+    res.userData = Func0::kFuncNoArg;
     res.self = self;
 }
 #endif
 
 int setMinMax(int& v, int minVal, int maxVal) {
-    if (v < minVal) {
-        v = minVal;
-    }
-    if (v > maxVal) {
-        v = maxVal;
-    }
+    v = std::max(v, minVal);
+    v = std::min(v, maxVal);
     return v;
 }
-
-// --- begin: merged from former src/common/base.cpp ---
-
-// Atomic bool operations
-bool AtomicBoolGet(AtomicBool* p) {
-    return InterlockedOr(p, 0) != 0;
-}
-
-void AtomicBoolSet(AtomicBool* p, bool v) {
-    InterlockedExchange(p, v ? 1 : 0);
-}
-
-// Atomic int operations
-int AtomicIntGet(AtomicInt* p) {
-    return (int)InterlockedOr(p, 0);
-}
-
-void AtomicIntSet(AtomicInt* p, int v) {
-    InterlockedExchange(p, (LONG)v);
-}
-
-int AtomicIntAdd(AtomicInt* p, int v) {
-    return (int)InterlockedAdd(p, (LONG)v);
-}
-
-int AtomicIntInc(AtomicInt* p) {
-    return (int)InterlockedIncrement(p);
-}
-
-int AtomicIntDec(AtomicInt* p) {
-    return (int)InterlockedDecrement(p);
-}
-// --- end: merged from former src/common/base.cpp ---

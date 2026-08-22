@@ -10,7 +10,7 @@ struct StrQueue {
     void Unlock();
     Str append(Str s);
     Str PopFront();
-    bool IsSentinel(Str s);
+    static bool IsSentinel(Str s);
     void MarkFinished();
     bool IsFinished();
     bool Access(const Func1<StrQueue*>& fn);
@@ -18,8 +18,8 @@ struct StrQueue {
     StrVec strings;
 
     volatile bool isFinished = false;
-    CRITICAL_SECTION cs;
-    HANDLE hEvent = nullptr;
+    Mutex cs;
+    ConditionVariable nonEmpty;
 };
 
 int len(StrQueue& q);

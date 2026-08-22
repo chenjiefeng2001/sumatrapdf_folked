@@ -19,8 +19,8 @@
 
 #ifdef _MSC_VER
 #include <dwrite.h>
-#include "wingui/Renderer.h"
-#include "wingui/DWriteText.h"
+#include "gui/win/Renderer.h"
+#include "gui/win/DWriteText.h"
 #endif
 
 // must be last due to assert() over-write

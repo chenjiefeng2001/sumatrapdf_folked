@@ -1,14 +1,14 @@
 /* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
-#include "Base.h"
+#include "base/Base.h"
 
 // represents null string
 constexpr u32 kNullOffset = (u32)-2;
 
 static int StrCmp(Str s1, Str s2) {
-    size_t len = std::min((size_t)s1.len, (size_t)s2.len);
-    int cmp = len > 0 ? memcmp(s1.s, s2.s, len) : 0;
+    int n = std::min(s1.len, s2.len);
+    int cmp = n > 0 ? memcmp(s1.s, s2.s, (size_t)n) : 0;
     if (cmp != 0) {
         return cmp;
     }
@@ -16,22 +16,25 @@ static int StrCmp(Str s1, Str s2) {
 }
 
 static int StrCmpI(Str s1, Str s2) {
-    size_t len = std::min((size_t)s1.len, (size_t)s2.len);
-    int cmp = len > 0 ? _strnicmp(s1.s, s2.s, len) : 0;
-    if (cmp != 0) {
-        return cmp;
+    int n = std::min(s1.len, s2.len);
+    for (int i = 0; i < n; i++) {
+        int c1 = tolower((u8)s1.s[i]);
+        int c2 = tolower((u8)s2.s[i]);
+        if (c1 != c2) {
+            return c1 - c2;
+        }
     }
     return s1.len - s2.len;
 }
 
 bool StrLess(Str s1, Str s2) {
-    if (str::IsEmpty(s1)) {
-        if (str::IsEmpty(s2)) {
+    if (len(s1) == 0) {
+        if (len(s2) == 0) {
             return false;
         }
         return true;
     }
-    if (str::IsEmpty(s2)) {
+    if (len(s2) == 0) {
         return false;
     }
     int n = StrCmp(s1, s2);
@@ -39,14 +42,14 @@ bool StrLess(Str s1, Str s2) {
 }
 
 bool StrLessNoCase(Str s1, Str s2) {
-    if (str::IsEmpty(s1)) {
+    if (len(s1) == 0) {
         // null / empty string is smallest
-        if (str::IsEmpty(s2)) {
+        if (len(s2) == 0) {
             return false;
         }
         return true;
     }
-    if (str::IsEmpty(s2)) {
+    if (len(s2) == 0) {
         return false;
     }
     int n = StrCmpI(s1, s2);
@@ -77,10 +80,10 @@ struct StrVecPage {
     // strings (allocated from the end)
 
     Str AtStr(int i) const;
-    void* AtDataRaw(int) const;
+    void* AtDataRaw(int /*idx*/) const;
 
-    Str RemoveAt(int);
-    Str RemoveAtFast(int);
+    Str RemoveAt(int /*idx*/);
+    Str RemoveAtFast(int /*idx*/);
 
     int BytesLeft();
     PageOpResult Append(Str s);
@@ -88,11 +91,11 @@ struct StrVecPage {
     PageOpResult InsertAt(int idxSet, Str s);
 };
 
-constexpr int kStrVecPageHdrSize = (int)sizeof(StrVecPage);
+constexpr int kStrVecPageHdrSize = sizeofi(StrVecPage);
 
 static int cbOffsetsSize(int nStrings, int dataSize) {
     ReportIf(dataSize % 4 != 0);
-    int nOffsets = (2 * (int)sizeof(u32)) + dataSize;
+    int nOffsets = (2 * sizeofi(u32)) + dataSize;
     return nStrings * nOffsets;
 }
 
@@ -107,7 +110,7 @@ int StrVecPage::BytesLeft() {
 }
 
 static StrVecPage* AllocStrVecPage(int pageSize, int dataSize) {
-    auto page = (StrVecPage*)AllocZero(nullptr, pageSize);
+    auto* page = (StrVecPage*)AllocZero(nullptr, pageSize);
     page->next = nullptr;
     page->nStrings = 0;
     page->pageSize = pageSize;
@@ -120,15 +123,15 @@ static StrVecPage* AllocStrVecPage(int pageSize, int dataSize) {
 // how many bytes per index entry with data
 // index entry is offset and size (both u32) + (optional) data
 static int cbIndexSize(int dataSize) {
-    // dataSize is guaranteed multiple of sizeof(u32)
-    return (2 * sizeof(u32)) + dataSize;
+    // dataSize is guaranteed multiple of sizeofi(u32)
+    return (2 * sizeofi(u32)) + dataSize;
 }
 
 static u32* OffsetsForString(const StrVecPage* p, int idx) {
     ReportIf(idx < 0 || idx > p->nStrings);
     u8* off = (u8*)p;
     off += kStrVecPageHdrSize;
-    off += idx * cbIndexSize(p->dataSize);
+    off += (size_t)idx * cbIndexSize(p->dataSize);
     return (u32*)off;
 }
 
@@ -139,7 +142,7 @@ static Str AppendJustString(StrVecPage* p, Str s, int idx) {
     u32* offsets = OffsetsForString(p, idx);
     u8* dst = p->currEnd - sLen - 1; // 1 for zero termination
     u32 off = (u32)(dst - (u8*)p);
-    offsets[0] = (u32)off;
+    offsets[0] = off;
     offsets[1] = (u32)sLen;
     memcpy(dst, s.s, (size_t)sLen);
     dst[sLen] = 0; // zero-terminate for C compat
@@ -162,7 +165,7 @@ PageOpResult StrVecPage::SetAt(int idx, Str s) {
         // fast path for when new string is smaller than the current string
         int currLen = (int)offsets[1];
         if (sLen <= currLen) {
-            auto dst = start + off;
+            auto* dst = start + off;
             memcpy(dst, s.s, (size_t)sLen);
             dst[sLen] = 0; // zero-terminate for C compat
             offsets[1] = (u32)sLen;
@@ -246,7 +249,7 @@ Str StrVecPage::RemoveAt(int idx) {
     }
     u32* dst = OffsetsForString(this, idx);
     u32* src = OffsetsForString(this, idx + 1);
-    memmove((void*)dst, (void*)src, nToCopy);
+    memmove((void*)dst, (void*)src, (size_t)nToCopy);
     return removed;
 }
 
@@ -263,7 +266,7 @@ Str StrVecPage::RemoveAtFast(int idx) {
     u32* dst = OffsetsForString(this, idx);
     u32* src = OffsetsForString(this, nStrings);
     int nToCopy = cbIndexSize(dataSize);
-    memmove((void*)dst, (void*)src, nToCopy);
+    memmove((void*)dst, (void*)src, (size_t)nToCopy);
     return removed;
 }
 
@@ -282,7 +285,7 @@ static StrVecPage* CompactStrVecPages(StrVecPage* first, int extraSize) {
         return nullptr;
     }
     int dataSize = first->dataSize;
-    auto curr = first;
+    auto* curr = first;
     u8 *pageStart, *pageEnd;
     int cbStrings;
     int nStrings = 0;
@@ -301,7 +304,7 @@ static StrVecPage* CompactStrVecPages(StrVecPage* first, int extraSize) {
         pageSize += extraSize;
     }
     pageSize = RoundUp(pageSize, 64); // jic
-    auto page = AllocStrVecPage(pageSize, dataSize);
+    auto* page = AllocStrVecPage(pageSize, dataSize);
     int n;
     Str s;
     curr = first;
@@ -315,7 +318,7 @@ static StrVecPage* CompactStrVecPages(StrVecPage* first, int extraSize) {
             if (dataSize > 0) {
                 void* dst = page->AtDataRaw(nStr);
                 void* src = curr->AtDataRaw(i);
-                memcpy(dst, src, dataSize);
+                memcpy(dst, src, (size_t)dataSize);
                 nStr++;
             }
         }
@@ -325,7 +328,7 @@ static StrVecPage* CompactStrVecPages(StrVecPage* first, int extraSize) {
 }
 
 static void CompactPages(StrVec* v, int extraSize) {
-    auto first = CompactStrVecPages(v->first, extraSize);
+    auto* first = CompactStrVecPages(v->first, extraSize);
     FreePages(v->first);
     v->first = first;
     v->last = first;
@@ -358,7 +361,7 @@ StrVec::StrVec(int dataSize) {
     if (dataSize == 0) {
         return;
     }
-    this->dataSize = RoundUp(dataSize, (int)sizeof(u32));
+    this->dataSize = RoundUp(dataSize, sizeofi(u32));
 }
 
 StrVec::~StrVec() {
@@ -430,7 +433,7 @@ static StrVecPage* AllocatePage(StrVec* v, StrVecPage* last, int nBytesNeeded) {
         pageSize = v->nextPageSize;
         v->nextPageSize = CalcNextPageSize(v->nextPageSize);
     }
-    auto page = AllocStrVecPage(pageSize, v->dataSize);
+    auto* page = AllocStrVecPage(pageSize, v->dataSize);
     if (last) {
         ReportIf(!v->first);
         last->next = page;
@@ -470,7 +473,7 @@ int AppendIfNotExists(StrVec* v, Str s) {
 }
 
 static StrVecPage* PageForIdx(const StrVec* v, int idx, int* idxInPageOut) {
-    auto page = v->first;
+    auto* page = v->first;
     while (page) {
         if (page->nStrings > idx) {
             *idxInPageOut = idx;
@@ -493,7 +496,7 @@ Str StrVec::SetAt(int idx, Str s) {
     }
     {
         int idxInPage;
-        auto page = PageForIdx(this, idx, &idxInPage);
+        auto* page = PageForIdx(this, idx, &idxInPage);
         auto res = page->SetAt(idxInPage, s);
         if (!res.noSpace) {
             InvalidateSortIndexes(this);
@@ -528,7 +531,7 @@ Str StrVec::InsertAt(int idx, Str s) {
 
     {
         int idxInPage;
-        auto page = PageForIdx(this, idx, &idxInPage);
+        auto* page = PageForIdx(this, idx, &idxInPage);
         auto res = page->InsertAt(idxInPage, s);
         if (!res.noSpace) {
             size++;
@@ -560,7 +563,7 @@ Str StrVec::RemoveAt(int idx) {
         idx = sortIndexes[idx];
     }
     int idxInPage;
-    auto page = PageForIdx(this, idx, &idxInPage);
+    auto* page = PageForIdx(this, idx, &idxInPage);
     Str removed = page->AtStr(idxInPage);
     page->RemoveAt(idxInPage);
     size--;
@@ -576,7 +579,7 @@ Str StrVec::RemoveAtFast(int idx) {
         idx = sortIndexes[idx];
     }
     int idxInPage;
-    auto page = PageForIdx(this, idx, &idxInPage);
+    auto* page = PageForIdx(this, idx, &idxInPage);
     Str removed = page->AtStr(idxInPage);
     page->RemoveAtFast(idxInPage);
     size--;
@@ -599,7 +602,7 @@ Str StrVec::At(int idx) const {
         idx = sortIndexes[idx];
     }
     int idxInPage;
-    auto page = PageForIdx(this, idx, &idxInPage);
+    auto* page = PageForIdx(this, idx, &idxInPage);
     return page->AtStr(idxInPage);
 }
 
@@ -609,7 +612,7 @@ void* StrVec::AtDataRaw(int idx) const {
         idx = sortIndexes[idx];
     }
     int idxInPage;
-    auto page = PageForIdx(this, idx, &idxInPage);
+    auto* page = PageForIdx(this, idx, &idxInPage);
     return page->AtDataRaw(idxInPage);
 }
 
@@ -660,17 +663,17 @@ StrVec::iterator::iterator(const StrVec* v, int idx) {
         return;
     }
     int idxInPage;
-    auto page = PageForIdx(v, idx, &idxInPage);
+    auto* page = PageForIdx(v, idx, &idxInPage);
     this->page = page;
     this->idxInPage = idxInPage;
 }
 
 StrVec::iterator StrVec::begin() const {
-    return StrVec::iterator(this, 0);
+    return {this, 0};
 }
 
 StrVec::iterator StrVec::end() const {
-    return StrVec::iterator(this, len(*this));
+    return {this, len(*this)};
 }
 
 Str StrVec::iterator::operator*() const {
@@ -756,7 +759,7 @@ static void SortNoData(StrVec* v, StrLessFunc lessFn) {
 static int* AllocateSortIndexes(StrVec* v) {
     InvalidateSortIndexes(v);
     int n = len(*v);
-    auto res = AllocArray<int>(n);
+    auto* res = AllocArray<int>(n);
     for (int i = 0; i < n; i++) {
         res[i] = i;
     }
@@ -854,8 +857,7 @@ static int CalcCapForJoin(const StrVec* v, Str joint) {
     // it's ok to over-estimate
     int cap = 0;
     int jointLen = joint.len;
-    for (auto it = v->begin(); it != v->end(); it++) {
-        Str s = *it;
+    for (auto s : *v) {
         cap += s.len + 1 + jointLen;
     }
     return cap + 32; // +32 arbitrary buffer
@@ -866,8 +868,7 @@ static void JoinInner(const StrVec* v, Str joint, str::Builder& res) {
     // TODO: possibly not handling null values in the middle. need to add more tests and fix
     int firstForJoint = 0;
     int i = 0;
-    for (auto it = v->begin(); it != v->end(); it++) {
-        Str s = *it;
+    for (auto s : *v) {
         if (str::IsNull(s)) {
             firstForJoint++;
             i++;
@@ -881,16 +882,17 @@ static void JoinInner(const StrVec* v, Str joint, str::Builder& res) {
     }
 }
 
-Str Join(StrVec* v, Str joint) {
-    int capHint = CalcCapForJoin(v, joint);
+Str Join(StrVec* v, Str sep) {
+    int capHint = CalcCapForJoin(v, sep);
     str::Builder tmp(capHint);
-    JoinInner(v, joint, tmp);
+    JoinInner(v, sep, tmp);
     return tmp.TakeStr();
 }
 
-TempStr JoinTemp(StrVec* v, Str joint) {
-    int capHint = CalcCapForJoin(v, joint);
-    str::Builder tmp(capHint, GetTempArena());
-    JoinInner(v, joint, tmp);
+TempStr JoinTemp(StrVec* v, Str sep) {
+    int capHint = CalcCapForJoin(v, sep);
+    str::Builder tmp(capHint);
+    tmp.a = GetTempArena();
+    JoinInner(v, sep, tmp);
     return ToStrTemp(tmp);
 }

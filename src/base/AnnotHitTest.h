@@ -27,7 +27,7 @@ struct PointF;
 struct RectF;
 
 template <typename T>
-class Vec;
+struct Vec;
 
 struct AnnotHitEntry {
     RectF bounds;
@@ -49,7 +49,7 @@ class AnnotHitIndex {
     // (exposed for the unit test to prove the spatial pruning works)
     int lastCandidatesExamined() const { return lastCandidatesExamined_; }
 
-    bool empty() const { return !entries_ || entries_->empty() || cols_ == 0 || rows_ == 0; }
+    bool empty() const { return !entries_ || len(*entries_) == 0 || cols_ == 0 || rows_ == 0; }
 
   private:
     struct Cell {

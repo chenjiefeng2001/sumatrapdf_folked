@@ -5,6 +5,8 @@
 #include "base/Crypto.h"
 
 #include <wincrypt.h>
+#include <wintrust.h>
+#include <softpub.h>
 
 #ifndef DWORD_MAX
 #define DWORD_MAX 0xffffffffUL
@@ -22,13 +24,17 @@ static NO_INLINE void CalcDigestWin(Str d, u8* digest, DWORD digestSize, const W
     ok = CryptCreateHash(hProv, alg, 0, 0, &hHash);
     ReportIf(!ok);
 
-#ifdef _WIN64
-    for (; dataSize > DWORD_MAX; data = (const BYTE*)data + DWORD_MAX, dataSize -= DWORD_MAX) {
-        ok = CryptHashData(hHash, (const BYTE*)data, DWORD_MAX, 0);
+    // Hash in DWORD-sized chunks when the payload is larger than DWORD_MAX
+    // (only possible with size_t-sized lengths; our API uses int).
+    const BYTE* p = (const BYTE*)data;
+    size_t remaining = (size_t)(dataSize < 0 ? 0 : dataSize);
+    while (remaining > (size_t)DWORD_MAX) {
+        ok = CryptHashData(hHash, p, DWORD_MAX, 0);
         ReportIf(!ok);
+        p += DWORD_MAX;
+        remaining -= (size_t)DWORD_MAX;
     }
-#endif
-    ok = CryptHashData(hHash, (const BYTE*)data, (DWORD)dataSize, 0);
+    ok = CryptHashData(hHash, p, (DWORD)remaining, 0);
     ReportIf(!ok);
 
     DWORD hashLen = 0;
@@ -63,23 +69,23 @@ static bool ExtractSignature(Str hexSignature, Str& data, ScopedMem<BYTE>& signa
     // * a string starting with "sha1:" followed by the signature (and optionally whitespace and further content)
     // * empty, then the signature must be found on the last line of non-binary data, starting at " Signature sha1:"
     Str hex = hexSignature;
-    if (str::StartsWith(hex, "sha1:")) {
-        hex = Str(hex.s + 5, hex.len - 5);
-    } else if (!hex) {
-        if (data.len < 20 || memchr(data.s, 0, data.len)) {
+    if (!str::TrimPrefix(hex, StrL("sha1:"))) {
+        if (!hex) {
+            if (data.len < 20 || memchr(data.s, 0, data.len)) {
+                return false;
+            }
+            const char* lastLine = data.s + data.len - 1;
+            while (lastLine > data.s && *(lastLine - 1) != '\n') {
+                lastLine--;
+            }
+            if (lastLine == data.s || !str::Contains(Str(lastLine), StrL(" Signature sha1:"))) {
+                return false;
+            }
+            data.len = (int)(lastLine - data.s);
+            str::Cut(Str(lastLine), StrL(" Signature sha1:"), nullptr, &hex);
+        } else {
             return false;
         }
-        const char* lastLine = data.s + data.len - 1;
-        while (lastLine > data.s && *(lastLine - 1) != '\n') {
-            lastLine--;
-        }
-        if (lastLine == data.s || !str::Contains(Str(lastLine), StrL(" Signature sha1:"))) {
-            return false;
-        }
-        data.len = (int)(lastLine - data.s);
-        str::Cut(Str(lastLine), StrL(" Signature sha1:"), nullptr, &hex);
-    } else {
-        return false;
     }
 
     Vec<BYTE> signatureBytes;
@@ -102,11 +108,15 @@ bool VerifySHA1Signature(Str data, Str hexSignature, Str pubkey) {
     BOOL ok = false;
     ScopedMem<BYTE> signature;
     size_t signatureLen;
-    const BYTE* dataPtr = (const BYTE*)data.s;
-    size_t dataLen = (size_t)data.len;
+    // set after ExtractSignature below, which shortens data
+    const BYTE* dataPtr = nullptr;
+    size_t dataLen = 0;
 
-#define Check(val) \
-    if ((ok = (val)) == FALSE) goto CleanUp
+#define Check(val)                     \
+    do {                               \
+        ok = (val);                    \
+        if (ok == FALSE) goto CleanUp; \
+    } while (0)
     Check(ExtractSignature(hexSignature, data, signature, signatureLen));
     dataPtr = (const BYTE*)data.s;
     dataLen = (size_t)data.len;
@@ -133,8 +143,9 @@ CleanUp:
     return ok;
 }
 
+// extracts the content (e.g. PDF) from a PKCS#7 / .p7m wrapper using Win32 crypto APIs
 Str ExtractP7m(Str d) {
-    if (str::IsEmpty(d)) {
+    if (len(d) == 0) {
         return {};
     }
     const u8* data = (u8*)d.s;
@@ -158,7 +169,7 @@ Str ExtractP7m(Str d) {
         return {};
     }
 
-    u8* content = AllocArray<u8>(cbContent);
+    u8* content = AllocArray<u8>((int)cbContent);
     ok = CryptMsgGetParam(hMsg, CMSG_CONTENT_PARAM, 0, content, &cbContent);
     CryptMsgClose(hMsg);
     if (!ok) {
@@ -166,4 +177,85 @@ Str ExtractP7m(Str d) {
         return {};
     }
     return Str((char*)(content), (int)(cbContent));
+}
+
+// Authenticode / PE signature helpers (Windows only; stubs return false/null on POSIX)
+bool IsPEFileSigned(Str filePath) {
+    WCHAR* ws = CWStrTemp(filePath);
+    WINTRUST_FILE_INFO fileInfo = {};
+    fileInfo.cbStruct = sizeof(WINTRUST_FILE_INFO);
+    fileInfo.pcwszFilePath = ws;
+    fileInfo.hFile = nullptr;
+    fileInfo.pgKnownSubject = nullptr;
+
+    GUID actionGUID = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    WINTRUST_DATA trustData = {};
+
+    trustData.cbStruct = sizeof(WINTRUST_DATA);
+    trustData.pPolicyCallbackData = nullptr;
+    trustData.pSIPClientData = nullptr;
+    trustData.dwUIChoice = WTD_UI_NONE;
+    trustData.fdwRevocationChecks = WTD_REVOKE_NONE;
+    trustData.dwUnionChoice = WTD_CHOICE_FILE;
+    trustData.dwStateAction = WTD_STATEACTION_IGNORE;
+    trustData.hWVTStateData = nullptr;
+    trustData.pwszURLReference = nullptr;
+    trustData.dwProvFlags = WTD_SAFER_FLAG;
+    trustData.dwUIContext = 0;
+    trustData.pFile = &fileInfo;
+
+    LONG status = WinVerifyTrust(nullptr, &actionGUID, &trustData);
+
+    if (status == ERROR_SUCCESS) {
+        return true; // File is signed and signature is valid
+    }
+    return false; // File is not signed or signature is not valid
+}
+
+TempStr GetExecutableSignerTemp(Str exePath) {
+    WCHAR* ws = CWStrTemp(exePath);
+
+    HCERTSTORE hStore = nullptr;
+    HCRYPTMSG hMsg = nullptr;
+    BOOL ok = CryptQueryObject(CERT_QUERY_OBJECT_FILE, ws, CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED,
+                               CERT_QUERY_FORMAT_FLAG_BINARY, 0, nullptr, nullptr, nullptr, &hStore, &hMsg, nullptr);
+    if (!ok) {
+        return {};
+    }
+
+    DWORD signerInfoSize = 0;
+    CryptMsgGetParam(hMsg, CMSG_SIGNER_INFO_PARAM, 0, nullptr, &signerInfoSize);
+    if (signerInfoSize == 0) {
+        CryptMsgClose(hMsg);
+        CertCloseStore(hStore, 0);
+        return {};
+    }
+
+    auto* signerInfo = (CMSG_SIGNER_INFO*)AllocZero(GetTempArena(), signerInfoSize);
+    ok = CryptMsgGetParam(hMsg, CMSG_SIGNER_INFO_PARAM, 0, signerInfo, &signerInfoSize);
+    if (!ok) {
+        CryptMsgClose(hMsg);
+        CertCloseStore(hStore, 0);
+        return {};
+    }
+
+    CERT_INFO certInfo = {};
+    certInfo.Issuer = signerInfo->Issuer;
+    certInfo.SerialNumber = signerInfo->SerialNumber;
+
+    PCCERT_CONTEXT certCtx = CertFindCertificateInStore(hStore, X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, 0,
+                                                        CERT_FIND_SUBJECT_CERT, &certInfo, nullptr);
+    TempStr res = nullptr;
+    if (certCtx) {
+        char buf[512];
+        DWORD n = CertGetNameStringA(certCtx, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, nullptr, buf, dimof(buf));
+        if (n > 1) {
+            res = str::DupTemp(buf);
+        }
+        CertFreeCertificateContext(certCtx);
+    }
+
+    CryptMsgClose(hMsg);
+    CertCloseStore(hStore, 0);
+    return res;
 }

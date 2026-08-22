@@ -1,13 +1,11 @@
 /* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
-#define __STDC_LIMIT_MACROS
 #include "base/Base.h"
 #include "base/Zip.h"
 
-#include "base/ByteWriter.h"
-#include "base/ScopedWin.h"
-#include "base/DirIter.h"
+#include "base/ByteReaderWriter.h"
+#include "base/DirScan.h"
 #include "base/File.h"
 
 extern "C" {
@@ -16,58 +14,30 @@ extern "C" {
 
 /***** ZipCreator *****/
 
-class FileWriteStream : public ISequentialStream {
-    HANDLE hFile;
-    LONG refCount;
-
-  public:
-    explicit FileWriteStream(Str filePath) : refCount(1) {
-        WCHAR* path = CWStrTemp(filePath);
-        hFile =
-            CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    }
-    virtual ~FileWriteStream() { CloseHandle(hFile); }
-    // IUnknown
-    IFACEMETHODIMP QueryInterface(REFIID riid, void** ppv) {
-        static const QITAB qit[] = {QITABENT(FileWriteStream, ISequentialStream), {nullptr}};
-        return QISearch(this, qit, riid, ppv);
-    }
-    IFACEMETHODIMP_(ULONG) AddRef() { return InterlockedIncrement(&refCount); }
-    IFACEMETHODIMP_(ULONG) Release() {
-        LONG newCount = InterlockedDecrement(&refCount);
-        if (newCount == 0) {
-            delete this;
-        }
-        return newCount;
-    }
-    // ISequentialStream
-    IFACEMETHODIMP Read(void*, ULONG, ULONG*) { return E_NOTIMPL; }
-    IFACEMETHODIMP Write(const void* data, ULONG size, ULONG* written) {
-        bool ok = WriteFile(hFile, data, size, written, nullptr);
-        return ok && *written == size ? S_OK : E_FAIL;
-    }
-};
-
 ZipCreator::ZipCreator(Str zipFilePath) : bytesWritten(0), fileCount(0) {
-    stream = new FileWriteStream(zipFilePath);
+    this->zipFilePath = str::Dup(zipFilePath);
+    zipOut = &zipData;
 }
 
-ZipCreator::ZipCreator(ISequentialStream* stream) : bytesWritten(0), fileCount(0) {
-    stream->AddRef();
-    this->stream = stream;
+ZipCreator::ZipCreator(str::Builder& zipOut) : bytesWritten(0), fileCount(0) {
+    zipOut.Reset();
+    this->zipOut = &zipOut;
 }
 
 ZipCreator::~ZipCreator() {
-    stream->Release();
+    str::Free(zipFilePath);
 }
 
 bool ZipCreator::WriteData(const void* data, size_t size) {
-    ULONG written = 0;
-    HRESULT res = stream->Write(data, (ULONG)size, &written);
-    if (FAILED(res) || written != size) {
+    ReportIf(size > INT_MAX);
+    if (size > INT_MAX) {
         return false;
     }
-    bytesWritten += written;
+    bool ok = zipOut->Append(Str((char*)data, (int)size));
+    if (!ok) {
+        return false;
+    }
+    bytesWritten += size;
     return true;
 }
 
@@ -94,8 +64,34 @@ static u32 zip_compress(void* dst, u32 dstlen, const void* src, u32 srclen) {
     return newdstlen;
 }
 
+static u32 FileTimeToDosDateTime(FILETIME ft) {
+#if OS_WIN
+    FILETIME ftLocal;
+    WORD dosDate = 0;
+    WORD dosTime = 0;
+    if (!FileTimeToLocalFileTime(&ft, &ftLocal) || !::FileTimeToDosDateTime(&ftLocal, &dosDate, &dosTime)) {
+        return 0;
+    }
+    return MAKELONG(dosTime, dosDate);
+#else
+    u64 ns = ((u64)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    time_t seconds = (time_t)(ns / 1000000000ULL);
+    struct tm local{};
+    if (!localtime_r(&seconds, &local)) {
+        return 0;
+    }
+    int year = local.tm_year + 1900;
+    if (year < 1980 || year > 2107) {
+        return 0;
+    }
+    u16 dosDate = (u16)(((year - 1980) << 9) | ((local.tm_mon + 1) << 5) | local.tm_mday);
+    u16 dosTime = (u16)((local.tm_hour << 11) | (local.tm_min << 5) | (local.tm_sec / 2));
+    return ((u32)dosDate << 16) | dosTime;
+#endif
+}
+
 bool ZipCreator::AddFileData(Str name, Str data, u32 dosdate) {
-    size_t size = (size_t)data.len;
+    int size = data.len;
     ReportIf(size >= UINT32_MAX);
     ReportIf(len(name) >= UINT16_MAX);
     if (size >= UINT32_MAX) {
@@ -111,19 +107,18 @@ bool ZipCreator::AddFileData(Str name, Str data, u32 dosdate) {
     }
 
     u16 method = Z_DEFLATED;
-    uLongf compressedSize = (u32)size;
     char* compressed = AllocArrayTemp<char>(size);
     if (!compressed) {
         return false;
     }
-    compressedSize = zip_compress(compressed, (u32)size, data.s, (u32)size);
+    uLongf compressedSize = zip_compress(compressed, (u32)size, data.s, (u32)size);
     if (!compressedSize) {
         method = 0; // Store
         memcpy(compressed, data.s, size);
         compressedSize = (u32)size;
     }
 
-    constexpr size_t kHdrSize = 30;
+    constexpr int kHdrSize = 30;
     ByteWriterLE local(kHdrSize);
     local.Write32(0x04034B50); // signature
     local.Write16(20);         // version needed to extract
@@ -142,7 +137,7 @@ bool ZipCreator::AddFileData(Str name, Str data, u32 dosdate) {
     ok = ok && WriteData(name.s, namelen);
     ok = ok && WriteData(compressed, compressedSize);
 
-    constexpr size_t kCentralSize = 46;
+    constexpr int kCentralSize = 46;
     ByteWriterLE central(kCentralSize);
     central.Write32(0x02014B50); // signature
     central.Write16(20);         // version made by
@@ -162,7 +157,7 @@ bool ZipCreator::AddFileData(Str name, Str data, u32 dosdate) {
     central.Write32((u32)fileOffset);
     ReportIf(len(central.d) != kCentralSize);
 
-    centraldir.Append(Str(ToStr(central.d).s, (int)kCentralSize));
+    centraldir.Append(Str(ToStr(central.d).s, kCentralSize));
     centraldir.Append(name);
 
     fileCount++;
@@ -171,6 +166,7 @@ bool ZipCreator::AddFileData(Str name, Str data, u32 dosdate) {
 
 // add a given file under (optional) nameInZip
 bool ZipCreator::AddFile(Str path, Str nameInZip) {
+    AutoArenaSavepoint tempScope;
     Str fileData = file::ReadFile(path);
     if (!fileData) {
         return false;
@@ -179,18 +175,14 @@ bool ZipCreator::AddFile(Str path, Str nameInZip) {
     u32 dosdatetime = 0;
     FILETIME ft = file::GetModificationTime(path);
     if (ft.dwLowDateTime || ft.dwHighDateTime) {
-        FILETIME ftLocal;
-        WORD dosDate, dosTime;
-        if (FileTimeToLocalFileTime(&ft, &ftLocal) && FileTimeToDosDateTime(&ftLocal, &dosDate, &dosTime)) {
-            dosdatetime = MAKELONG(dosTime, dosDate);
-        }
+        dosdatetime = FileTimeToDosDateTime(ft);
     }
 
     if (!nameInZip) {
         nameInZip = path::IsAbsolute(path) ? path::GetBaseNameTemp(path) : path;
     }
 
-    Str name = str::Dup(nameInZip);
+    TempStr name = str::DupTemp(nameInZip);
     str::TransCharsInPlace(name, StrL("\\"), StrL("/"));
 
     bool res = AddFileData(name, fileData, dosdatetime);
@@ -200,13 +192,14 @@ bool ZipCreator::AddFile(Str path, Str nameInZip) {
 
 // we use the filePath relative to dir as the zip name
 bool ZipCreator::AddFileFromDir(Str filePath, Str dir) {
-    if (str::IsEmpty(dir) || !str::StartsWith(filePath, dir)) {
+    Str nameInZip = filePath;
+    if (len(dir) == 0 || !str::TrimPrefix(nameInZip, dir)) {
         return false;
     }
-    if (!path::IsSep(filePath.s[dir.len])) {
+    if (!path::IsSep(nameInZip.s[0])) {
         return false;
     }
-    Str nameInZip = Str(filePath.s + dir.len + 1, filePath.len - dir.len - 1);
+    nameInZip = Str(nameInZip.s + 1, nameInZip.len - 1);
     return AddFile(filePath, nameInZip);
 }
 
@@ -230,7 +223,7 @@ bool ZipCreator::Finish() {
         return false;
     }
 
-    constexpr size_t kDirSize = 22;
+    constexpr int kDirSize = 22;
     ByteWriterLE eocd(kDirSize);
     eocd.Write32(0x06054B50); // signature
     eocd.Write16(0);          // disk number
@@ -244,29 +237,27 @@ bool ZipCreator::Finish() {
 
     bool ok = WriteData(ToStr(centraldir).s, len(centraldir));
     ok = ok && WriteData(ToStr(eocd.d).s, kDirSize);
+    if (ok && zipFilePath) {
+        ok = file::WriteFile(zipFilePath, ToStr(*zipOut));
+    }
     return ok;
 }
 
-IStream* OpenDirAsZipStream(Str dirPath, bool recursive) {
+Str ZipDirToData(Str dirPath, bool recursive) {
     if (!dir::Exists(dirPath)) {
-        return nullptr;
+        return {};
     }
 
-    ScopedComPtr<IStream> stream;
-    if (FAILED(CreateStreamOnHGlobal(nullptr, TRUE, &stream))) {
-        return nullptr;
-    }
-
-    ZipCreator zc(stream);
+    str::Builder zipData;
+    ZipCreator zc(zipData);
     if (!zc.AddDir(dirPath, recursive)) {
-        return nullptr;
+        return {};
     }
     if (!zc.Finish()) {
-        return nullptr;
+        return {};
     }
 
-    stream->AddRef();
-    return stream;
+    return zipData.TakeStr();
 }
 
 // adapted from https://www.cocoanetics.com/2012/02/decompressing-files-into-memory/
@@ -275,19 +266,22 @@ IStream* OpenDirAsZipStream(Str dirPath, bool recursive) {
 // the returned data will have 2 zero bytes at end to make sure it's also
 // a 0-terminated char* or WCHA* string
 // those 2 bytes are not reported as
-Str Ungzip(const Str& d) {
-    size_t len = (size_t)d.len;
+Str Ungzip(const Str& d, int maxSize) {
+    int n = d.len;
+    if (n <= 0 || maxSize <= 0) {
+        return {};
+    }
     u8* dataCompr = (u8*)d.s;
     // aggressive growth for uncompressed buffer because I use this
     // for .syntex files and they compress really well
-    size_t lenUncr = len * 2;
+    int lenUncr = (int)std::min((i64)maxSize, (i64)n * 2);
 
     bool done = false;
     int res;
 
     z_stream strm;
     strm.next_in = (Bytef*)dataCompr;
-    strm.avail_in = (uInt)len;
+    strm.avail_in = (uInt)n;
     strm.total_out = 0;
     strm.zalloc = Z_NULL;
     strm.zfree = Z_NULL;
@@ -300,12 +294,16 @@ Str Ungzip(const Str& d) {
     // +2 for space for terminating char* or WCHAR*
     u8* dataUncr = AllocArray<u8>(lenUncr + 2);
     if (!dataUncr) {
+        inflateEnd(&strm);
         return {};
     }
 
     while (!done) {
-        if (strm.total_out >= lenUncr) {
-            size_t newLen = lenUncr * 2;
+        if (strm.total_out >= (uLong)lenUncr) {
+            if (lenUncr >= maxSize) {
+                break;
+            }
+            int newLen = (int)std::min((i64)maxSize, (i64)lenUncr * 2);
             u8* dataUncr2 = (u8*)realloc(dataUncr, newLen + 2);
             if (!dataUncr2) {
                 free((void*)dataUncr);
@@ -333,9 +331,9 @@ Str Ungzip(const Str& d) {
         return {};
     }
 
-    lenUncr = strm.total_out;
+    lenUncr = (int)strm.total_out;
     // also make it a valid 0-terminated char* or WCHAR* string
     dataUncr[lenUncr] = 0;
     dataUncr[lenUncr + 1] = 0;
-    return Str((char*)dataUncr, (int)lenUncr);
+    return Str((char*)dataUncr, lenUncr);
 }

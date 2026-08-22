@@ -12,21 +12,19 @@ struct HashTable;
 // hash tables.
 // Should use smaller values for long-lived hash tables, especially
 // if there are many of them.
-enum {
-    DEFAULT_HASH_TABLE_INITIAL_SIZE = 16 * 1024
-};
+constexpr int kHashTableInitialSize = 16 * 1024;
 
 // a dictionary whose keys are strings and the values are integers
 // note: StrToInt would be more natural name but it's re-#define'd in <shlwapi.h>
 class MapStrToInt {
   public:
-    Arena* allocator = nullptr;
+    Arena* a = nullptr;
     HashTable* h = nullptr;
 
-    explicit MapStrToInt(size_t initialSize = DEFAULT_HASH_TABLE_INITIAL_SIZE);
+    explicit MapStrToInt(int initialSize = kHashTableInitialSize);
     ~MapStrToInt();
 
-    size_t Count() const;
+    int Count() const;
 
     bool Insert(Str key, int val, int* existingValOut = nullptr, Str* existingKeyOut = nullptr);
 

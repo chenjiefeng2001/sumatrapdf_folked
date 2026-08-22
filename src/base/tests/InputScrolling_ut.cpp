@@ -166,19 +166,42 @@ static void OverscrollClampTest() {
 
 // The mirror structs must match the Win32 POINTER_INFO / POINTER_WHEEL_INFO
 // ABI, otherwise GetPointerFrameInfo would scribble over the stack. Layout is
-// checked for the x64 build (the only platform we ship).
+// checked for both the shipped x64 build and the 32-bit CI build: HANDLE /
+// HWND are pointer-sized, so every field after sourceDevice shifts.
 static void PointerWheelInfoLayoutTest() {
-    utassert(sizeof(PointerInfoMin) == 96);
+#ifdef _WIN64
+    // x64: HANDLE / HWND are 8 bytes
+    constexpr int kInfoSize = 96;
+    constexpr int kPtPixelOfs = 32;
+    constexpr int kPerfCountOfs = 80;
+    constexpr int kBtnChangeOfs = 88;
+    constexpr int kWheelSize = 112;
+    constexpr int kUtDistanceOfs = 96;
+    constexpr int kRotationOfs = 100;
+    constexpr int kDeltaOfs = 104;
+#else
+    // x86: HANDLE / HWND are 4 bytes
+    constexpr int kInfoSize = 88;
+    constexpr int kPtPixelOfs = 24;
+    constexpr int kPerfCountOfs = 72;
+    constexpr int kBtnChangeOfs = 80;
+    constexpr int kWheelSize = 104;
+    constexpr int kUtDistanceOfs = 88;
+    constexpr int kRotationOfs = 92;
+    constexpr int kDeltaOfs = 96;
+#endif
+
+    utassert(sizeof(PointerInfoMin) == kInfoSize);
     utassert(offsetof(PointerInfoMin, pointerId) == 4);
     utassert(offsetof(PointerInfoMin, sourceDevice) == 16);
-    utassert(offsetof(PointerInfoMin, ptPixelLocation) == 32);
-    utassert(offsetof(PointerInfoMin, performanceCount) == 80);
-    utassert(offsetof(PointerInfoMin, buttonChangeType) == 88);
+    utassert(offsetof(PointerInfoMin, ptPixelLocation) == kPtPixelOfs);
+    utassert(offsetof(PointerInfoMin, performanceCount) == kPerfCountOfs);
+    utassert(offsetof(PointerInfoMin, buttonChangeType) == kBtnChangeOfs);
 
-    utassert(sizeof(PointerWheelInfoMin) == 112);
-    utassert(offsetof(PointerWheelInfoMin, utDistance) == 96);
-    utassert(offsetof(PointerWheelInfoMin, rotation) == 100);
-    utassert(offsetof(PointerWheelInfoMin, delta) == 104);
+    utassert(sizeof(PointerWheelInfoMin) == kWheelSize);
+    utassert(offsetof(PointerWheelInfoMin, utDistance) == kUtDistanceOfs);
+    utassert(offsetof(PointerWheelInfoMin, rotation) == kRotationOfs);
+    utassert(offsetof(PointerWheelInfoMin, delta) == kDeltaOfs);
 
     // utDistance is the field we read for the wheel delta
     PointerWheelInfoMin w = {};

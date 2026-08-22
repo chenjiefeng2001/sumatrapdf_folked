@@ -46,15 +46,27 @@ typedef struct djvu_doc djvu_doc;
 void djvu_init(void);
 
 /* Pass NULL for alloc/free to use the default malloc/free.
-   Pass NULL for lock/unlock when per-page caching is off.
+   lock/unlock are optional serialization hooks (required for per-page
+   caching). When supplied, shared JB2 dictionaries are decoded lazily on
+   first use (serialized via the hooks) instead of eagerly at djvu_doc_open,
+   and concurrent renders on the same djvu_doc are safe.
    Pass NULL for error to silently ignore diagnostics. */
 djvu_ctx *djvu_ctx_new(djvu_alloc_cb alloc, djvu_free_cb free_cb,
                        djvu_lock_cb lock, djvu_unlock_cb unlock,
                        djvu_error_cb error, void *user);
 void djvu_ctx_free(djvu_ctx *ctx);
 
-/* Per-context decode options (defaults off/zero). Set before djvu_doc_open. */
-void djvu_ctx_set_cache_precache_shared(djvu_ctx *ctx, int enable);
+/* Per-context decode options (defaults off/zero). Set before djvu_doc_open.
+   Shared JB2 dicts are pre-decoded at open only when no lock/unlock hooks
+   were supplied (see djvu_ctx_new); with hooks they decode lazily. */
+/* Retain decoded page-local layers on the document after each render:
+   IW44 background/foreground, JB2 mask (Sjbz), and composited background.
+   Default off: layers are decoded per use and freed when the render completes.
+   When enabled, later renders of the same page reuse the cached layers.
+   Requires non-NULL lock and unlock callbacks passed to djvu_ctx_new; the
+   decoder serializes first-time decode of a page's layers via those hooks so
+   concurrent renders on the same djvu_doc are safe. djvu_doc_open fails if
+   caching is enabled but lock/unlock were not supplied. */
 void djvu_ctx_set_cache_per_page(djvu_ctx *ctx, int enable);
 /* Legacy alias: enable=1 turns on per-page caching. */
 void djvu_ctx_set_lazy_iw44(djvu_ctx *ctx, int enable);
@@ -66,6 +78,26 @@ void djvu_ctx_set_iw_max_chunks(djvu_ctx *ctx, int max_chunks);
    wants BGR (e.g. a Windows DIB) skip a separate RGB->BGR pass -- the swap is
    folded into the decoder's final output copy at no extra cost. */
 void djvu_ctx_set_bgr(djvu_ctx *ctx, int enable);
+/* Bump the cooperative render-abort epoch on ctx. ALL in-flight page renders
+   on this ctx that already entered via djvu_page_render / djvu_page_render_into
+   exit promptly; renders that start afterward proceed normally. Thread-safe.
+   To cancel one render without disturbing concurrent renders of other pages
+   on the same ctx, use a djvu_abort token with the _abortable variants
+   instead. */
+void djvu_request_abort(djvu_ctx *ctx);
+
+/* Caller-owned cooperative abort token scoped to individual render calls.
+   Initialize with djvu_abort_init, pass to djvu_page_render_abortable /
+   djvu_page_render_into_abortable; calling djvu_abort_request (from any
+   thread) makes only the render(s) given this token exit promptly --
+   unlike djvu_request_abort, which aborts every in-flight render on the
+   ctx. The request is sticky: re-init the token to reuse it. The token must
+   stay valid until the render call it was passed to has returned. */
+typedef struct {
+    volatile int requested;
+} djvu_abort;
+void djvu_abort_init(djvu_abort *ab);
+void djvu_abort_request(djvu_abort *ab);
 
 /* ----- documents ----- */
 
@@ -87,6 +119,25 @@ typedef struct {
 
 /* page_no is 0-based. Returns 0 on success, -1 on error. */
 int djvu_doc_page_info(djvu_doc *doc, int page_no, djvu_page_info *info);
+
+/* ----- per-page decoded-layer cache (djvu_ctx_set_cache_per_page) -----
+   When caching is enabled, the first render (or layer acquire) of a page
+   stores Sjbz / IW44 / composited background on the document; later renders
+   of that page reuse them. Shared Djbz dictionaries are doc-wide and are
+   not part of this page cache. */
+
+/* Free all page-local cached layers for page_no (Sjbz mask, BG44/FG44,
+   composited backgrounds). No-op if caching is off or the page has nothing
+   cached. Safe with concurrent renders when lock/unlock are set: layers that
+   are still pinned by an in-flight acquire are only freed after the last
+   release (refcount), so LRU eviction during multi-threaded render is OK. */
+void djvu_doc_drop_page_cache(djvu_doc *doc, int page_no);
+
+/* Heap bytes currently held in page-local cache for page_no (0 if none /
+   invalid page / caching off). Approximate: walks live structures (bitmap
+   payloads, shape/blit tables, IW44 coefficient buckets, RGB pixmaps).
+   Does not include shared Djbz dicts or the caller's document buffer. */
+size_t djvu_doc_page_cache_size(djvu_doc *doc, int page_no);
 
 /* ----- rendering ----- */
 
@@ -131,6 +182,15 @@ int djvu_page_render_info(djvu_doc *doc, int page_no, int subsample,
    one pass. Returns 0 on success, -1 on error. */
 int djvu_page_render_into(djvu_doc *doc, int page_no, int subsample,
                           uint8_t *dst, int stride);
+
+/* Same as djvu_page_render / djvu_page_render_into, but cancellable through
+   the caller's per-render djvu_abort token (see above; NULL behaves like the
+   plain variants). An aborted render returns NULL / -1. */
+djvu_image *djvu_page_render_abortable(djvu_doc *doc, int page_no,
+                                       int subsample, const djvu_abort *ab);
+int djvu_page_render_into_abortable(djvu_doc *doc, int page_no, int subsample,
+                                    uint8_t *dst, int stride,
+                                    const djvu_abort *ab);
 
 /* Page content classification (from the chunks present in the page form).
    Lets a caller pick a render format the way ddjvu_page_get_type does. */

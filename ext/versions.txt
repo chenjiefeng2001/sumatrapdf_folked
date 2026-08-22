@@ -1,7 +1,8 @@
 Project         Version    Date
 ----------------------------------
-../mupdf        1.28.0-rc2
-  https://github.com/ArtifexSoftware/mupdf/releases/tag/1.28.0-rc2
+mupdf           1.28.2     2026-08-03
+  https://github.com/ArtifexSoftware/mupdf/releases/tag/1.28.2
+  our changes to the vendored tree are recorded in ext/patches/ (see its README)
 
 libarchive     3.8.8      2026-06-23
   https://github.com/libarchive/libarchive
@@ -14,8 +15,10 @@ mujs           1.3.9
 bzip2           1.0.8      2019-07-21
   https://www.sourceware.org/bzip2/
 
-CHMLib          0.40a      2009-07-02
-  https://github.com/jedwing/CHMLib
+chmdec          dist       2026-07-28
+  https://github.com/kjk/chmdec
+  commit dbf9c5a899709543724dca344ecfb0b6a21d45a4
+  amalgamated dist/chm.c + dist/chm.h only (was ext/libchm)
 
 freetype        2.14.3
   https://github.com/ArtifexSoftware/thirdparty-freetype2/tree/artifex
@@ -30,7 +33,7 @@ harfbuzz        13.0.1
 
 jbig2dec        0.20
   https://github.com/ArtifexSoftware/jbig2dec/commits/artifex
-  mupdf thirdparty submodule, commit dc15c39bbbddc90f79c14563d2eb5a794106be8f
+  amalgamated into ext/a-jbig2dec by cmd/a-jbig2dec.ts, see ext/a-jbig2dec/version.txt
 
 libjpeg-turbo   3.1.4.1    2026-03-27
   https://github.com/libjpeg-turbo/libjpeg-turbo/tags
@@ -38,14 +41,9 @@ libjpeg-turbo   3.1.4.1    2026-03-27
   vendored src/ + simd/ (x86/x86-64 NASM); jconfig.h, jconfigint.h, jversion.h
   hand-generated (v8 API). See ext/libjpeg-turbo/src/jconfig.h
 
-libdjvu         master     2026-05-05
-  https://djvu.sourceforge.net/
-  https://github.com/barak/djvulibre
-  commit 03e6abd7295c74f795ed70a7118294b25351e0f4
-
-djvudec         main       2026-07-01
+djvudec         main       2026-08-01
   https://github.com/kjk/djvudec
-  commit dc88e98c2a93efc2fda00bb5dd10b7396ecb4e68
+  commit c8bf1b3e6704fd99d6feaba8d8ebc417e013bdb8
   amalgamated dist/djvu.c + dist/djvu.h only
 
 libwebp         1.6.0      2025-06-30
@@ -92,33 +90,29 @@ zlib-ng         2.0.6      2021-12-24
 extract         trunk
   https://github.com/ArtifexSoftware/extract
 
-windrawlib      trunk
-  https://github.com/mity/windrawlib
-
-dav1d           1.5.3      2025-12-31
+dav1d           1.5.4      2026-07-14
   https://code.videolan.org/videolan/dav1d
-  https://code.videolan.org/videolan/dav1d/-/tags/1.5.3
+  https://code.videolan.org/videolan/dav1d/-/tags/1.5.4
 
-libheif         1.23.0     2026-05-29
-  https://github.com/strukturag/libheif
-  https://github.com/strukturag/libheif/releases/tag/v1.23.0
+heicdec         dist       2026-07-28
+  https://github.com/kjk/heicdec
+  commit c0aa68eb43de852706069755b0132ac2ec951dc2
+  amalgamated dist/heic.c + dist/heic.h only
+  HEVC pure-C; AV1 via dav1d; unci via zlib/brotli when present.
+  Build flags: HEIC_HAVE_DAV1D, HEIC_HAVE_ZLIB, HEIC_HAVE_BROTLI.
+  Replaces libheif.
 
 darkmodelib     trunk      2026-01-16
   https://github.com/ozone10/darkmodelib
   https://github.com/ozone10/darkmodelib/commit/57cc10c819d17c47b6afd295b424153082144193
 
-libjxl          0.11.2     2026-02-10
-  https://github.com/libjxl/libjxl/releases/tag/v0.11.2
-  decoder subset only (ext/libjxl/lib/jxl + lib/include/jxl); SKCMS color mgmt,
-  JPEG transcoding disabled. Generated headers (version.h, jxl_export.h,
-  jxl_cms_export.h) are checked in under lib/include/jxl.
+jxldec          dist       2026-08-11
+  https://github.com/kjk/jxldec
+  commit 54c8f53001b5f82886a8d96526ad1b0281e7c89a
+  amalgamated dist/jxl.c + dist/jxl.h only
+  Replaces libjxl + highway + skcms for JPEG XL decode.
 
-highway         1.2.0      (libjxl dependency)
-  https://github.com/google/highway
-  https://github.com/google/highway/commit/457c891775a7397bdb0376bb1031e6e027af1c48
-  core headers + 7 runtime .cc only
-
-skcms           git        (libjxl dependency)
-  https://skia.googlesource.com/skcms
-  https://skia.googlesource.com/skcms/+/b2e692629c1fb19342517d7fb61f1cf83d075492
-  baseline transform only (HSW/SKX disabled)
+zopfli         1.0.3+     2024-04-11
+  https://github.com/google/zopfli
+  https://github.com/google/zopfli/commit/ccf9f0588d4a4509cb1040310ec122243e670ee6
+  amalgamated as ext/a-zopfli (zopfli.cpp + public headers + COPYING)

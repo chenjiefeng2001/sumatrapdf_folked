@@ -1,6 +1,6 @@
 // CI implementation used by cmd/build.ts -ci.
 // Called from GitHub Actions CI on push and repository_dispatch events
-import { existsSync, readFileSync, writeFileSync, statSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, writeFileSync, statSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createHmac, createHash } from "node:crypto";
 import { getGitLinearVersion, extractSumatraVersion, runLogged, getGitSha1, detectVisualStudio2026 } from "../util";
@@ -261,6 +261,24 @@ async function buildPreRelease(preRelVer: string, sha1: string, vsplatform: stri
     await revertBuildConfig();
   }
 
+  // package under the canonical distributable names (same convention as
+  // cmd/build-installer.ts): IsInstallerOrUninstallerExe() switches to
+  // installer mode based on the file name
+  const bits = vsplatform === "Win32" ? "32" : vsplatform === "ARM64" ? "arm64" : "64";
+  const sumatraVer = extractSumatraVersion();
+  const exe = join(outDir, "SumatraPDF.exe");
+  if (existsSync(exe)) {
+    const installExe = join(outDir, `SumatraPDF-${sumatraVer}-${bits}-install.exe`);
+    copyFileSync(exe, installExe);
+    console.log(`created ${installExe}`);
+  }
+  const staticExe = join(outDir, "SumatraPDF-static.exe");
+  if (existsSync(staticExe)) {
+    const portableExe = join(outDir, `SumatraPDF-${sumatraVer}-${bits}.exe`);
+    copyFileSync(staticExe, portableExe);
+    console.log(`created ${portableExe}`);
+  }
+
   const elapsed = ((performance.now() - buildStart) / 1000).toFixed(1);
   console.log(`building pre-release version ${preRelVer} took ${elapsed}s`);
 }
@@ -403,6 +421,8 @@ export async function buildCi() {
         await genDocs();
       }
       await buildPreRelease(preRelVer, sha1, "Win32", join("out", "rel32"));
+      // 64-bit pre-release build (the installer base; see cmd/build-installer.ts)
+      await buildPreRelease(preRelVer, sha1, "x64", join("out", "rel64"));
       break;
     case "codeql":
       await buildSmoke();

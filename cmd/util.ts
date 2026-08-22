@@ -3,8 +3,14 @@ import { join, dirname, extname } from "node:path";
 
 const msBuildRelPath = String.raw`MSBuild\Current\Bin\MSBuild.exe`;
 // VS 2022 ships llvm tools in Llvm\bin, VS 18 in Llvm\x64\bin
-const clangFormatRelPaths = [String.raw`VC\Tools\Llvm\bin\clang-format.exe`, String.raw`VC\Tools\Llvm\x64\bin\clang-format.exe`];
-const clangTidyRelPaths = [String.raw`VC\Tools\Llvm\bin\clang-tidy.exe`, String.raw`VC\Tools\Llvm\x64\bin\clang-tidy.exe`];
+const clangFormatRelPaths = [
+  String.raw`VC\Tools\Llvm\bin\clang-format.exe`,
+  String.raw`VC\Tools\Llvm\x64\bin\clang-format.exe`,
+];
+const clangTidyRelPaths = [
+  String.raw`VC\Tools\Llvm\bin\clang-tidy.exe`,
+  String.raw`VC\Tools\Llvm\x64\bin\clang-tidy.exe`,
+];
 
 const vsEditions = ["Community", "Professional", "Enterprise"];
 
@@ -132,9 +138,7 @@ export function detectVisualStudio2026(): VisualStudioInfo {
 export function detectVisualStudio(): VisualStudioInfo {
   let res = detectVisualStudioVer("2022");
   if (res) return res;
-  if (!res) {
-    res = detectVisualStudioVer("18");
-  }
+  res = detectVisualStudioVer("18");
   if (!res) {
     throw new Error(`couldn't find vs 2026 or vs 2022`);
   }
@@ -153,6 +157,18 @@ export async function runLogged(cmd: string, args: string[], cwd?: string): Prom
   const exitCode = await proc.exited;
   if (exitCode !== 0) {
     throw new Error(`command failed with exit code ${exitCode}`);
+  }
+}
+
+// clang-format every generated C++ file so gen-code output matches cmd/format.ts
+export async function clangFormatFiles(rootDir: string, relativePaths: string[]): Promise<void> {
+  const { clangFormatPath } = detectVisualStudio();
+  if (!clangFormatPath) {
+    throw new Error("couldn't find clang-format.exe");
+  }
+  for (const rel of [...new Set(relativePaths)]) {
+    const path = join(rootDir, rel);
+    await runLogged(clangFormatPath, ["-i", "-style=file", path]);
   }
 }
 

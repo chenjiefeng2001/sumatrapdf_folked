@@ -121,7 +121,7 @@
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
     <CharacterSet>Unicode</CharacterSet>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <WindowsSDKDesktopARM64Support>true</WindowsSDKDesktopARM64Support>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug x64_asan|x64'" Label="Configuration">
@@ -147,7 +147,7 @@
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
     <CharacterSet>Unicode</CharacterSet>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <WindowsSDKDesktopARM64Support>true</WindowsSDKDesktopARM64Support>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='DebugFull x64_asan|x64'" Label="Configuration">
@@ -175,7 +175,7 @@
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
     <CharacterSet>Unicode</CharacterSet>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <WindowsSDKDesktopARM64Support>true</WindowsSDKDesktopARM64Support>
   </PropertyGroup>
@@ -204,7 +204,7 @@
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
     <CharacterSet>Unicode</CharacterSet>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <WindowsSDKDesktopARM64Support>true</WindowsSDKDesktopARM64Support>
   </PropertyGroup>
@@ -268,98 +268,98 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
-    <OutDir>$(ProjectDir)..\out\dbg32\</OutDir>
-    <IntDir>$(ProjectDir)..\out\dbg32\obj\x86\Debug\libarchive\</IntDir>
+    <OutDir>$(ProjectDir)..\out\dbg32\obj-s\</OutDir>
+    <IntDir>$(ProjectDir)..\out\dbg32\obj-s\libarchive\</IntDir>
     <TargetName>libarchive</TargetName>
     <TargetExt>.lib</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <OutDir>$(ProjectDir)..\out\dbg64\</OutDir>
-    <IntDir>$(ProjectDir)..\out\dbg64\obj\x64\Debug\libarchive\</IntDir>
+    <OutDir>$(ProjectDir)..\out\dbg64\obj-s\</OutDir>
+    <IntDir>$(ProjectDir)..\out\dbg64\obj-s\libarchive\</IntDir>
     <TargetName>libarchive</TargetName>
     <TargetExt>.lib</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
-    <OutDir>$(ProjectDir)..\out\dbgarm64\</OutDir>
-    <IntDir>$(ProjectDir)..\out\dbgarm64\obj\arm64\Debug\libarchive\</IntDir>
+    <OutDir>$(ProjectDir)..\out\dbgarm64\obj-s\</OutDir>
+    <IntDir>$(ProjectDir)..\out\dbgarm64\obj-s\libarchive\</IntDir>
     <TargetName>libarchive</TargetName>
     <TargetExt>.lib</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug x64_asan|x64'">
-    <OutDir>$(ProjectDir)..\out\dbg64_asan\</OutDir>
-    <IntDir>$(ProjectDir)..\out\dbg64_asan\obj\x64_asan\Debug\libarchive\</IntDir>
+    <OutDir>$(ProjectDir)..\out\dbg64_asan\obj-s\</OutDir>
+    <IntDir>$(ProjectDir)..\out\dbg64_asan\obj-s\libarchive\</IntDir>
     <TargetName>libarchive</TargetName>
     <TargetExt>.lib</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='DebugFull|Win32'">
-    <OutDir>$(ProjectDir)..\out\dbgfull32\</OutDir>
-    <IntDir>$(ProjectDir)..\out\dbgfull32\obj\x86\DebugFull\libarchive\</IntDir>
+    <OutDir>$(ProjectDir)..\out\dbgfull32\obj-s\</OutDir>
+    <IntDir>$(ProjectDir)..\out\dbgfull32\obj-s\libarchive\</IntDir>
     <TargetName>libarchive</TargetName>
     <TargetExt>.lib</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='DebugFull|x64'">
-    <OutDir>$(ProjectDir)..\out\dbgfull64\</OutDir>
-    <IntDir>$(ProjectDir)..\out\dbgfull64\obj\x64\DebugFull\libarchive\</IntDir>
+    <OutDir>$(ProjectDir)..\out\dbgfull64\obj-s\</OutDir>
+    <IntDir>$(ProjectDir)..\out\dbgfull64\obj-s\libarchive\</IntDir>
     <TargetName>libarchive</TargetName>
     <TargetExt>.lib</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='DebugFull|ARM64'">
-    <OutDir>$(ProjectDir)..\out\dbgfullarm64\</OutDir>
-    <IntDir>$(ProjectDir)..\out\dbgfullarm64\obj\arm64\DebugFull\libarchive\</IntDir>
+    <OutDir>$(ProjectDir)..\out\dbgfullarm64\obj-s\</OutDir>
+    <IntDir>$(ProjectDir)..\out\dbgfullarm64\obj-s\libarchive\</IntDir>
     <TargetName>libarchive</TargetName>
     <TargetExt>.lib</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='DebugFull x64_asan|x64'">
-    <OutDir>$(ProjectDir)..\out\dbgfull64_asan\</OutDir>
-    <IntDir>$(ProjectDir)..\out\dbgfull64_asan\obj\x64_asan\DebugFull\libarchive\</IntDir>
+    <OutDir>$(ProjectDir)..\out\dbgfull64_asan\obj-s\</OutDir>
+    <IntDir>$(ProjectDir)..\out\dbgfull64_asan\obj-s\libarchive\</IntDir>
     <TargetName>libarchive</TargetName>
     <TargetExt>.lib</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
-    <OutDir>$(ProjectDir)..\out\rel32\</OutDir>
-    <IntDir>$(ProjectDir)..\out\rel32\obj\x86\Release\libarchive\</IntDir>
+    <OutDir>$(ProjectDir)..\out\rel32\obj-s\</OutDir>
+    <IntDir>$(ProjectDir)..\out\rel32\obj-s\libarchive\</IntDir>
     <TargetName>libarchive</TargetName>
     <TargetExt>.lib</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <OutDir>$(ProjectDir)..\out\rel64\</OutDir>
-    <IntDir>$(ProjectDir)..\out\rel64\obj\x64\Release\libarchive\</IntDir>
+    <OutDir>$(ProjectDir)..\out\rel64\obj-s\</OutDir>
+    <IntDir>$(ProjectDir)..\out\rel64\obj-s\libarchive\</IntDir>
     <TargetName>libarchive</TargetName>
     <TargetExt>.lib</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
-    <OutDir>$(ProjectDir)..\out\arm64\</OutDir>
-    <IntDir>$(ProjectDir)..\out\arm64\obj\arm64\Release\libarchive\</IntDir>
+    <OutDir>$(ProjectDir)..\out\arm64\obj-s\</OutDir>
+    <IntDir>$(ProjectDir)..\out\arm64\obj-s\libarchive\</IntDir>
     <TargetName>libarchive</TargetName>
     <TargetExt>.lib</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release x64_asan|x64'">
-    <OutDir>$(ProjectDir)..\out\rel64_asan\</OutDir>
-    <IntDir>$(ProjectDir)..\out\rel64_asan\obj\x64_asan\Release\libarchive\</IntDir>
+    <OutDir>$(ProjectDir)..\out\rel64_asan\obj-s\</OutDir>
+    <IntDir>$(ProjectDir)..\out\rel64_asan\obj-s\libarchive\</IntDir>
     <TargetName>libarchive</TargetName>
     <TargetExt>.lib</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseAnalyze|Win32'">
-    <OutDir>$(ProjectDir)..\out\rel32_prefast\</OutDir>
-    <IntDir>$(ProjectDir)..\out\rel32_prefast\obj\x86\ReleaseAnalyze\libarchive\</IntDir>
+    <OutDir>$(ProjectDir)..\out\rel32_prefast\obj-s\</OutDir>
+    <IntDir>$(ProjectDir)..\out\rel32_prefast\obj-s\libarchive\</IntDir>
     <TargetName>libarchive</TargetName>
     <TargetExt>.lib</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseAnalyze|x64'">
-    <OutDir>$(ProjectDir)..\out\rel64_prefast\</OutDir>
-    <IntDir>$(ProjectDir)..\out\rel64_prefast\obj\x64\ReleaseAnalyze\libarchive\</IntDir>
+    <OutDir>$(ProjectDir)..\out\rel64_prefast\obj-s\</OutDir>
+    <IntDir>$(ProjectDir)..\out\rel64_prefast\obj-s\libarchive\</IntDir>
     <TargetName>libarchive</TargetName>
     <TargetExt>.lib</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseAnalyze|ARM64'">
-    <OutDir>$(ProjectDir)..\out\arm64_prefast\</OutDir>
-    <IntDir>$(ProjectDir)..\out\arm64_prefast\obj\arm64\ReleaseAnalyze\libarchive\</IntDir>
+    <OutDir>$(ProjectDir)..\out\arm64_prefast\obj-s\</OutDir>
+    <IntDir>$(ProjectDir)..\out\arm64_prefast\obj-s\libarchive\</IntDir>
     <TargetName>libarchive</TargetName>
     <TargetExt>.lib</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseAnalyze x64_asan|x64'">
-    <OutDir>$(ProjectDir)..\out\rel64_prefast_asan\</OutDir>
-    <IntDir>$(ProjectDir)..\out\rel64_prefast_asan\obj\x64_asan\ReleaseAnalyze\libarchive\</IntDir>
+    <OutDir>$(ProjectDir)..\out\rel64_prefast_asan\obj-s\</OutDir>
+    <IntDir>$(ProjectDir)..\out\rel64_prefast_asan\obj-s\libarchive\</IntDir>
     <TargetName>libarchive</TargetName>
     <TargetExt>.lib</TargetExt>
   </PropertyGroup>
@@ -369,9 +369,9 @@
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4189;4324;4458;4522;4611;4702;4800;6319;4018;4054;4055;4090;4098;4100;4127;4130;4146;4152;4200;4201;4244;4245;4267;4305;4389;4456;4457;4701;4703;4706;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>IS_TRACY=0;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <UndefinePreprocessorDefinitions>DEBUG;%(UndefinePreprocessorDefinitions)</UndefinePreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\ext\zlib;..\ext\libarchive\libarchive;..\ext\bzip2;..\ext\lzma\C;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\ext\a-zlib;..\ext\libarchive\libarchive;..\ext\a-bzip2;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>MinSpace</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -394,6 +394,9 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
@@ -401,9 +404,9 @@
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4189;4324;4458;4522;4611;4702;4800;6319;4018;4054;4055;4090;4098;4100;4127;4130;4146;4152;4200;4201;4244;4245;4267;4305;4389;4456;4457;4701;4703;4706;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>IS_TRACY=0;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <UndefinePreprocessorDefinitions>DEBUG;%(UndefinePreprocessorDefinitions)</UndefinePreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\ext\zlib;..\ext\libarchive\libarchive;..\ext\bzip2;..\ext\lzma\C;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\ext\a-zlib;..\ext\libarchive\libarchive;..\ext\a-bzip2;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>MinSpace</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -426,6 +429,9 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <ClCompile>
@@ -433,9 +439,9 @@
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4189;4324;4458;4522;4611;4702;4800;6319;4018;4054;4055;4090;4098;4100;4127;4130;4146;4152;4200;4201;4244;4245;4267;4305;4389;4456;4457;4701;4703;4706;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>IS_TRACY=0;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <UndefinePreprocessorDefinitions>DEBUG;%(UndefinePreprocessorDefinitions)</UndefinePreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\ext\zlib;..\ext\libarchive\libarchive;..\ext\bzip2;..\ext\lzma\C;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\ext\a-zlib;..\ext\libarchive\libarchive;..\ext\a-bzip2;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>MinSpace</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -458,6 +464,9 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug x64_asan|x64'">
     <ClCompile>
@@ -465,9 +474,9 @@
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4189;4324;4458;4522;4611;4702;4800;6319;4018;4054;4055;4090;4098;4100;4127;4130;4146;4152;4200;4201;4244;4245;4267;4305;4389;4456;4457;4701;4703;4706;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>ASAN_BUILD=1;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>ASAN_BUILD=1;IS_TRACY=0;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <UndefinePreprocessorDefinitions>DEBUG;%(UndefinePreprocessorDefinitions)</UndefinePreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\ext\zlib;..\ext\libarchive\libarchive;..\ext\bzip2;..\ext\lzma\C;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\ext\a-zlib;..\ext\libarchive\libarchive;..\ext\a-bzip2;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>MinSpace</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -490,6 +499,9 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='DebugFull|Win32'">
     <ClCompile>
@@ -497,8 +509,8 @@
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4189;4324;4458;4522;4611;4702;4800;6319;4018;4054;4055;4090;4098;4100;4127;4130;4146;4152;4200;4201;4244;4245;4267;4305;4389;4456;4457;4701;4703;4706;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\ext\zlib;..\ext\libarchive\libarchive;..\ext\bzip2;..\ext\lzma\C;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>IS_TRACY=0;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\ext\a-zlib;..\ext\libarchive\libarchive;..\ext\a-bzip2;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>MinSpace</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -521,6 +533,9 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='DebugFull|x64'">
     <ClCompile>
@@ -528,8 +543,8 @@
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4189;4324;4458;4522;4611;4702;4800;6319;4018;4054;4055;4090;4098;4100;4127;4130;4146;4152;4200;4201;4244;4245;4267;4305;4389;4456;4457;4701;4703;4706;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\ext\zlib;..\ext\libarchive\libarchive;..\ext\bzip2;..\ext\lzma\C;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>IS_TRACY=0;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\ext\a-zlib;..\ext\libarchive\libarchive;..\ext\a-bzip2;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>MinSpace</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -552,6 +567,9 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='DebugFull|ARM64'">
     <ClCompile>
@@ -559,8 +577,8 @@
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4189;4324;4458;4522;4611;4702;4800;6319;4018;4054;4055;4090;4098;4100;4127;4130;4146;4152;4200;4201;4244;4245;4267;4305;4389;4456;4457;4701;4703;4706;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\ext\zlib;..\ext\libarchive\libarchive;..\ext\bzip2;..\ext\lzma\C;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>IS_TRACY=0;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\ext\a-zlib;..\ext\libarchive\libarchive;..\ext\a-bzip2;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>MinSpace</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -583,6 +601,9 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='DebugFull x64_asan|x64'">
     <ClCompile>
@@ -590,8 +611,8 @@
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4189;4324;4458;4522;4611;4702;4800;6319;4018;4054;4055;4090;4098;4100;4127;4130;4146;4152;4200;4201;4244;4245;4267;4305;4389;4456;4457;4701;4703;4706;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>ASAN_BUILD=1;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\ext\zlib;..\ext\libarchive\libarchive;..\ext\bzip2;..\ext\lzma\C;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>ASAN_BUILD=1;IS_TRACY=0;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\ext\a-zlib;..\ext\libarchive\libarchive;..\ext\a-bzip2;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>MinSpace</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -614,6 +635,9 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <ClCompile>
@@ -621,9 +645,9 @@
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4189;4324;4458;4522;4611;4702;4800;6319;4018;4054;4055;4090;4098;4100;4127;4130;4146;4152;4200;4201;4244;4245;4267;4305;4389;4456;4457;4701;4703;4706;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>IS_TRACY=0;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <UndefinePreprocessorDefinitions>DEBUG;%(UndefinePreprocessorDefinitions)</UndefinePreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\ext\zlib;..\ext\libarchive\libarchive;..\ext\bzip2;..\ext\lzma\C;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\ext\a-zlib;..\ext\libarchive\libarchive;..\ext\a-bzip2;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>MinSpace</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -646,6 +670,9 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -653,9 +680,9 @@
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4189;4324;4458;4522;4611;4702;4800;6319;4018;4054;4055;4090;4098;4100;4127;4130;4146;4152;4200;4201;4244;4245;4267;4305;4389;4456;4457;4701;4703;4706;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>IS_TRACY=0;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <UndefinePreprocessorDefinitions>DEBUG;%(UndefinePreprocessorDefinitions)</UndefinePreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\ext\zlib;..\ext\libarchive\libarchive;..\ext\bzip2;..\ext\lzma\C;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\ext\a-zlib;..\ext\libarchive\libarchive;..\ext\a-bzip2;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>MinSpace</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -678,6 +705,9 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
     <ClCompile>
@@ -685,9 +715,9 @@
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4189;4324;4458;4522;4611;4702;4800;6319;4018;4054;4055;4090;4098;4100;4127;4130;4146;4152;4200;4201;4244;4245;4267;4305;4389;4456;4457;4701;4703;4706;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>IS_TRACY=0;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <UndefinePreprocessorDefinitions>DEBUG;%(UndefinePreprocessorDefinitions)</UndefinePreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\ext\zlib;..\ext\libarchive\libarchive;..\ext\bzip2;..\ext\lzma\C;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\ext\a-zlib;..\ext\libarchive\libarchive;..\ext\a-bzip2;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>MinSpace</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -710,6 +740,9 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release x64_asan|x64'">
     <ClCompile>
@@ -717,9 +750,9 @@
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4189;4324;4458;4522;4611;4702;4800;6319;4018;4054;4055;4090;4098;4100;4127;4130;4146;4152;4200;4201;4244;4245;4267;4305;4389;4456;4457;4701;4703;4706;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>ASAN_BUILD=1;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>ASAN_BUILD=1;IS_TRACY=0;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <UndefinePreprocessorDefinitions>DEBUG;%(UndefinePreprocessorDefinitions)</UndefinePreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\ext\zlib;..\ext\libarchive\libarchive;..\ext\bzip2;..\ext\lzma\C;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\ext\a-zlib;..\ext\libarchive\libarchive;..\ext\a-bzip2;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>MinSpace</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -741,16 +774,18 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseAnalyze|Win32'">
     <ClCompile>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <WarningLevel>Level4</WarningLevel>
-      <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4189;4324;4458;4522;4611;4702;4800;6319;4018;4054;4055;4090;4098;4100;4127;4130;4146;4152;4200;4201;4244;4245;4267;4305;4389;4456;4457;4701;4703;4706;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>IS_TRACY=0;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <UndefinePreprocessorDefinitions>DEBUG;%(UndefinePreprocessorDefinitions)</UndefinePreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\ext\zlib;..\ext\libarchive\libarchive;..\ext\bzip2;..\ext\lzma\C;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\ext\a-zlib;..\ext\libarchive\libarchive;..\ext\a-bzip2;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>MinSpace</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -774,16 +809,18 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseAnalyze|x64'">
     <ClCompile>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <WarningLevel>Level4</WarningLevel>
-      <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4189;4324;4458;4522;4611;4702;4800;6319;4018;4054;4055;4090;4098;4100;4127;4130;4146;4152;4200;4201;4244;4245;4267;4305;4389;4456;4457;4701;4703;4706;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>IS_TRACY=0;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <UndefinePreprocessorDefinitions>DEBUG;%(UndefinePreprocessorDefinitions)</UndefinePreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\ext\zlib;..\ext\libarchive\libarchive;..\ext\bzip2;..\ext\lzma\C;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\ext\a-zlib;..\ext\libarchive\libarchive;..\ext\a-bzip2;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>MinSpace</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -807,16 +844,18 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseAnalyze|ARM64'">
     <ClCompile>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <WarningLevel>Level4</WarningLevel>
-      <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4189;4324;4458;4522;4611;4702;4800;6319;4018;4054;4055;4090;4098;4100;4127;4130;4146;4152;4200;4201;4244;4245;4267;4305;4389;4456;4457;4701;4703;4706;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>IS_TRACY=0;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <UndefinePreprocessorDefinitions>DEBUG;%(UndefinePreprocessorDefinitions)</UndefinePreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\ext\zlib;..\ext\libarchive\libarchive;..\ext\bzip2;..\ext\lzma\C;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\ext\a-zlib;..\ext\libarchive\libarchive;..\ext\a-bzip2;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>MinSpace</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -840,16 +879,18 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseAnalyze x64_asan|x64'">
     <ClCompile>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <WarningLevel>Level4</WarningLevel>
-      <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4189;4324;4458;4522;4611;4702;4800;6319;4018;4054;4055;4090;4098;4100;4127;4130;4146;4152;4200;4201;4244;4245;4267;4305;4389;4456;4457;4701;4703;4706;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>ASAN_BUILD=1;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>ASAN_BUILD=1;IS_TRACY=0;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;_CRT_SECURE_NO_WARNINGS;LIBARCHIVE_STATIC;PLATFORM_CONFIG_H="config_windows.h";BZ_NO_STDIO;HAVE_CONFIG_H;LZMA_API_STATIC;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <UndefinePreprocessorDefinitions>DEBUG;%(UndefinePreprocessorDefinitions)</UndefinePreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\ext\zlib;..\ext\libarchive\libarchive;..\ext\bzip2;..\ext\lzma\C;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\ext\a-zlib;..\ext\libarchive\libarchive;..\ext\a-bzip2;..\ext\liblzma\api;..\ext\liblzma\common;..\ext\liblzma\check;..\ext\liblzma\delta;..\ext\liblzma\lz;..\ext\liblzma\lzma;..\ext\liblzma\rangecoder;..\ext\liblzma\simple;..\ext\liblzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>MinSpace</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -872,8 +913,12 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="..\ext\a-bzip2\bzlib.h" />
     <ClInclude Include="..\ext\libarchive\libarchive\archive.h" />
     <ClInclude Include="..\ext\libarchive\libarchive\archive_acl_private.h" />
     <ClInclude Include="..\ext\libarchive\libarchive\archive_blake2.h" />
@@ -914,18 +959,12 @@
     <ClInclude Include="..\ext\libarchive\libarchive\archive_write_set_format_private.h" />
     <ClInclude Include="..\ext\libarchive\libarchive\archive_xxhash.h" />
     <ClInclude Include="..\ext\libarchive\libarchive\config_freebsd.h" />
+    <ClInclude Include="..\ext\libarchive\libarchive\config_macos.h" />
     <ClInclude Include="..\ext\libarchive\libarchive\config_windows.h" />
     <ClInclude Include="..\ext\libarchive\libarchive\filter_fork.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\ext\bzip2\blocksort.c" />
-    <ClCompile Include="..\ext\bzip2\bz_internal_error.c" />
-    <ClCompile Include="..\ext\bzip2\bzlib.c" />
-    <ClCompile Include="..\ext\bzip2\compress.c" />
-    <ClCompile Include="..\ext\bzip2\crctable.c" />
-    <ClCompile Include="..\ext\bzip2\decompress.c" />
-    <ClCompile Include="..\ext\bzip2\huffman.c" />
-    <ClCompile Include="..\ext\bzip2\randtable.c" />
+    <ClCompile Include="..\ext\a-bzip2\bzip2.c" />
     <ClCompile Include="..\ext\libarchive\libarchive\archive_acl.c" />
     <ClCompile Include="..\ext\libarchive\libarchive\archive_blake2s_ref.c" />
     <ClCompile Include="..\ext\libarchive\libarchive\archive_blake2sp_ref.c" />
@@ -1035,9 +1074,10 @@
     <ClCompile Include="..\ext\liblzma\simple\simple_coder.c" />
     <ClCompile Include="..\ext\liblzma\simple\simple_decoder.c" />
     <ClCompile Include="..\ext\liblzma\simple\x86.c" />
-    <ClCompile Include="..\ext\lzma\C\Bra.c" />
-    <ClCompile Include="..\ext\lzma\C\Bra86.c" />
-    <ClCompile Include="..\ext\lzma\C\LzmaDec.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\ext\a-bzip2\LICENSE" />
+    <None Include="..\ext\a-bzip2\version.txt" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

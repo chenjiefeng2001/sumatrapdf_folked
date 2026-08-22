@@ -11,17 +11,26 @@ end
 function makelzsa_files()
   files_in_dir("src/base", {
     "Arena.*",
-    "Base.*",
-    "ByteOrderDecoder.*",
-    "ByteWriter.*",
-    "CmdLineArgsIter.*",
+    "Arena_win.cpp",
+    "Base.h",
+    "Base.cpp",
+    "Base_win.cpp",
+    "ByteReaderWriter.*",
+    "CmdLineArgsIter.h",
+    "CmdLineArgsIter.cpp",
+    "CmdLineArgsIter_win.cpp",
     "Color.*",
-    "DirIter.*",
-    "Dpi.*",
-    "File.*",
+    "DirScan.h",
+    "DirScan.cpp",
+    "DirScan_win.cpp",
+    "File.h",
+    "File.cpp",
+    "File_win.cpp",
     "Geom.*",
-    "Log.*",
+    "Log.h",
+    "LogNoOp.cpp",
     "LzmaSimpleArchive.*",
+    "Pixmap.*",
     "Strconv.*",
     "StrFormatParse.*",
     "StrQueue.*",
@@ -29,8 +38,13 @@ function makelzsa_files()
     "StrUtf8.*",
     "StrVec.*",
     "Thread.*",
-    "WinDynCalls.*",
+    "WinDynCalls.h",
+    "WinDynCalls_win.cpp",
     "Win.*",
+  })
+  files_in_dir("src/gui", {
+    "Dpi.h",
+    "Dpi_win.cpp",
   })
 
   -- LZMA files needed by LzmaSimpleArchive (decode) and MakeLzSA.cpp (encode)
@@ -63,10 +77,12 @@ function brotli_files()
 end
 
 function zlib_files()
-  files_in_dir("ext/zlib", {
-    "adler32.c", "compress.c", "crc32.c", "deflate.c", "gzclose.c",
-    "gzlib.c", "gzread.c", "gzwrite.c", "inffast.c", "inflate.c",
-    "inftrees.c", "trees.c", "zutil.c",
+  files_in_dir("ext/a-zlib", {
+    "zlib.c",
+    "zlib.h",
+    "version.txt",
+    "LICENSE",
+    "zlib.3.pdf",
   })
 end
 
@@ -141,6 +157,8 @@ function unrar_files()
     "rijndael.*",
     "rs.*",
     "rs16.*",
+    -- PCH creator (see pchheader/pchsource on the unrar project)
+    "rarpch.cpp",
     "scantree.*",
     "secpassword.*",
     "sha1.*",
@@ -158,27 +176,9 @@ function unrar_files()
   })
 end
 
-function libdjvu_files()
-  files_in_dir("ext/libdjvu", {
-    "Arrays.cpp", "atomic.cpp", "BSByteStream.cpp", "BSEncodeByteStream.cpp",
-    "ByteStream.cpp", "DataPool.cpp", "ddjvuapi.cpp", "debug.cpp",
-    "DjVmDir.cpp", "DjVmDir0.cpp", "DjVmDoc.cpp", "DjVmNav.cpp",
-    "DjVuAnno.cpp", "DjVuDocEditor.cpp", "DjVuDocument.cpp", "DjVuDumpHelper.cpp",
-    "DjVuErrorList.cpp", "DjVuFile.cpp", "DjVuFileCache.cpp", "DjVuGlobal.cpp",
-    "DjVuGlobalMemory.cpp", "DjVuImage.cpp", "DjVuInfo.cpp", "DjVuMessage.cpp",
-    "DjVuMessageLite.cpp", "DjVuNavDir.cpp", "DjVuPalette.cpp", "DjVuPort.cpp",
-    "DjVuText.cpp", "DjVuToPS.cpp", "GBitmap.cpp", "GContainer.cpp", "GException.cpp",
-    "GIFFManager.cpp", "GMapAreas.cpp", "GOS.cpp", "GPixmap.cpp", "GRect.cpp",
-    "GScaler.cpp", "GSmartPointer.cpp", "GString.cpp", "GThreads.cpp",
-    "GUnicode.cpp", "GURL.cpp", "IFFByteStream.cpp", "IW44EncodeCodec.cpp",
-    "IW44Image.cpp", "JB2EncodeCodec.cpp", "JB2Image.cpp",
-    "JPEGDecoder.cpp", "miniexp.cpp", "MMRDecoder.cpp", "MMX.cpp",
-    "UnicodeByteStream.cpp", "XMLParser.cpp", "XMLTags.cpp", "ZPCodec.cpp",
-  })
-end
-
 function libarchive_files()
   files { "ext/libarchive/libarchive/*.h" }
+  removefiles { "ext/libarchive/libarchive/config_linux.h" }
   files_in_dir("ext/libarchive/libarchive", {
     -- core
     "archive_acl.c",
@@ -271,179 +271,30 @@ function libarchive_files()
   })
 end
 
-function jbig2dec_files()
-  -- TODO: probably can be
-  -- files { "ext/jbig2dec/jbig2*.c", "ext/jbig2dec/jbig2*.h" }
-  files_in_dir("ext/jbig2dec", {
-    "jbig2.c",
-    "jbig2_arith.c",
-    "jbig2_arith_iaid.c",
-    "jbig2_arith_int.c",
-    "jbig2_generic.c",
-    "jbig2_halftone.c",
-    "jbig2_huffman.c",
-    "jbig2_hufftab.c",
-    "jbig2_image.c",
-    "jbig2_mmr.c",
-    "jbig2_page.c",
-    "jbig2_refinement.c",
-    "jbig2_segment.c",
-    "jbig2_symbol_dict.c",
-    "jbig2_text.c",
-  })
-end
-
-function libheif_files()
-  files_in_dir("ext/libheif/libheif", {
-    "bitstream.*",
-    "box.*",
-    "brands.*",
-    "common_utils.*",
-    "context.*",
-    "error.*",
-    "file.*",
-    "file_layout.*",
-    "id_creator.*",
-    "init.*",
-    "logging.*",
-    "mini.*",
-    "nclx.*",
-    "omaf_boxes.*",
-    "plugin_registry.*",
-    "region.*",
-    "security_limits.*",
-    "text.*",
-  })
-  files_in_dir("ext/libheif/libheif/image", {
-    "image_description.*",
-    "pixelimage.*",
-  })
-  files_in_dir("ext/libheif/libheif/image-items", {
-    "avc.*",
-    "avif.*",
-    "grid.*",
-    "hevc.*",
-    "iden.*",
-    "image_item.*",
-    "jpeg.*",
-    "jpeg2000.*",
-    "mask_image.*",
-    "overlay.*",
-    "tiled.*",
-    "vvc.*",
-  })
-  files_in_dir("ext/libheif/libheif/codecs", {
-    "avc_boxes.*",
-    "avc_dec.*",
-    "avc_enc.*",
-    "avif_boxes.*",
-    "avif_dec.*",
-    "avif_enc.*",
-    "decoder.*",
-    "encoder.*",
-    "hevc_boxes.*",
-    "hevc_dec.*",
-    "hevc_enc.*",
-    "jpeg2000_boxes.*",
-    "jpeg2000_dec.*",
-    "jpeg2000_enc.*",
-    "jpeg_boxes.*",
-    "jpeg_dec.*",
-    "jpeg_enc.*",
-    "vvc_boxes.*",
-    "vvc_dec.*",
-    "vvc_enc.*",
-  })
-  files_in_dir("ext/libheif/libheif/color-conversion", {
-    "alpha.*",
-    "bayer_bilinear.*",
-    "chroma_sampling.*",
-    "colorconversion.*",
-    "hdr_sdr.*",
-    "monochrome.*",
-    "rgb2rgb.*",
-    "rgb2yuv.*",
-    "rgb2yuv_sharp.*",
-    "yuv2rgb.*",
-  })
-  files_in_dir("ext/libheif/libheif/plugins", {
-    "decoder_dav1d.*",
-    "encoder_mask.*",
-  })
-  files_in_dir("ext/libheif/libheif/sequences", {
-    "chunk.*",
-    "seq_boxes.*",
-    "track.*",
-    "track_metadata.*",
-    "track_visual.*",
-  })
-  files_in_dir("ext/libheif/libheif/api/libheif", {
-    "heif.*",
-    "heif_brands.*",
-    "heif_color.*",
-    "heif_components.*",
-    "heif_context.*",
-    "heif_decoding.*",
-    "heif_encoding.*",
-    "heif_image.*",
-    "heif_image_handle.*",
-    "heif_metadata.*",
-    "heif_omaf.*",
-    "heif_plugin.*",
-    "heif_security.*",
-    "heif_sequences.*",
-    "heif_tai_timestamps.*",
-  })
-end
-
-function dav1d_x68_files()
+-- x64 only: avx2 NASM SIMD + shared helpers. Not used for 32-bit (HAVE_ASM=0).
+-- SSE/AVX-512 *.asm omitted; x86/*_sumatra.h only wires avx2 symbols.
+function dav1d_x64_files()
   files_in_dir("ext/dav1d/src/x86", {
     "cpu.c",
   })
 
   files_in_dir("ext/dav1d/src/x86", {
     "cdef16_avx2.asm",
-    "cdef16_avx512.asm",
-    "cdef16_sse.asm",
     "cdef_avx2.asm",
-    "cdef_avx512.asm",
-    "cdef_sse.asm",
     "cpuid.asm",
     "filmgrain16_avx2.asm",
-    "filmgrain16_avx512.asm",
-    "filmgrain16_sse.asm",
     "filmgrain_avx2.asm",
-    "filmgrain_avx512.asm",
-    "filmgrain_sse.asm",
     "ipred16_avx2.asm",
-    "ipred16_avx512.asm",
-    "ipred16_sse.asm",
     "ipred_avx2.asm",
-    "ipred_avx512.asm",
-    "ipred_sse.asm",
     "itx16_avx2.asm",
-    "itx16_avx512.asm",
-    "itx16_sse.asm",
     "itx_avx2.asm",
-    "itx_avx512.asm",
-    "itx_sse.asm",
     "loopfilter16_avx2.asm",
-    "loopfilter16_avx512.asm",
-    "loopfilter16_sse.asm",
     "loopfilter_avx2.asm",
-    "loopfilter_avx512.asm",
-    "loopfilter_sse.asm",
     "looprestoration16_avx2.asm",
-    "looprestoration16_avx512.asm",
-    "looprestoration16_sse.asm",
     "looprestoration_avx2.asm",
-    "looprestoration_avx512.asm",
-    "looprestoration_sse.asm",
     "mc16_avx2.asm",
-    "mc16_avx512.asm",
-    "mc16_sse.asm",
     "mc_avx2.asm",
-    "mc_avx512.asm",
+    -- mc_sse.asm: provides mc_warp_filter2 (and related RODATA) used by mc_avx2
     "mc_sse.asm",
     "msac.asm",
     "pal.asm",
@@ -490,68 +341,6 @@ function dav1d_files()
 
   files("ext/dav1d/include/common/*.h")
   files("ext/dav1d/include/dav1d/*.h")
-end
-
-function openjpeg_files()
-  files_in_dir("ext/openjpeg/src/lib/openjp2", {
-    "*.h",
-    "bio.c",
-    "cidx_manager.c",
-    "cio.c",
-    "dwt.c",
-    "event.c",
-    "function_list.c",
-    "ht_dec.c",
-    "image.c",
-    "invert.c",
-    "j2k.c",
-    "jp2.c",
-    "mct.c",
-    "mqc.c",
-    "openjpeg.c",
-    "opj_clock.c",
-    --"opj_malloc.c",
-    "phix_manager.c",
-    "pi.c",
-    "ppix_manager.c",
-    "sparse_array.c",
-    "t1.c",
-    "t2.c",
-    "tcd.c",
-    "tgt.c",
-    "thix_manager.c",
-    "thread.c",
-    "tpix_manager.c",
-  })
-end
-
-function extract_files()
-  files_in_dir("ext/extract/src", {
-    "alloc.*",
-    "astring.*",
-    "boxer.*",
-    "buffer.*",
-    "document.*",
-    "docx.*",
-    "docx_template.*",
-    "extract.*",
-    "html.*",
-    "join.*",
-    "json.*",
-    "mem.*",
-    "memento.*",
-    "odt.*",
-    "odt_template.*",
-    "outf.*",
-    "rect.*",
-    "sys.*",
-    "text.*",
-    "xml.*",
-    "zip.*",
-  })
-  files_in_dir("ext/extract/include", {
-    "*.h",
-  })
 end
 
 function libwebp_files()
@@ -608,38 +397,39 @@ function libjpeg_turbo_files()
     "jerror.c", "jfdctflt.c", "jmemmgr.c", "jmemnobs.c", "jpeg_nbits.c",
   })
 
-  -- libjpeg-turbo 3.x: per-precision wrappers (8/12/16-bit), each #includes
-  -- the matching ../<name>.c with BITS_IN_JSAMPLE set. These provide run-time
-  -- selectable data precision.
+  -- libjpeg-turbo 3.x: 8-bit precision wrappers only. Each #includes the
+  -- matching ../<name>.c with BITS_IN_JSAMPLE=8. 12/16-bit wrappers are
+  -- omitted (MuPDF only uses the 8-bit API); jcinit/jdmaster/jdtrans reject
+  -- higher data_precision with JERR_BAD_PRECISION.
   files_in_dir("ext/libjpeg-turbo/src/wrapper", {
-    "jcapistd-8.c", "jcapistd-12.c", "jcapistd-16.c",
-    "jccoefct-8.c", "jccoefct-12.c",
-    "jccolor-8.c", "jccolor-12.c", "jccolor-16.c",
-    "jcdctmgr-8.c", "jcdctmgr-12.c",
-    "jcdiffct-8.c", "jcdiffct-12.c", "jcdiffct-16.c",
-    "jclossls-8.c", "jclossls-12.c", "jclossls-16.c",
-    "jcmainct-8.c", "jcmainct-12.c", "jcmainct-16.c",
-    "jcprepct-8.c", "jcprepct-12.c", "jcprepct-16.c",
-    "jcsample-8.c", "jcsample-12.c", "jcsample-16.c",
-    "jdapistd-8.c", "jdapistd-12.c", "jdapistd-16.c",
-    "jdcoefct-8.c", "jdcoefct-12.c",
-    "jdcolor-8.c", "jdcolor-12.c", "jdcolor-16.c",
-    "jddctmgr-8.c", "jddctmgr-12.c",
-    "jddiffct-8.c", "jddiffct-12.c", "jddiffct-16.c",
-    "jdlossls-8.c", "jdlossls-12.c", "jdlossls-16.c",
-    "jdmainct-8.c", "jdmainct-12.c", "jdmainct-16.c",
-    "jdmerge-8.c", "jdmerge-12.c",
-    "jdpostct-8.c", "jdpostct-12.c", "jdpostct-16.c",
-    "jdsample-8.c", "jdsample-12.c", "jdsample-16.c",
-    "jfdctfst-8.c", "jfdctfst-12.c",
-    "jfdctint-8.c", "jfdctint-12.c",
-    "jidctflt-8.c", "jidctflt-12.c",
-    "jidctfst-8.c", "jidctfst-12.c",
-    "jidctint-8.c", "jidctint-12.c",
-    "jidctred-8.c", "jidctred-12.c",
-    "jquant1-8.c", "jquant1-12.c",
-    "jquant2-8.c", "jquant2-12.c",
-    "jutils-8.c", "jutils-12.c", "jutils-16.c",
+    "jcapistd-8.c",
+    "jccoefct-8.c",
+    "jccolor-8.c",
+    "jcdctmgr-8.c",
+    "jcdiffct-8.c",
+    "jclossls-8.c",
+    "jcmainct-8.c",
+    "jcprepct-8.c",
+    "jcsample-8.c",
+    "jdapistd-8.c",
+    "jdcoefct-8.c",
+    "jdcolor-8.c",
+    "jddctmgr-8.c",
+    "jddiffct-8.c",
+    "jdlossls-8.c",
+    "jdmainct-8.c",
+    "jdmerge-8.c",
+    "jdpostct-8.c",
+    "jdsample-8.c",
+    "jfdctfst-8.c",
+    "jfdctint-8.c",
+    "jidctflt-8.c",
+    "jidctfst-8.c",
+    "jidctint-8.c",
+    "jidctred-8.c",
+    "jquant1-8.c",
+    "jquant2-8.c",
+    "jutils-8.c",
   })
 
   -- arm64: no SIMD (WITH_SIMD is left undefined in jconfig.h/jconfigint.h).
@@ -808,17 +598,39 @@ files {
 function sumatrapdf_files()
   files_in_dir("src", {
     "Accelerators.*",
+    "ShortcutParse.*",
     "Actions.*",
+    "AvifReader.*",
+    "DarkMode_win.*",
+    "AddFavoriteDialog.*",
+    "AdvancedSettingsDialog.*",
+    "ChangeColorDialog.*",
+    "ChangeLanguageDialog.*",
+    "ChangeScrollbarDialog.*",
+    "ChangeThemeDialog.*",
+    "CustomZoomDialog.*",
+    "SignDocumentDialog.*",
+    "EbookSettingsDialog.*",
+    "GetPasswordDialog.*",
+    "GoToPageDialog.*",
+    "InverseSearchDialog.*",
+    "SettingsDialog.*",
     "AppSettings.*",
     "AppTools.*",
     "Canvas.*",
     "CanvasAboutUI.*",
+    "CaptionGlyphs.*",
     "ChmDump.*",
     "ChmModel.*",
+    "MarkdownModel.*",
+    "MarkdownToc.*",
+    "EmbeddedResources.*",
     "AIChatCommon.*",
-    "ClaudeCode.*",
-    "CodexBuild.*",
-    "GrokBuild.*",
+    "AIChatPanel.*",
+    "AIAntiGravity.*",
+    "AIClaudeCode.*",
+    "AICodexBuild.*",
+    "AIGrokBuild.*",
     "HardwareProfile.*",
     "WindowLifecycle.h",
     "CommandAvailability.*",
@@ -826,13 +638,20 @@ function sumatrapdf_files()
     "CommandPaletteCollect.*",
     "CommandPaletteDraw.*",
     "CommandPaletteFilter.*",
+    "FilterUtil.*",
     "FilterHighlightDraw.*",
     "Commands.*",
     "CrashHandler.*",
     "ImageSaveCropResize.*",
+    "ImageEditHostSumatra.cpp",
     "InertiaScrolling.*",
     "DisplayMode.*",
     "DisplayModel.*",
+    "DocumentLayout.*",
+    "PageRenderPolicy.*",
+    "PageRenderService.*",
+    "ReaderModel.*",
+    "gui/CommandPaletteModel.*",
     "DocController.h",
     "DocProperties.*",
     "EditAnnotations.*",
@@ -847,18 +666,27 @@ function sumatrapdf_files()
     "FindWindow.*",
     "FormFields.*",
     "GpuBackend.*",
-    "FzImgReader.*",
+    "ImageReader.h",
+    "ImageReader.cpp",
+    "ImageReader_win.cpp",
     "GlobalPrefs.*",
+    "HangDetector.*",
     "HomePage.*",
     "Installer.*",
     "InstallerCommon.cpp",
+    "JxlReader.*",
+    "KeyboardHelp.*",
+    "KeyboardHelp_win.cpp",
+    "LinkFollow.*",
     "MainWindow.*",
     "Menu.*",
+    "NavFilesInFolder.*",
     "Notifications.*",
     "OverscrollEffect.*",
     "PdfSync.*",
     "PdfTools.*",
     "PointerInput.*",
+    "PngOptimizer.*",
     "TipText.h",
     "Print.*",
     "ProgressUpdateUI.*",
@@ -880,8 +708,13 @@ function sumatrapdf_files()
     "resource.h",
     "SearchAndDDE.*",
     "OverlayScrollbar.*",
+    "ExplorerQuickLook.*",
     "Screenshot.*",
+    "ScreenshotCapture.*",
+    "SelectTextKeyboard.*",
     "Selection.*",
+    "SelectionHandlers.*",
+    "SelectionToolbar.*",
     "SelectionTranslate.*",
     "Settings.h",
     "SettingsStructs.*",
@@ -894,6 +727,8 @@ function sumatrapdf_files()
     "SumatraPDF.h",
     "SumatraPDF.rc",
     "SumatraProperties.*",
+    "EutlTrust.*",
+    "SumatraLog.*",
     "SumatraStartup.cpp",
     "SumatraTest.*",
     "SvgIcons.*",
@@ -905,14 +740,20 @@ function sumatrapdf_files()
     "TextSearch.*",
     "TextSelection.*",
     "TextToSpeech.*",
+    "TextViewWnd.*",
     "Theme.*",
+    "Theme_win.*",
     "Toolbar.*",
+    "ToolbarInternal.h",
+    "Toolbar_win.*",
     "TranslationLangs.cpp",
     "Translations.*",
     "Uninstaller.cpp",
     "UpdateCheck.*",
+    "BuildConfig.h",
     "Version.h",
     "VirtWnd.*",
+    "WebpReader.*",
     "Win7Compat.*",
     "WindowTab.*",
   })
@@ -971,37 +812,50 @@ end
 function base_files()
   files_in_dir("src/base", {
     "AnnotHitTest.*",
+    "AppendStore.h",
+    "AppendStore.cpp",
     "ApiHook.*",
     "Archive.*",
     "Arena.*",
-    "AvifReader.*",
-    "Base.*",
-    "BitReader.*",
-    "BuildConfig.h",
-    "ByteOrderDecoder.*",
-    "ByteReader.*",
-    "ByteWriter.*",
-    "CmdLineArgsIter.*",
+    "Arena_win.cpp",
+    "Base.h",
+    "Base.cpp",
+    "Base_win.cpp",
+    "ByteReaderWriter.*",
+    "CmdLineArgsIter.h",
+    "CmdLineArgsIter.cpp",
+    "CmdLineArgsIter_win.cpp",
     "Color.*",
     "ComSafe.h",
-    "Crypto.*",
+    "Crypto.h",
+    "Crypto_win.cpp",
     "CssParser.*",
-    "DbgHelpDyn.*",
+    "DbgHelpDyn.h",
+    "DbgHelpDyn_win.cpp",
     "Dict.*",
-    "DirIter.*",
-    "DirScan.*",
-    "Dpi.*",
-    "File.*",
-    "FileWatcher.*",
-    "FzImgReader.*",
-    "GdiPlus.*",
+    "DirScan.h",
+    "DirScan.cpp",
+    "DirScan_win.cpp",
+    "Exif.*",
+    "File.h",
+    "File.cpp",
+    "File_win.cpp",
+    "FileWatcher.h",
+    "FileWatcher.cpp",
+    "GdiPlusUtil.cpp",
+    "GdiPlusUtil.h",
     "Geom.*",
     "GuessFileType.*",
+    "GuessFileTypeFromFile.cpp",
     "HtmlTags.*",
-    "Http.*",
+    "Http.h",
+    "Http.cpp",
+    "Http_win.cpp",
     "JsonParser.*",
-    "Log.*",
+    "Log.h",
     "LzmaSimpleArchive.*",
+    "Pixmap.*",
+    "Pixmap_win.cpp",
     "RegistryPaths.*",
     "Scoped.h",
     "ScopedWin.h",
@@ -1015,40 +869,55 @@ function base_files()
     "StrUtf8.*",
     "StrVec.*",
     "TgaReader.*",
+    "TgaReader_win.cpp",
     "Thread.*",
     "TxtParser.*",
     "UITask.*",
     "Vec.h",
-    "WebpReader.*",
-    "JxlReader.*",
-    "WinDynCalls.*",
+    "WinDynCalls.h",
+    "WinDynCalls_win.cpp",
     "Win.*",
     "Zip.*",
   })
-  filter { "configurations:Debug or DebugFull" }
-      files_in_dir("src/base", {
-        "windrawlib.*",
-      })
-  filter {}
-end
-
-function wingui_files()
-  files_in_dir("src/wingui", {
-    "*.h",
-    "*.cpp",
+  files_in_dir("src/gui", {
+    "Dpi.h",
+    "Dpi_win.cpp",
   })
 end
 
-function mui_files()
-  files_in_dir("src/mui", {
-    "Mui.*",
-    "TextRender.*",
+function gui_files()
+  files_in_dir("src/gui", {
+    "DocumentView.h",
+    "Gfx.h",
+    "Gfx_win.cpp",
+    "GfxGdiplus_win.cpp",
+    "GfxDirect2D_win.cpp",
+    "GuiColors.*",
+    "Layout.*",
+    "Layout_win.*",
+    "PasswordDialog.*",
+    "PlatformFont.*",
+    "PlatformFont_win.*",
+    "PlatformCanvas.h",
+    "PlatformText.*",
+    "PlatformText_win.*",
+    "PlatformWindow.h",
+    "UIModels.*",
+    "VirtCtrl.*",
+    "VirtHost.h",
+    "VirtHost_win.*",
+    "UiPlatform_win.*",
+  })
+  files_in_dir("src/gui/win", {
+    "*.h",
+    "*.cpp",
   })
 end
 
 function engines_files()
   files_in_dir("src", {
     "Annotation.*",
+    "PdfSign.*",
     "ChmFile.*",
     "DocProperties.*",
     "EbookDoc.*",
@@ -1056,7 +925,6 @@ function engines_files()
     "EngineAll.h",
     "EngineBase.*",
     "EngineCreate.*",
-    "EngineDjVu.*",
     "EngineDjvuDec.*",
     "EngineEbook.*",
     "EngineImages.*",
@@ -1066,16 +934,26 @@ function engines_files()
     "GumboHtmlParser.*",
     "GumboHelpers.*",
     "HtmlFormatter.*",
+    "LitDoc.*",
     "MobiDoc.*",
     "PalmDbReader.*",
+    "PdfCadDetect.*",
+    "PdfCadEnhanceDevice.*",
     "PdfCreator.*",
-  })
-end
-
-function chm_files()
-  files_in_dir("ext/CHMLib/src", {
-    "chm_lib.c",
-    "lzx.c",
+    "PdfDarkMode.h",
+    "PdfDarkModeInternal.h",
+    "PdfDarkModeAnalysis.cpp",
+    "PdfDarkModeCache.cpp",
+    "PdfDarkModeColor.cpp",
+    "PdfDarkModeDevice.cpp",
+    "PdfDarkModeEngineCache.cpp",
+    "PdfDarkModeImageBgBlend.cpp",
+    "PdfDarkModeImageClassifier.cpp",
+    "PdfDarkModeImageRules.cpp",
+    "PdfDarkModeImageStats.cpp",
+    "PdfDarkModeOklab.cpp",
+    "PdfDarkModeProfile.cpp",
+    "PdfDarkModeScanProcess.cpp",
   })
 end
 
@@ -1083,7 +961,7 @@ end
 -- Parser-only subset matching mupdf's Makelists CMARKGFM_SRC (no CLI main.c,
 -- no commonmark/latex/man/xml/plaintext renderers). Generated config headers
 -- (config.h, cmark-gfm_export.h, cmark-gfm_version.h) come from
--- mupdf/scripts/cmark-gfm. Build with -DCMARK_GFM_STATIC_DEFINE.
+-- ext/mupdf/scripts/cmark-gfm. Build with -DCMARK_GFM_STATIC_DEFINE.
 function cmark_gfm_files()
   files_in_dir("ext/cmark-gfm/src", {
     "arena.c", "blocks.c", "buffer.c", "cmark.c", "cmark_ctype.c",
@@ -1101,13 +979,13 @@ end
 function mupdf_files()
   files { "ext/mupdf_load_system_font.c" }
 
-  files_in_dir("mupdf/source/cbz", {
+  files_in_dir("ext/mupdf/source/cbz", {
     "mucbz.c",
     "muimg.c",
   })
 
-  files { "mupdf/source/fitz/*.h" }
-  files_in_dir("mupdf/source/fitz", {
+  files { "ext/mupdf/source/fitz/*.h" }
+  files_in_dir("ext/mupdf/source/fitz", {
     "archive.c",
     "barcode.c",
     "bbox-device.c",
@@ -1189,6 +1067,7 @@ function mupdf_files()
     "load-pnm.c",
     "load-psd.c",
     "load-tiff.c",
+    "load-webp.c",
     "log.c",
     "memento.c",
     "memory.c",
@@ -1257,7 +1136,7 @@ function mupdf_files()
     "zip.c",
   })
 
-  files_in_dir("mupdf/source/html", {
+  files_in_dir("ext/mupdf/source/html", {
     "css-apply.c",
     "css-parse.c",
     "css-properties.h",
@@ -1276,7 +1155,7 @@ function mupdf_files()
     "xml-dom.c",
   })
 
-  files_in_dir("mupdf/source/pdf", {
+  files_in_dir("ext/mupdf/source/pdf", {
     "*.h",
     "pdf-af.c",
     "pdf-annot.c",
@@ -1336,14 +1215,14 @@ function mupdf_files()
     "pdf-zugferd.c",
   })
 
-  files_in_dir("mupdf/source/svg", {
+  files_in_dir("ext/mupdf/source/svg", {
     "svg-color.c",
     "svg-doc.c",
     "svg-parse.c",
     "svg-run.c",
   })
 
-  files_in_dir("mupdf/source/xps", {
+  files_in_dir("ext/mupdf/source/xps", {
     "xps-common.c",
     "xps-doc.c",
     "xps-glyphs.c",
@@ -1357,10 +1236,10 @@ function mupdf_files()
     "xps-util.c",
     "xps-zip.c",
   })
-  files_in_dir("mupdf/source/reflow", {
+  files_in_dir("ext/mupdf/source/reflow", {
     "reflow-doc.c",
   })
-  files_in_dir("mupdf/source/tools", {
+  files_in_dir("ext/mupdf/source/tools", {
     "muconvert.c",
     "mudraw.c",
     "mugrep.c",
@@ -1382,14 +1261,14 @@ function mupdf_files()
     "pdftrim.c",
   })
   files {
-    "mupdf/include/mupdf/*.h",
-    "mupdf/include/mupdf/fitz/*.h",
-    "mupdf/include/mupdf/helpers/*.h",
-    "mupdf/include/mupdf/pdf/*.h",
+    "ext/mupdf/include/mupdf/*.h",
+    "ext/mupdf/include/mupdf/fitz/*.h",
+    "ext/mupdf/include/mupdf/helpers/*.h",
+    "ext/mupdf/include/mupdf/pdf/*.h",
   }
   files {
-    "mupdf/source/helpers/mu-threads/mu-threads.c",
-    "mupdf/source/helpers/pkcs7/pkcs7-windows.c",
+    "ext/mupdf/source/helpers/mu-threads/mu-threads.c",
+    "ext/mupdf/source/helpers/pkcs7/pkcs7-windows.c",
   }
 end
 
@@ -1403,39 +1282,56 @@ end
 function efi_files()
   files {
     "CrashHandlerNoOp.cpp",
-    "src/base/Base*",
+    "src/base/Base.h",
+    "src/base/Base.cpp",
+    "src/base/Base_win.cpp",
     "src/base/BitManip.h",
     "src/base/Dict*",
     "src/base/Str.*",
     "src/base/StrUtf8.*",
-    "tools/efi/*.cpp",
-    "tools/efi/*.h",
+    "src/tools/efi/*.cpp",
+    "src/tools/efi/*.h",
   }
 end
 
 function test_util_files()
-  files_in_dir("src/common", {
-    "log.cpp",
-  })
   files_in_dir("src/base", {
     "AnnotHitTest.*",
+    "AppendStore.h",
+    "AppendStore.cpp",
     "Arena.*",
-    "Base.*",
+    "Arena_win.cpp",
+    "Base.h",
+    "Base.cpp",
+    "Base_win.cpp",
     "BitManip.*",
-    "ByteOrderDecoder.*",
-    "CmdLineArgsIter.*",
+    "ByteReaderWriter.*",
+    "CmdLineArgsIter.h",
+    "CmdLineArgsIter.cpp",
+    "CmdLineArgsIter_win.cpp",
     "Color.*",
-    "Crypto.*",
+    "Crypto.h",
+    "Crypto_win.cpp",
     "CssParser.*",
     "Dict.*",
-    "DbgHelpDyn.*",
-    "DirScan.*",
-    "Dpi.*",
-    "File.*",
+    "DbgHelpDyn.h",
+    "DbgHelpDyn_win.cpp",
+    "DirScan.h",
+    "DirScan.cpp",
+    "DirScan_win.cpp",
+    "File.h",
+    "File.cpp",
+    "File_win.cpp",
+    "FileWatcher.h",
+    "FileWatcher.cpp",
     "Geom.*",
+    "GuessFileType.*",
+    "GdiPlusUtil.*",
     "HtmlTags.*",
     "JsonParser.*",
-    "Log.*",
+    "Log.h",
+    "Pixmap.*",
+    "Pixmap_win.cpp",
     "Scoped.*",
     "SettingsUtil.*",
     "SquareTreeParser.*",
@@ -1446,31 +1342,152 @@ function test_util_files()
     "StrHash.h",
     "StrUtf8.*",
     "StrVec.*",
+    "Thread.*",
     "tests/*",
     "UtAssert.*",
     "Vec.*",
-    "WinDynCalls.*",
+    "WinDynCalls.h",
+    "WinDynCalls_win.cpp",
     "Win.*",
   })
+files_in_dir("src/gui", {
+"CommandPaletteModel.*",
+"Dpi.h",
+"Dpi_win.cpp",
+"Layout.h",
+"Layout.cpp",
+-- Renderer_ut pulls in the unified drawing backend and text rendering
+"PlatformFont.cpp",
+"PlatformFont_win.cpp",
+"PlatformText.cpp",
+"PlatformText_win.cpp",
+})
+files_in_dir("src/gui/win", {
+"Renderer.cpp",
+"DWriteText.cpp",
+})
   files_in_dir("src", {
     --"AppTools.*",
     "Commands.*",
     "CrashHandlerNoOp.cpp",
     "DisplayMode.*",
+    "DocProperties.*",
     "Flags.*",
+    "FilterUtil.*",
+    "PageRenderPolicy.*",
     "RefHoverDetect.*",
     "RefHoverTextDetect.*",
-    "CommandPaletteScoring.h",
-    "HardwareProfile.h",
-    "WindowLifecycle.h",
+"CommandPaletteScoring.h",
+"HardwareProfile.cpp",
+"HardwareProfile.h",
+"WindowLifecycle.h",
     "SettingsStructs.*",
     --"StressTesting.*",
     "SumatraConfig.*",
+    "SumatraLog.*",
     "SumatraUnitTests.cpp",
-    "tools/test_util.cpp",
-    "wingui/DWriteText.cpp",
-    "wingui/Layout.cpp",
-    "wingui/Renderer.cpp",
+    "SimpleLog_ut.cpp",
+    "PdfDarkMode.h",
+    "PdfDarkModeImageRules.cpp",
+    "PdfDarkModeOklab.cpp",
+    "PdfDarkModeImageClassifier_ut.cpp",
+    "PdfDarkModeOklab_ut.cpp",
+  })
+  files {
+    "src/tools/test_util.cpp",
+  }
+end
+
+function test_engines_files()
+  files {
+    "src/base/GuessFileType.cpp",
+    "src/AvifReader.cpp",
+    "src/DocProperties.cpp",
+    "src/DocProperties.h",
+    "src/EbookDoc.cpp",
+    "src/EngineAll.h",
+    "src/EngineBase.cpp",
+    "src/EngineBase.h",
+    "src/EngineDjvuDec.cpp",
+    "src/EngineImages.cpp",
+    "src/EngineMupdf.cpp",
+    "src/ImageReader.cpp",
+    "src/ImageReader_win.cpp",
+    "src/GumboHtmlParser.cpp",
+    "src/GumboHelpers.cpp",
+    "src/JxlReader.cpp",
+    "src/LitDoc.cpp",
+    "src/LitDoc.h",
+    "src/MobiDoc.cpp",
+    "src/PalmDbReader.cpp",
+    "src/PdfCadDetect.cpp",
+    "src/PdfCadDetect.h",
+    "src/PdfCadEnhanceDevice.cpp",
+    "src/PdfCadEnhanceDevice.h",
+    "src/PdfDarkMode.h",
+    "src/PdfDarkModeNoOp.cpp",
+    "src/TextSearch.cpp",
+    "src/TextSearch.h",
+    "src/TextSelection.cpp",
+    "src/TextSelection.h",
+    "src/WebpReader.cpp",
+    "src/gui/UIModels.cpp",
+    "src/gui/UIModels.h",
+    "src/tools/test_engines.cpp",
+  }
+  -- TextSelection.cpp ends in a #if DEBUG unit-test block calling utassert()
+  files_in_dir("src/base", {
+    "UtAssert.*",
+  })
+end
+
+function bench_image_files()
+  files {
+    "src/tools/bench_image.cpp",
+  }
+end
+
+function preview_test_files()
+  files {
+    "src/tools/preview_test.cpp",
+  }
+end
+
+function plugin_test_files()
+  files {
+    "src/tools/plugin-test.cpp",
+  }
+end
+
+function logview_files()
+  files {
+    "src/tools/logview/logview.cpp",
+  }
+  -- Layout.cpp and VirtCtrl.cpp end in a #if DEBUG unit-test block calling utassert()
+  files_in_dir("src/base", {
+    "UtAssert.*",
+  })
+  -- the subset of gui logview's UI needs (no tree view, tabs, web view, ...)
+  files_in_dir("src/gui", {
+    "UIModels.*",
+    "Layout.*",
+    "Layout_win.*",
+    "PlatformFont.*",
+    "PlatformFont_win.*",
+    "PlatformText.*",
+    "PlatformText_win.*",
+    "Gfx.h",
+    "Gfx_win.cpp",
+    "GfxGdiplus_win.cpp",
+    "GfxDirect2D_win.cpp",
+    "GuiColors.*",
+    "UiPlatform_win.*",
+    "VirtCtrl.*",
+  })
+  files_in_dir("src/gui/win", {
+    "WindowBase.*",
+    "Edit.*",
+    "Tooltip.*",
   })
 end
 
@@ -1490,25 +1507,35 @@ function pdf_preview_files()
     "EbookFormatter.*",
     "EngineAll.h",
     "EngineBase.*",
-    "EngineDjVu.*",
     "EngineDjvuDec.*",
     "EngineEbook.*",
     "EngineImages.*",
     "EngineMupdf.*",
     "EngineMupdfImpl.*",
-    "FzImgReader.*",
+    "AvifReader.*",
+    "ImageReader.h",
+    "ImageReader.cpp",
+    "ImageReader_win.cpp",
     "GumboHtmlParser.*",
     "GumboHelpers.*",
     "HtmlFormatter.*",
+    "JxlReader.*",
     "MobiDoc.*",
-    "mui/Mui.*",
-    "mui/TextRender.*",
+    "gui/PlatformFont.*",
+    "gui/PlatformFont_win.*",
+    "gui/PlatformText.*",
+    "gui/PlatformText_win.*",
     "MUPDF_Exports.cpp",
     "PalmDbReader.*",
+    "PdfCadDetect.*",
+    "PdfCadEnhanceDevice.*",
+    "PdfDarkMode.h",
+    "PdfDarkModeNoOp.cpp",
     "PdfCreator.*",
     "RegistryPreview.*",
     "SumatraConfig.*",
-    "base/Log.*",
+    "SumatraLog.*",
+    "WebpReader.*",
   })
 end
 
@@ -1535,8 +1562,12 @@ function search_filter_files()
     "MobiDoc.*",
     "MUPDF_Exports.cpp",
     "PalmDbReader.*",
+    "PdfCadDetect.*",
+    "PdfCadEnhanceDevice.*",
+    "PdfDarkMode.h",
+    "PdfDarkModeNoOp.cpp",
     "RegistrySearchFilter.*",
-    "base/Log.*",
+    "SumatraLog.*",
   })
 
   filter { "configurations:Debug or DebugFull" }
@@ -1560,20 +1591,24 @@ function pdf_preview2_files()
 
   files_in_dir("src", {
     "CrashHandlerNoOp.cpp",
-    "mui/Mui.*",
     "RegistryPreview.*",
     "SumatraConfig.*",
     "base/Base.*",
     "base/Color.*",
-    "base/Dpi.*",
-    "base/File.*",
+    "gui/Dpi.h",
+    "gui/Dpi_win.cpp",
+    "base/File.h",
+    "base/File.cpp",
+    "base/File_win.cpp",
     "base/Geom.*",
-    "base/Log.*",
+    "base/Log.h",
+    "base/LogNoOp.cpp",
     "base/Strconv.*",
     "base/StrFormatParse.*",
     "base/Str.*",
     "base/StrVec.*",
-    "base/WinDynCalls.*",
+    "base/WinDynCalls.h",
+    "base/WinDynCalls_win.cpp",
     "base/Win.*",
   })
 end
@@ -1587,20 +1622,24 @@ function search_filter2_files()
   })
   files_in_dir("src", {
     "CrashHandlerNoOp.cpp",
-    "mui/Mui.*",
     "RegistrySearchFilter.*",
     "SumatraConfig.*",
     "base/Base.*",
     "base/Color.*",
-    "base/Dpi.*",
-    "base/File.*",
+    "gui/Dpi.h",
+    "gui/Dpi_win.cpp",
+    "base/File.h",
+    "base/File.cpp",
+    "base/File_win.cpp",
     "base/Geom.*",
-    "base/Log.*",
+    "base/Log.h",
+    "base/LogNoOp.cpp",
     "base/Strconv.*",
     "base/StrFormatParse.*",
     "base/Str.*",
     "base/StrVec.*",
-    "base/WinDynCalls.*",
+    "base/WinDynCalls.h",
+    "base/WinDynCalls_win.cpp",
     "base/Win.*",
   })
 end
@@ -1615,33 +1654,18 @@ function gumbo_files()
   })
 end
 
-function bin2coff_files()
-  files_in_dir("tools", {
-    "bin2coff.c"
-  })
-end
-
--- highway (SIMD library, dependency of libjxl). Only the core runtime sources;
--- the rest is header-only.
-function highway_files()
-  files { "ext/highway/hwy/*.cc", "ext/highway/hwy/*.h", "ext/highway/hwy/ops/*.h" }
-end
-
--- skcms (color management, dependency of libjxl). Baseline only (HSW/SKX
--- disabled), so no per-file /arch flags are needed.
-function skcms_files()
+function a_gumbo_files()
   files {
-    "ext/skcms/skcms.cc",
-    "ext/skcms/skcms.h",
-    "ext/skcms/src/skcms_TransformBaseline.cc",
-    "ext/skcms/src/*.h",
+    "ext/a-gumbo/gumbo.c",
+    "ext/a-gumbo/gumbo.h",
+    "ext/a-gumbo/version.txt",
   }
 end
 
--- libjxl decoder. ext/libjxl/lib/jxl only contains the decoder subset we
--- vendored (see ext/versions.txt), so globbing it picks exactly those files.
-function libjxl_files()
-  files { "ext/libjxl/lib/jxl/**.cc", "ext/libjxl/lib/jxl/**.h", "ext/libjxl/lib/include/jxl/*.h" }
+function bin2coff_files()
+  files_in_dir("src/tools", {
+    "bin2coff.c"
+  })
 end
 
 function sumatrapdf_tool_files()

@@ -1,8 +1,8 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <Filter Include="bzip2">
-      <UniqueIdentifier>{0C15310F-7829-59C0-41AB-FC1FAD7E55F1}</UniqueIdentifier>
+    <Filter Include="a-bzip2">
+      <UniqueIdentifier>{BADBBA9E-26BB-393A-2FD3-C4109B31A09B}</UniqueIdentifier>
     </Filter>
     <Filter Include="libarchive">
       <UniqueIdentifier>{1E5D585E-0A15-9AAB-731C-73075FF3349C}</UniqueIdentifier>
@@ -34,14 +34,11 @@
     <Filter Include="liblzma\simple">
       <UniqueIdentifier>{497B92DA-3549-86E0-1EDD-F6060A4A6245}</UniqueIdentifier>
     </Filter>
-    <Filter Include="lzma">
-      <UniqueIdentifier>{D95D9A7C-C594-9B0D-6E81-81105A97170F}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="lzma\C">
-      <UniqueIdentifier>{6B3EA90C-57E0-D3E2-409B-E7362CDC5A33}</UniqueIdentifier>
-    </Filter>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="..\ext\a-bzip2\bzlib.h">
+      <Filter>a-bzip2</Filter>
+    </ClInclude>
     <ClInclude Include="..\ext\libarchive\libarchive\archive.h">
       <Filter>libarchive\libarchive</Filter>
     </ClInclude>
@@ -162,6 +159,9 @@
     <ClInclude Include="..\ext\libarchive\libarchive\config_freebsd.h">
       <Filter>libarchive\libarchive</Filter>
     </ClInclude>
+    <ClInclude Include="..\ext\libarchive\libarchive\config_macos.h">
+      <Filter>libarchive\libarchive</Filter>
+    </ClInclude>
     <ClInclude Include="..\ext\libarchive\libarchive\config_windows.h">
       <Filter>libarchive\libarchive</Filter>
     </ClInclude>
@@ -170,29 +170,8 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\ext\bzip2\blocksort.c">
-      <Filter>bzip2</Filter>
-    </ClCompile>
-    <ClCompile Include="..\ext\bzip2\bz_internal_error.c">
-      <Filter>bzip2</Filter>
-    </ClCompile>
-    <ClCompile Include="..\ext\bzip2\bzlib.c">
-      <Filter>bzip2</Filter>
-    </ClCompile>
-    <ClCompile Include="..\ext\bzip2\compress.c">
-      <Filter>bzip2</Filter>
-    </ClCompile>
-    <ClCompile Include="..\ext\bzip2\crctable.c">
-      <Filter>bzip2</Filter>
-    </ClCompile>
-    <ClCompile Include="..\ext\bzip2\decompress.c">
-      <Filter>bzip2</Filter>
-    </ClCompile>
-    <ClCompile Include="..\ext\bzip2\huffman.c">
-      <Filter>bzip2</Filter>
-    </ClCompile>
-    <ClCompile Include="..\ext\bzip2\randtable.c">
-      <Filter>bzip2</Filter>
+    <ClCompile Include="..\ext\a-bzip2\bzip2.c">
+      <Filter>a-bzip2</Filter>
     </ClCompile>
     <ClCompile Include="..\ext\libarchive\libarchive\archive_acl.c">
       <Filter>libarchive\libarchive</Filter>
@@ -521,14 +500,13 @@
     <ClCompile Include="..\ext\liblzma\simple\x86.c">
       <Filter>liblzma\simple</Filter>
     </ClCompile>
-    <ClCompile Include="..\ext\lzma\C\Bra.c">
-      <Filter>lzma\C</Filter>
-    </ClCompile>
-    <ClCompile Include="..\ext\lzma\C\Bra86.c">
-      <Filter>lzma\C</Filter>
-    </ClCompile>
-    <ClCompile Include="..\ext\lzma\C\LzmaDec.c">
-      <Filter>lzma\C</Filter>
-    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\ext\a-bzip2\LICENSE">
+      <Filter>a-bzip2</Filter>
+    </None>
+    <None Include="..\ext\a-bzip2\version.txt">
+      <Filter>a-bzip2</Filter>
+    </None>
   </ItemGroup>
 </Project>

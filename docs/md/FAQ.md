@@ -14,7 +14,7 @@ Use `-new-window` on the command line, or `Ctrl + Shift + N` in the app. See [Ta
 
 **SumatraPDF asks to install when I double-click a PDF**
 
-This usually means the `.exe` you are running has `-install` in its name (the installer renames itself that way) or `libmupdf.dll` is missing next to the executable. Download the [official build](https://www.sumatrapdfreader.org/download-free-pdf-viewer) and run the installer, or use the portable (self-contained) version. See [Installation](Installation.md) and [Corrupted installation](Corrupted-installation.md).
+This usually means the `.exe` you are running has `-install` in its name (the installer renames itself that way) or `libsumatrapdf.dll` is missing next to the executable. Download the [official build](https://www.sumatrapdfreader.org/download-free-pdf-viewer) and run the installer, or use the portable (self-contained) version. See [Installation](Installation.md) and [Corrupted installation](Corrupted-installation.md).
 
 **SumatraPDF is running as admin and cannot open files from a non-admin process**
 
@@ -32,11 +32,15 @@ Some settings (for example `UseTabs`) require restarting SumatraPDF. Per-documen
 
 **I accidentally inverted document colors — how do I undo?**
 
-Press `Shift + I` again (`CmdInvertColors`), or set `FixedPageUI.InvertColors = false` in advanced settings. See [Customize theme colors](Customize-theme-colors.md).
+Press `Shift + I` again (`CmdInvertColors`) — it is a session-only swap of the page colors. If the pages are recolored even without it, set `DocumentColorsFollowTheme = off` in advanced settings. See [Customize theme colors](Customize-theme-colors.md).
 
-**How do I get a dark background without inverting images in EPUBs?**
+**How do I get dark page colors without crushing photos and figures?**
 
-There is no perfect one-click solution: `Shift + I` inverts the whole rendered page including images. For EPUBs you can tune `EBookUI` (custom CSS, `WindowBgCol`) or use themes — see [Customize eBook UI](Customize-eBook-UI.md).
+Set **`DocumentColorsFollowTheme = smart`** (or press **`Shift + I`** once from `off`). That recolors text and background but keeps images as in the file. Use **`legacy`** only if you want images recolored too (old invert-style behavior). UI chrome is separate: pick a dark **`Theme`**. Details: [Customize theme colors](Customize-theme-colors.md).
+
+**How do I get a dark background for reflowed EPUBs?**
+
+Prefer **`DocumentColorsFollowTheme = smart`** for MuPDF page recoloring that preserves images. You can also tune `EBookUI` (`CustomCSS`, `IgnoreDocumentCSS`, `WindowBgCol`) — see [Customize eBook UI](Customize-eBook-UI.md).
 
 ## Links and navigation
 
@@ -76,7 +80,7 @@ Use `sumatrapdf-tool clean` with `N` as the last-page marker, e.g. `1-N-1` keeps
 
 **Can SumatraPDF read a document aloud?**
 
-Yes — **pre-release 3.7+** adds Read Aloud via the command palette (`Ctrl + K`, type `read aloud`) using Windows text-to-speech. See [Read Aloud (TTS)](Read-Aloud-TTS.md).
+Yes — **pre-release 3.7+** adds Read Aloud via the command palette (`Ctrl + K`, type `read aloud`) using Windows text-to-speech. See [Read Aloud (TTS)](Read-Aloud.md).
 
 ## Default PDF viewer
 

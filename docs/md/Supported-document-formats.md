@@ -5,12 +5,12 @@ SumatraPDF reader supports the following document types:
 - PDF (.pdf, .ai)
 - eBook formats:
   - unencrypted EPUB (.epub)
-  - MOBI / Kindle (.mobi, and un-encrypted .azw, .azw3, .azw4, .prc)
+  - MOBI / Kindle (.mobi, and un-encrypted .azw, .azw3, .prc); Print Replica (.azw4) opens as the wrapped PDF
   - FictionBook (.fb2, .fb2z, .fbz, .zfb2, .fb2.zip)
   - Palm DOC (.pdb)
   - plain text (.txt, .log, .nfo, .tcr, …)
 - Markdown (.md, .markdown), rendered as GitHub Flavored Markdown
-- comic book files: .cbz, .cbr, .cbt, .cb7 (and .ora)
+- comic book files: .cbz, .cbr, .cbt, .cb7 (and .ora) — see [Comics and manga](Comics-and-manga.md)
 - archive files (.zip, .rar, .7z, .tar) containing images
 - DjVu (.djvu, .djv)
 - Microsoft Compiled HTML Help (.chm)
@@ -23,22 +23,23 @@ SumatraPDF reader supports the following document types:
   - TIFF (.tif, .tiff), including multi-page
   - BMP (.bmp, .dib)
   - TGA (.tga)
-  - WebP (.webp)
+  - WebP (.webp) — also images inside EPUB, MOBI and HTML
   - JPEG XR (.jxr, .hdp, .wdp)
   - JPEG 2000 (.jp2, .j2k, .jpx, .jpf, .jpm, .j2c)
   - AVIF (.avif)
   - JPEG XL (.jxl)
-  - HEIF / HEIC (.heic, .heif) — may need a Windows codec, see below
+  - HEIF / HEIC (.heic, .heif) — built-in decoder; see below
 
 If [Ghostscript](https://ghostscript.com/) is installed, we support PostScript (.ps, .eps) and PJL (Printer Job Language) files.
 
 ## HEIF / HEIC support
 
-**Ver 3.4+**: SumatraPDF can open [HEIF images](https://nokiatech.github.io/heif/). AVIF decodes out of the box, but HEIC (HEVC-coded) may require a Windows codec for the underlying video codec.
+SumatraPDF can open [HEIF images](https://nokiatech.github.io/heif/) (.heic, .heif) and AVIF (.avif) with a built-in decoder:
 
-You can use one of those codecs:
+- **HEIC** (typical phone stills, HEVC-coded): decoded in-process; no Windows codec required for most files
+- **AVIF** (AV1-coded): decoded in-process via [dav1d](https://code.videolan.org/videolan/dav1d)
+- Grids, overlays, and common transforms (crop / rotate / mirror) are handled for still images
 
-- [https://www.copytrans.net/copytransheic/](https://www.copytrans.net/copytransheic/) : free for personal use
-- [https://www.microsoft.com/en-us/p/heif-image-extensions/9pmmsr1cgpwg?activetab=pivot:overviewtab](https://www.microsoft.com/en-us/p/heif-image-extensions/9pmmsr1cgpwg?activetab=pivot:overviewtab) : HEIF image codec from Microsoft, Windows 10 or later
+If built-in decode fails, on Windows we still try the system [WIC](https://learn.microsoft.com/en-us/windows/win32/wic/-wic-about-windows-imaging-codec) path (for example if a third-party HEIF codec is installed). That fallback is optional for typical HEIC/AVIF files.
 
 You can make SumatraPDF the [default program for handling those file types](Set-as-default-pdf-viewer.md).

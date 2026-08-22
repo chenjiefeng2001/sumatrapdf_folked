@@ -34,7 +34,28 @@ Shortcuts [
 ]
 ```
 
-Explanation:
+### Restore pre-3.6 Ctrl+Tab (no Smart Tab Switch popup)
+
+**Ver 3.6+** binds `Ctrl + Tab` / `Ctrl + Shift + Tab` to **Smart Tab Switch** (`CmdNextTabSmart` / `CmdPrevTabSmart`), which shows a tab list while Ctrl is held. In 3.5 those keys switched tabs immediately in strip order (`CmdNextTab` / `CmdPrevTab`).
+
+**Ver 3.7+:** the simplest way to get the old behavior back is setting `CtrlTabSimple = true` in advanced settings. You can also rebind the keys:
+
+```
+Shortcuts [
+    [
+        Cmd = CmdNextTab
+        Key = Ctrl + Tab
+    ]
+    [
+        Cmd = CmdPrevTab
+        Key = Ctrl + Shift + Tab
+    ]
+]
+```
+
+`Ctrl + PageDown` / `Ctrl + PageUp` already run next/prev tab without the popup. More detail: [Tabs and windows](Tabs-and-windows.md#restore-pre-36-ctrltab-no-switcher-popup).
+
+Explanation of the first example:
 
 - by default SumatraPDF has `Ctrl + O` shortcut for `CmdOpen` (open a file) command. This changes the shortcut to `Alt + o`
 - by default `q` closes the document. By binding it to `CmdNone` we can disable a built-in shortcut
@@ -44,7 +65,7 @@ Explanation:
 ## Format of `Key` section:
 
 - just a key (like `a`, `Z`, `5`) i.e. letters `a` to `z`, `A` to `Z`, and numbers `0` to `9`
-- modifiers + key. Modifiers are: `Shift`, `Alt`, `Ctrl` e.g. `Alt + F1`, `Ctrl + Shift + Y`
+- modifiers + key. Modifiers are: `Shift`, `Alt`, `Ctrl`, `AltGr` (also `RAlt` / `RightAlt`) e.g. `Alt + F1`, `Ctrl + Shift + Y`, `AltGr + Return`. On Windows `AltGr` is the same as `Ctrl + Alt`
 - there are some special keys (e.g. `Alt + F3`)
   - `F1` - `F24`
   - `numpad0` - `numpad9` : `0` to `9` but on a numerical keyboard
@@ -57,6 +78,16 @@ Explanation:
 ## Commands
 
 You can see a [full list of commands](Commands.md) ([or in the source code](https://github.com/sumatrapdfreader/sumatrapdf/blob/master/src/Commands.h#L9))
+
+## Escaping in settings values
+
+String values in the advanced settings file use `$` as an escape character.
+A literal `$` must be written as `$$`. A lone `$` at the end of a value is
+treated as a trailing-whitespace marker, not a dollar sign.
+
+This matters for `CmdCommandPalette` mode arguments: use
+`CmdCommandPaletteFavorites` (or `CmdCommandPaletteTOC` for table of contents)
+instead of `CmdCommandPalette $` / `CmdCommandPalette %` when binding shortcuts.
 
 ## Notes
 

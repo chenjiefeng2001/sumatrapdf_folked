@@ -81,7 +81,9 @@ static void FlushSafeD2dReleases() {
     // owns the D2D factory and render targets). Calling Release from a
     // background render thread is a cross-thread D2D violation that can
     // crash with E_INVALIDARG or a GPU driver fault.
+#ifdef DEBUG
     ReportIf(g_mainThreadId != 0 && g_mainThreadId != GetCurrentThreadId());
+#endif
     EnterCriticalSection(&gD2dReleaseCS);
     DeferredReleaseNode* node = gD2dReleaseHead;
     gD2dReleaseHead = nullptr;
@@ -1340,9 +1342,8 @@ int RenderCache::PaintTile(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, T
                 // mirror the GDI source rect: skip the portion of the tile that
                 // is outside the viewport, or pages taller than the viewport
                 // render vertically compressed (fit-width mode etc.)
-                D2D1_RECT_F src =
-                    D2D1::RectF((float)source.x, (float)source.y, (float)(source.x + source.dx),
-                                (float)(source.y + source.dy));
+                D2D1_RECT_F src = D2D1::RectF((float)source.x, (float)source.y, (float)(source.x + source.dx),
+                                              (float)(source.y + source.dy));
                 rt->DrawBitmap(d2dBmp, dst, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, &src);
                 HRESULT hrEnd = rt->EndDraw();
                 if (FAILED(hrEnd)) {

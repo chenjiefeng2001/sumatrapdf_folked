@@ -587,6 +587,11 @@ static bool IsWindowOnCurrentDesktop(ISumatraVirtualDesktopManager* vdm, HWND hw
 // talk to the previous instance (e.g. it runs elevated and we don't), so the
 // caller opens files in this process instead of sending DDE messages that the
 // elevated process would never receive.
+// Sequential Explorer opens (double-clicking files one after another) routinely
+// arrive while the previous instance is still past the mapping but before its
+// first frame exists (DLL load, settings, session restore). The old 3x100ms
+// wait gave up too early and each click became an orphaned process invisible
+// to later forwards, leaving several SumatraPDF in the background.
 static HWND FindExistingSumatraProcessHwnd(HANDLE* hMutex, bool* openInNewWindow) {
     *openInNewWindow = false;
     // create a unique identifier for this executable and appdata combination
@@ -596,7 +601,9 @@ static HWND FindExistingSumatraProcessHwnd(HANDLE* hMutex, bool* openInNewWindow
     u32 hash = MurmurHash2(combinedPath);
     TempStr mapId = fmt("SumatraPDF-%08x", hash);
 
-    int retriesLeft = 3;
+    // up to ~6s waiting for the owner's first frame; each retry re-reads the
+    // mapping so a dead owner is picked up as a fresh start instead of an orphan
+    int retriesLeft = 60;
     HANDLE hMap = nullptr;
     HWND hwnd = nullptr;
     DWORD prevProcId = 0;

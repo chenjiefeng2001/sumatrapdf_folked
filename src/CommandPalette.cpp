@@ -308,6 +308,9 @@ bool CommandPaletteWnd::RemoveSelectedItem() {
     listBox->SetModel(m);
 
     n = m->ItemsCount();
+    if (smartTabMode) {
+        ResizeToFitList();
+    }
     if (n == 0) {
         listBox->SetCurrentSelection(-1);
         return true;
@@ -763,6 +766,31 @@ bool CommandPaletteWnd::Create(MainWindow* win, Str prefix, int smartTabAdvance)
     SetIsVisible(true);
     HwndSetFocus(editQuery->hwnd);
     return true;
+}
+
+// The smart-tab (Ctrl+Tab) switcher is sized to its content at creation, but
+// filtering the list (typing) or deleting an entry changes the row count while
+// the popup stays at its initial height, leaving a large blank area when only
+// 1-2 rows remain. Recompute the list's ideal height from the current model
+// and shrink/grow the popup to fit, keeping the current width and position.
+void CommandPaletteWnd::ResizeToFitList() {
+    if (!smartTabMode || !listBox || !listBox->model || !hwnd || !win) {
+        return;
+    }
+    int itemDy = listBox->GetItemHeight();
+    int maxLines = 16;
+    if (itemDy > 0 && IsWindow(win->hwndFrame)) {
+        auto rc = HwndClientRect(win->hwndFrame);
+        maxLines = std::max((rc.dy - DpiScale(160)) / itemDy, 3);
+    }
+    int nItems = listBox->model->ItemsCount();
+    listBox->idealSizeLines = std::min(nItems, maxLines);
+    int dx = HwndClientRect(hwnd).dx;
+    if (dx <= 0) {
+        return;
+    }
+    LayoutAndSizeToContent(layout, dx, 0, hwnd);
+    DoLayout(HwndClientRect(hwnd).Size());
 }
 
 void RunCommandPalette(MainWindow* win, Str prefix, int smartTabAdvance) {

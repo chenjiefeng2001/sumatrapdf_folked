@@ -157,6 +157,9 @@ void CommandPaletteWnd::QueryChanged() {
     FilterStringsForQuery(filter, m->strings);
     listBox->SetModel(m);
     int nItems = m->ItemsCount();
+    if (smartTabMode && nItems != nItemsPrev) {
+        ResizeToFitList();
+    }
     if (nItems == 0) {
         return;
     }

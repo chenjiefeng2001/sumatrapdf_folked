@@ -67,6 +67,7 @@ struct CommandPaletteWnd : WindowBase {
 
     bool Create(MainWindow* win, Str prefix, int smartTabAdvance);
     void QueryChanged();
+    void ResizeToFitList();
 
     void ExecuteCurrentSelection();
     bool AdvanceSelection(int dir);

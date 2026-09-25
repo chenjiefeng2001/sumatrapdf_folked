@@ -1485,6 +1485,57 @@ static void ShowWinScrollBar(HWND hwnd, int bar, BOOL show) {
     ShowScrollBar(hwnd, bar, show);
 }
 
+void UpdateHomePageScrollbars(MainWindow* win, int contentDy, int visibleDy, int scrollY) {
+    if (!win || !win->hwndCanvas) {
+        return;
+    }
+    bool needsScroll = contentDy > visibleDy;
+    bool useOverlay = ScrollbarsUseOverlay();
+    bool hideScrollbar = ScrollbarsAreHidden();
+    bool oldSuppress = win->suppressCanvasSizeUpdate;
+    Rect rcBefore = HwndClientRect(win->hwndCanvas);
+    win->suppressCanvasSizeUpdate = true;
+    defer {
+        win->suppressCanvasSizeUpdate = oldSuppress;
+        if (!oldSuppress && win->hwndCanvas && HwndClientRect(win->hwndCanvas) != rcBefore) {
+            win->UpdateCanvasSize();
+        }
+    };
+
+    SCROLLINFO si{};
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_ALL;
+    si.nMin = 0;
+    si.nMax = std::max(0, contentDy - 1);
+    si.nPage = std::max(1, visibleDy);
+    si.nPos = std::clamp(scrollY, 0, std::max(0, contentDy - visibleDy));
+
+    if (useOverlay) {
+        SetScrollInfo(win->hwndCanvas, SB_VERT, &si, FALSE);
+        ShowWinScrollBar(win->hwndCanvas, SB_VERT, FALSE);
+        if (needsScroll) {
+            if (!win->overlayScrollV) {
+                win->overlayScrollV =
+                    OverlayScrollbarCreate(win->hwndCanvas, OverlayScrollbar::Type::Vert, ScrollbarsOverlayMode());
+            }
+            OverlayScrollbarShow(win->overlayScrollV, true);
+            OverlayScrollbarSetInfo(win->overlayScrollV, &si, TRUE);
+        } else if (win->overlayScrollV) {
+            OverlayScrollbarShow(win->overlayScrollV, false);
+        }
+        return;
+    }
+
+    if (win->overlayScrollV) {
+        OverlayScrollbarShow(win->overlayScrollV, false);
+    }
+    if (!hideScrollbar && needsScroll) {
+        si.fMask |= SIF_DISABLENOSCROLL;
+    }
+    SetScrollInfo(win->hwndCanvas, SB_VERT, &si, TRUE);
+    ShowWinScrollBar(win->hwndCanvas, SB_VERT, !hideScrollbar && needsScroll);
+}
+
 SeqStrings gScrollbarModeNames = "windows\0smart\0overlay\0hidden\0";
 
 int ScrollbarModeFromPrefs() {
@@ -9276,9 +9327,10 @@ void SetSidebarVisibility(MainWindow* win, bool tocVisible, bool showFavorites, 
 
     bool requestedToc = tocVisible;
     EngineBase* engine = win->CurrentTab() ? win->CurrentTab()->GetEngine() : nullptr;
+    bool hasToc = win->IsDocLoaded() && win->ctrl && win->ctrl->HasToc();
     bool headingPending = EngineMupdfHeadingTocPending(engine);
 
-    if (!win->IsDocLoaded() || !win->ctrl || !win->ctrl->HasToc()) {
+    if (!hasToc) {
         tocVisible = false;
     }
 
@@ -9299,7 +9351,7 @@ void SetSidebarVisibility(MainWindow* win, bool tocVisible, bool showFavorites, 
     if (!win->CurrentTab()) {
         ReportIf(tocVisible);
     } else if (!win->presentation) {
-        if (win->ctrl && (win->ctrl->HasToc() || headingPending)) {
+        if (win->ctrl && (hasToc || headingPending)) {
             win->CurrentTab()->showToc = requestedToc;
         } else {
             win->CurrentTab()->showToc = tocVisible;

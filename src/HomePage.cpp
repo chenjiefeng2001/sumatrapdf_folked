@@ -2613,25 +2613,7 @@ void DrawHomePage(MainWindow* win, Gfx* gfx) {
     DrawHomePageLayout(l);
     SyncHomeLayoutCacheFileSizes(l);
 
-    // update overlay scrollbar for home page if thumbnails overflow visible area
-    bool showScrollbarV = ScrollbarsUseOverlay() && l.totalContentDy > l.thumbsVisibleDy;
-    if (showScrollbarV) {
-        if (!win->overlayScrollV) {
-            win->overlayScrollV =
-                OverlayScrollbarCreate(win->hwndCanvas, OverlayScrollbar::Type::Vert, ScrollbarsOverlayMode());
-        }
-        SCROLLINFO si{};
-        si.cbSize = sizeof(si);
-        si.fMask = SIF_ALL;
-        si.nMin = 0;
-        si.nMax = l.totalContentDy - 1;
-        si.nPage = l.thumbsVisibleDy;
-        si.nPos = win->homePageScrollY;
-        OverlayScrollbarShow(win->overlayScrollV, true);
-        OverlayScrollbarSetInfo(win->overlayScrollV, &si, TRUE);
-    }
-    // show thin scrollbar briefly to indicate content is scrollable
-    OverlayScrollbarShow(win->overlayScrollV, showScrollbarV);
+    UpdateHomePageScrollbars(win, l.totalContentDy, l.thumbsVisibleDy, win->homePageScrollY);
 }
 
 // --- keyboard navigation of the file list (issue #1136) ---
@@ -2995,9 +2977,8 @@ void HomePageOnVScroll(MainWindow* win, WPARAM wp) {
             break;
         case SB_THUMBTRACK:
         case SB_THUMBPOSITION: {
-            int pos = (int)(short)HIWORD(wp);
-            // overlay scrollbar sends full position in HIWORD for THUMBTRACK
-            if (win->overlayScrollV) {
+            int pos = (int)HIWORD(wp);
+            if (ScrollbarsUseOverlay() && win->overlayScrollV) {
                 pos = win->overlayScrollV->nTrackPos;
             }
             newScrollY = pos;

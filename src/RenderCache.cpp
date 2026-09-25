@@ -118,6 +118,13 @@ RenderCache::RenderCache() : maxTileSize({GetSystemMetrics(SM_CXSCREEN), GetSyst
     maxRenderThreads = std::max(gMaxRenderThreads, numCores);
     maxRenderThreads = std::min(maxRenderThreads, kMaxRenderThreads);
 
+    MEMORYSTATUSEX mem{};
+    mem.dwLength = sizeof(mem);
+    if (GlobalMemoryStatusEx(&mem)) {
+        i64 total = (i64)std::min<u64>(mem.ullTotalPhys, (u64)std::numeric_limits<i64>::max());
+        maxBitmapBytes = std::clamp<i64>(total / 32, 128 * 1024 * 1024, 512 * 1024 * 1024);
+    }
+
     // use a semaphore so each queued request wakes one thread.
     // threads themselves are spawned lazily in Render() when work appears
     // and no idle thread is available -- many sessions only ever need a
@@ -169,6 +176,7 @@ RenderCache::~RenderCache() {
             cache[i] = nullptr;
         }
         cacheCount = 0;
+        cacheBytes = 0;
     }
     {
         ScopedRecursiveMutex scope(&requestAccess);
@@ -263,6 +271,10 @@ bool RenderCache::DropCacheEntry(BitmapCacheEntry* entry) {
            entry->rotation, entry->zoom);
 
     RecordCacheChange(false, entry);
+    cacheBytes -= entry->bytes;
+    if (cacheBytes < 0) {
+        cacheBytes = 0;
+    }
 
     delete entry;
 
@@ -293,53 +305,58 @@ bool RenderCache::DropCacheEntryIfNotUsed(BitmapCacheEntry* entry) {
     return DropCacheEntry(entry);
 }
 
-static bool FreeIfFull(RenderCache* rc, const PageRenderRequest& req) {
-    int n = rc->cacheCount;
-    if (n < MAX_BITMAPS_CACHED) {
+static bool FreeIfFull(RenderCache* rc, const PageRenderRequest& req, i64 incomingBytes) {
+    if (incomingBytes <= 0 || incomingBytes > rc->maxBitmapBytes) {
+        return false;
+    }
+    auto hasRoom = [&]() {
+        return rc->cacheCount < MAX_BITMAPS_CACHED && rc->cacheBytes <= rc->maxBitmapBytes - incomingBytes;
+    };
+    if (hasRoom()) {
         return true;
     }
 
     DisplayModel* dm = req.dm;
-    // free an invisible page of the same DisplayModel ...
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < rc->cacheCount;) {
         auto* entry = rc->cache[i];
+        if (!entry) {
+            i++;
+            continue;
+        }
         if (entry->dm == dm &&
             (!entry->pageVisibleNearby || !entry->dm || entry->darkModeEpoch != (u32)AtomicIntGet(&rc->darkModeEpoch) ||
              entry->renderGeneration != (u32)AtomicIntGet(&rc->renderGeneration) ||
              entry->dmRenderGeneration != (u32)AtomicIntGet(&entry->dm->renderGeneration))) {
-            bool didDrop = rc->DropCacheEntryIfNotUsed(entry);
-            if (didDrop) {
+            if (rc->DropCacheEntryIfNotUsed(entry) && hasRoom()) {
                 return true;
             }
         }
+        i++;
     }
 
-    // ... or just the oldest cached page
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < rc->cacheCount;) {
         auto* entry = rc->cache[i];
+        if (!entry) {
+            i++;
+            continue;
+        }
         bool stale = !entry->dm || entry->darkModeEpoch != (u32)AtomicIntGet(&rc->darkModeEpoch) ||
                      entry->renderGeneration != (u32)AtomicIntGet(&rc->renderGeneration) ||
                      entry->dmRenderGeneration != (u32)AtomicIntGet(&entry->dm->renderGeneration);
-        if (stale) {
-            bool didDrop = rc->DropCacheEntryIfNotUsed(entry);
-            if (didDrop) {
+        if (stale || entry->dm != dm) {
+            if (rc->DropCacheEntryIfNotUsed(entry) && hasRoom()) {
                 return true;
             }
-            continue;
         }
-        if (entry->dm == dm) {
-            continue;
-        }
-        bool didDrop = rc->DropCacheEntryIfNotUsed(entry);
-        if (didDrop) {
-            return true;
-        }
+        i++;
     }
-    for (int i = 0; i < n; i++) {
+
+    for (int i = 0; i < rc->cacheCount;) {
         auto* entry = rc->cache[i];
-        if (entry->dm == dm && rc->DropCacheEntryIfNotUsed(entry)) {
+        if (entry && entry->dm == dm && rc->DropCacheEntryIfNotUsed(entry) && hasRoom()) {
             return true;
         }
+        i++;
     }
     return false;
 }
@@ -359,11 +376,15 @@ bool RenderCache::Add(PageRenderRequest& req, Pixmap* bmp) {
     /* It's possible there still is a cached bitmap with different zoom/rotation */
     FreePage(req.dm, req.pageNo, &req.tile);
 
-    bool hasSpace = FreeIfFull(this, req);
-    ReportIf(!hasSpace); // TODO: FreeIfFull() might actually fail to free
+    i64 incomingBytes = PixmapByteSize(bmp);
+    if (incomingBytes <= 0 || incomingBytes > maxBitmapBytes) {
+        FreePixmap(bmp);
+        return false;
+    }
+    bool hasSpace = FreeIfFull(this, req, incomingBytes);
+    ReportIf(!hasSpace);
     ReportIf(cacheCount > MAX_BITMAPS_CACHED);
-    if (!hasSpace || cacheCount >= MAX_BITMAPS_CACHED) {
-        // Cannot grow past the fixed cache[]; drop this bitmap rather than overrun.
+    if (!hasSpace || cacheCount >= MAX_BITMAPS_CACHED || cacheBytes > maxBitmapBytes - incomingBytes) {
         FreePixmap(bmp);
         return false;
     }
@@ -374,9 +395,11 @@ bool RenderCache::Add(PageRenderRequest& req, Pixmap* bmp) {
     entry->darkModeEpoch = req.darkModeEpoch;
     entry->renderGeneration = req.renderGeneration;
     entry->dmRenderGeneration = req.dmRenderGeneration;
+    entry->bytes = incomingBytes;
     entry->cacheIdx = cacheCount;
     cache[cacheCount] = entry;
     cacheCount++;
+    cacheBytes += incomingBytes;
 
     RecordCacheChange(true, entry);
     return true;
@@ -628,6 +651,7 @@ bool RenderCache::ReduceTileSize() {
             cache[i] = nullptr;
         }
         cacheCount = 0;
+        cacheBytes = 0;
         int queuedCount = std::min(requestCount, MAX_PAGE_REQUESTS);
         ScopedMutex cookieScope(&cookieAccess);
         for (int i = 0; i < queuedCount; i++) {

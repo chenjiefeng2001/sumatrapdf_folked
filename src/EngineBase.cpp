@@ -429,12 +429,33 @@ struct TextExtractionThreadData {
     int pageNo = 0;
 };
 
+static Mutex gTextExtractionSlots;
+static int gTextExtractionActive = 0;
+
+static bool TryAcquireTextExtractionSlot() {
+    ScopedMutex scope(&gTextExtractionSlots);
+    if (gTextExtractionActive >= 2) {
+        return false;
+    }
+    gTextExtractionActive++;
+    return true;
+}
+
+static void ReleaseTextExtractionSlot() {
+    ScopedMutex scope(&gTextExtractionSlots);
+    ReportIf(gTextExtractionActive <= 0);
+    if (gTextExtractionActive > 0) {
+        gTextExtractionActive--;
+    }
+}
+
 static void ExtractTextThread(TextExtractionThreadData* data) {
     data->engine->GetTextForPage(data->pageNo);
     data->engine->ReleaseTextExtractionThreadContext();
     data->engine->Release();
     delete data;
     AtomicIntDec(&gDangerousThreadCount);
+    ReleaseTextExtractionSlot();
 }
 
 // cached per-page text. First call on a page extracts text and caches it,
@@ -470,6 +491,9 @@ void EngineBase::RequestTextExtraction(int pageNo) {
     if (pageNo < 1 || pageNo > pageCount) {
         return;
     }
+    if (!TryAcquireTextExtractionSlot()) {
+        return;
+    }
 
     {
         ScopedMutex scope(&textCacheLock);
@@ -481,6 +505,7 @@ void EngineBase::RequestTextExtraction(int pageNo) {
         }
         PageText* pt = &pagesText[pageNo - 1];
         if (pt->text || pagesTextState[pageNo - 1] != TextExtractionState::NotExtracted) {
+            ReleaseTextExtractionSlot();
             return;
         }
         pagesTextState[pageNo - 1] = TextExtractionState::Pending;
@@ -507,6 +532,7 @@ void EngineBase::RequestTextExtraction(int pageNo) {
     AtomicIntDec(&gDangerousThreadCount);
     Release();
     delete data;
+    ReleaseTextExtractionSlot();
 }
 
 // default always succeeds; EngineMupdf fails when locks are contended

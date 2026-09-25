@@ -327,6 +327,7 @@ struct DisplayModel : DocController {
 
     /* allow resizing a window without triggering a new rendering (needed for window destruction) */
     bool pauseRendering = false;
+    bool headingTocRequested = false;
 
     void RenderFinished(PageRenderRequest* req);
     void RenderFinishedAsync(PageRenderRequest* req);

@@ -187,6 +187,7 @@ void UpdateDocumentColors();
 void MaybeRedrawHomePage();
 Str NextCursorPositionUnitName(MainWindow*);
 void UpdateFixedPageScrollbarsVisibility();
+void UpdateHomePageScrollbars(MainWindow* win, int contentDy, int visibleDy, int scrollY);
 
 // scrollbar mode values: "windows\0smart\0overlay\0hidden\0"
 constexpr int kScrollbarWindows = 0;

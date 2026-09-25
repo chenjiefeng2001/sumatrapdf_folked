@@ -64,6 +64,7 @@ struct BitmapCacheEntry {
     Pixmap* bitmap = nullptr;
     bool pageVisibleNearby = true;
     bool outOfDate = false;
+    i64 bytes = 0;
     int refs = 1;
     // RenderCache::darkModeEpoch at render time; entries from an older epoch
     // were rendered/recolored with stale colors and must not be reused
@@ -159,6 +160,8 @@ struct FinishedRequestInfo {
 struct RenderCache {
     BitmapCacheEntry* cache[MAX_BITMAPS_CACHED]{};
     int cacheCount = 0;
+    i64 cacheBytes = 0;
+    i64 maxBitmapBytes = 256 * 1024 * 1024;
     // make sure to never ask for requestAccess in a cacheAccess
     // protected critical section in order to avoid deadlocks
     RecursiveMutex cacheAccess;

@@ -118,10 +118,21 @@ DisplayMode DisplayModel::GetDisplayMode() const {
     return displayMode;
 }
 
+static void OnHeadingTocDone(DisplayModel* dm);
+
+static void StartHeadingTocIfNeeded(DisplayModel* dm) {
+    if (!dm || dm->headingTocRequested) {
+        return;
+    }
+    dm->headingTocRequested = true;
+    EngineMupdfStartHeadingToc(dm->GetEngine(), MkFunc0(OnHeadingTocDone, dm));
+}
+
 bool DisplayModel::HasToc() {
     if (!engine) {
         return false;
     }
+    StartHeadingTocIfNeeded(this);
     return engine->HasToc();
 }
 
@@ -129,6 +140,7 @@ TocTree* DisplayModel::GetToc() {
     if (!engine) {
         return nullptr;
     }
+    StartHeadingTocIfNeeded(this);
     return engine->GetToc();
 }
 
@@ -619,8 +631,6 @@ DisplayModel::DisplayModel(EngineBase* engine, DocControllerCallback* cb) : DocC
 
     textSelection = new TextSelection(engine);
     textSearch = new TextSearch(engine);
-
-    EngineMupdfStartHeadingToc(engine, MkFunc0(OnHeadingTocDone, this));
 }
 
 // WindowMargin and PageSpacing are screen-space sizes written by the user at

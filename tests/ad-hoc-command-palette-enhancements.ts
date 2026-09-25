@@ -13,7 +13,7 @@
 // CommandPalette.cpp / CommandPaletteFilter.cpp) makes this throw.
 
 import { writeFileSync } from "node:fs";
-import { runStandalone, tmpPath } from "./util.ts";
+import { runStandalone, tmpPath, cmdId } from "./util.ts";
 import { launchSumatra, waitForFrame, sendCommand, pressEscape, clickAt } from "./win-automation.ts";
 import {
   sleep,
@@ -28,8 +28,6 @@ import {
   isWindowVisible,
   isWindow,
 } from "./winapi.ts";
-
-const CmdCommandPalette = 370;
 
 function makeMinimalPdf(): Buffer {
   const enc = (s: string) => Buffer.from(s, "latin1");
@@ -106,7 +104,7 @@ export async function testit(): Promise<void> {
 
     // --- open the Command Palette (">" commands mode) ---
     const before = new Set(topWindows(proc.pid));
-    sendCommand(frame, CmdCommandPalette);
+    sendCommand(frame, cmdId("CmdCommandPalette"));
     await sleep(900);
     const palette = findPalette(proc.pid, before);
     if (!palette) {

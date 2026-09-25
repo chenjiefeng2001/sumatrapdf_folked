@@ -135,6 +135,19 @@ export function detectVisualStudio2026(): VisualStudioInfo {
   return res;
 }
 
+// VS2026 first, VS2022 as fallback (dev machines may not have 2026 yet).
+export function detectVisualStudio2026Or2022(): VisualStudioInfo {
+  let res = detectVisualStudioVer("18");
+  if (res) {
+    return res;
+  }
+  res = detectVisualStudioVer("2022");
+  if (!res) {
+    throw new Error(`couldn't find vs 2026 or vs 2022 msbuild.exe `);
+  }
+  return res;
+}
+
 export function detectVisualStudio(): VisualStudioInfo {
   let res = detectVisualStudioVer("2022");
   if (res) return res;

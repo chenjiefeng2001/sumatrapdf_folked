@@ -622,7 +622,7 @@ const antiGravity: Field[] = [
   field(
     "AutoApprove",
     Bool,
-    true,
+    false,
     "if true, pass --dangerously-skip-permissions to Antigravity CLI so it can read the current file " +
       "etc. in headless print mode (agy cannot prompt for permissions with -p)",
   ),
@@ -1128,7 +1128,6 @@ const globalPrefs: Field[] = [
     "if true, show the menu bar (F9 toggles it; the choice is remembered across sessions)",
   ).ver("2.5"),
   field("ShowMenubarWithTabs", Bool, false, "if true, show the menu bar when using tabs (useTabs = true)").ver("3.7"),
-  field("ShowTips", Bool, true, "if true, show tips on the home page").ver("3.7"),
   field(
     "CustomColors",
     Str,

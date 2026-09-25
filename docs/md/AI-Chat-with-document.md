@@ -2,6 +2,8 @@
 
 **Available in pre-release 3.7+ on Windows 10 or later.**
 
+> **Note:** for installed copies this feature is opt-in — enable **AI chat support** in the installer (off by default, `-with-ai` for silent installs). Uninstalled (portable) copies always offer it.
+
 SumatraPDF can show a chat sidebar where you ask questions about the document you are reading. Answers come from an AI agent CLI running on your computer — SumatraPDF does not send your files to its own servers.
 
 Three backends are supported: [Claude Code](#claude-code), [Grok Build](#grok-build), and [OpenAI Codex](#openai-codex).

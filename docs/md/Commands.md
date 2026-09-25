@@ -25,7 +25,7 @@ CmdMoveFrameFocus,F6,Move Frame Focus,
 CmdNewWindow,Ctrl + N,Open New SumatraPDF Window,
 CmdOpenFile,Ctrl + O,Open File...,"uses the Windows file picker or Navigate Files in Folder according to the `FilePicker` advanced setting (empty/os = Windows, sumatrapdf = in-app), ver 3.7+"
 CmdOpenFileWithOSFilePicker,,Open File With Windows File Picker...,"always the standard Windows multi-select file open dialog, ver 3.7+"
-CmdToggleFilePicker,,SumatraPDF File Picker,"checkbox under File and Settings; toggles `FilePicker` empty/os â†?sumatrapdf, ver 3.7+"
+CmdToggleFilePicker,,SumatraPDF File Picker,"checkbox under File and Settings; toggles `FilePicker` empty/os â†’ sumatrapdf, ver 3.7+"
 CmdToggleBoolSetting,,Toggle Boolean Setting,"custom shortcuts: `CmdToggleBoolSetting <SettingName>` toggles a boolean advanced setting (case-insensitive leaf or dotted path), e.g. `Fullscreen.ShowMenubar` (fixes #5912), ver 3.7+"
 CmdFixDefaultApp,,Fix Default App For Extension,"`CmdFixDefaultApp .pdf` opens the OS dialog to set the default app for that extension; used by the home-page bottom bar when Sumatra is no longer the default, ver 3.7+"
 CmdOpenNextFileInFolder,Shift + Ctrl + Right,Open Next File In Folder,
@@ -344,6 +344,7 @@ CmdToggleScrollbarInSinglePage,,Toggle Scrollbar In Single Page,"Toggle Scrollba
 CmdToggleLazyLoading,,Toggle Lazy Loading,"Toggle LazyLoading advanced setting, ver 3.7+"
 CmdToggleEscToExit,,Toggle Esc to Exit,"Toggle EscToExit advanced setting, ver 3.7+"
 CmdToggleReuseInstance,,Toggle Reuse Instance,"Toggle ReuseInstance advanced setting, ver 3.7+"
+CmdToggleChmUI,,Toggle CHM UI,"Toggle dedicated CHM UI for CHM documents; reloads the current CHM document, ver 3.7+"
 CmdToggleWindowsPreviewer,,Register / Un-register Windows Previewer,"Only available when SumatraPDF is installed. Registers or un-registers the PDF preview handler for Windows Explorer preview pane, ver 3.7+"
 CmdToggleWindowsSearchFilter,,Register / Un-register Windows Search Filter,"Only available when SumatraPDF is installed. Registers or un-registers the PDF search filter for Windows Search indexing, ver 3.7+"
 CmdSetTabColor,,Set Tab Color,"Set a custom color for the tab of the current document, available from tab context menu, ver 3.7+"
@@ -537,7 +538,7 @@ Arguments for `CmdCreateAnnotHighlight` plus:
 
 Arguments:
 
-- `name` : default, string â€?name of a boolean advanced setting (case-insensitive leaf name or dotted path, e.g. `Fullscreen.ShowMenubar`)
+- `name` : default, string â†’ name of a boolean advanced setting (case-insensitive leaf name or dotted path, e.g. `Fullscreen.ShowMenubar`)
 
 Toggles that setting between `true` and `false`. Useful for custom shortcuts or toolbar buttons. Unknown setting names show a warning when the shortcut is defined and when the command runs.
 

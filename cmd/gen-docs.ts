@@ -561,8 +561,10 @@ function checkCommandsAreDocumented(): void {
   const docCmds = extractCommandsFromMarkdown();
 
   // special-case: remove old name which is still documented but not present in code
-  let idx = docCmds.indexOf("CmdOpen");
-  docCmds.splice(idx, 1);
+  const cmdOpenIdx = docCmds.indexOf("CmdOpen");
+  if (cmdOpenIdx >= 0) {
+    docCmds.splice(cmdOpenIdx, 1);
+  }
 
   console.log(`${docCmds.length} commands in Commands.md`);
 
@@ -582,6 +584,13 @@ function checkCommandsAreDocumented(): void {
   if (docSet.size > 0) {
     console.log(`${docSet.size} in Commands.md but not in gen-commands.ts:`);
     for (const c of docSet) console.log(`  ${c}`);
+  }
+  if (onlyInSrc.length > 0 || docSet.size > 0) {
+    const details = [
+      ...onlyInSrc.map((c) => `missing from Commands.md: ${c}`),
+      ...[...docSet].map((c) => `not in gen-commands.ts: ${c}`),
+    ];
+    throw new Error(`Commands.md is out of sync with gen-commands.ts:\n${details.join("\n")}`);
   }
 }
 

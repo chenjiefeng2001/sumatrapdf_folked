@@ -23,6 +23,8 @@ const MINGW_EXCLUDED: Record<string, string> = {
   "TestPreview.cpp": "doesn't build with mingw GDI+; stubbed",
   "BasePch.cpp": "MSVC precompiled header source",
   "MuPDF_Exports.cpp": "the libmupdf DLL's export table, not part of the exe",
+  "GpuBackend.cpp": "MSVC-only: the Direct2D/GPU implementation is guarded by _MSC_VER",
+  "Win7Compat.cpp": "MSVC-only: overrides __imp_* ETW symbols required by the MSVC CRT",
 };
 
 // the dirs the vcxproj check covers: where SumatraPDF's own UI/app code lives.

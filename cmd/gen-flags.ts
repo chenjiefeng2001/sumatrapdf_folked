@@ -25,6 +25,7 @@ const args = [
     "WithFilter", "with-filter",
     "WithSearch", "with-search",
     "WithPreview", "with-preview",
+    "WithAI", "with-ai",
     "Rand", "rand",
     "Regress", "regress",
     "Extract", "x",

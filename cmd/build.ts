@@ -2,7 +2,7 @@ import { copyFileSync, existsSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { $ } from "bun";
 import { clearDirPreserveSettings } from "./clean";
-import { detectVisualStudio2026, runLogged } from "./util";
+import { detectVisualStudio2026Or2022, runLogged } from "./util";
 
 type BuildMode = "windows" | "all" | "smoke" | "ci" | "daily" | "codeql" | "mingw" | "wine" | "build-no";
 type Config = "debug" | "release";
@@ -163,7 +163,7 @@ async function buildWindows(config: Config, win32: boolean, clean: boolean): Pro
   const timeStart = performance.now();
   console.log(`${configName} ${platform} build`);
   if (clean) clearDirPreserveSettings(outDir);
-  const { msbuildPath } = detectVisualStudio2026();
+  const { msbuildPath } = detectVisualStudio2026Or2022();
   await runLogged(msbuildPath, [
     String.raw`vs2022\SumatraPDF.sln`,
     "/t:SumatraPDF",
@@ -205,7 +205,7 @@ async function buildWindowsAsan(config: Config, clean: boolean): Promise<void> {
   console.log(`${configName} ASan build (SumatraPDF-static.exe, x64_asan)`);
   if (clean) clearDirPreserveSettings(outDir);
   await runLogged(join("bin", "premake5.exe"), ["vs2022"]);
-  const { msbuildPath, vsRoot } = detectVisualStudio2026();
+  const { msbuildPath, vsRoot } = detectVisualStudio2026Or2022();
   await runLogged(msbuildPath, [
     String.raw`vs2022\SumatraPDF.sln`,
     "/t:SumatraPDF-static",
@@ -222,7 +222,7 @@ async function buildAll(clean: boolean): Promise<void> {
   const timeStart = performance.now();
   console.log("Release x64 SumatraPDF and SumatraPDF-static build");
   if (clean) clearDirPreserveSettings(outDir);
-  const { msbuildPath } = detectVisualStudio2026();
+  const { msbuildPath } = detectVisualStudio2026Or2022();
   await runLogged(msbuildPath, [
     String.raw`vs2022\SumatraPDF.sln`,
     "/t:SumatraPDF;SumatraPDF-static",
@@ -237,7 +237,7 @@ async function buildSmoke(): Promise<void> {
   const timeStart = performance.now();
   console.log("smoke build");
   clearDirPreserveSettings(outDir);
-  const { msbuildPath } = detectVisualStudio2026();
+  const { msbuildPath } = detectVisualStudio2026Or2022();
   await runLogged(msbuildPath, [
     String.raw`vs2022\SumatraPDF.sln`,
     String.raw`/t:SumatraPDF:Rebuild;tools\test_util:Rebuild`,

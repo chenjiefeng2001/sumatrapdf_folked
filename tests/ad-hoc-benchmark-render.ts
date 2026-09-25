@@ -30,12 +30,12 @@ const REPORT_DIR = TMP_DIR;
 interface BenchResult {
   file: string;
   desc: string;
-  ttfpMs: number;        // Time To First Page (ms)
-  scrollFps: number;     // Average FPS during auto-scroll
+  ttfpMs: number; // Time To First Page (ms)
+  scrollFps: number; // Average FPS during auto-scroll
   scrollFps1pct: number; // 1% low FPS
   memWorkingSetMB: number;
   memPrivateMB: number;
-  tileUploadUs: number;  // tile upload latency (μs)
+  tileUploadUs: number; // tile upload latency (μs)
   error?: string;
 }
 
@@ -44,13 +44,17 @@ interface BenchResult {
 function getGitBranch(): string {
   try {
     return execSync("git branch --show-current", { cwd: ROOT, encoding: "utf8" }).trim();
-  } catch { return "(unknown)"; }
+  } catch {
+    return "(unknown)";
+  }
 }
 
 function getGitCommit(): string {
   try {
     return execSync("git rev-parse --short HEAD", { cwd: ROOT, encoding: "utf8" }).trim();
-  } catch { return "(unknown)"; }
+  } catch {
+    return "(unknown)";
+  }
 }
 
 function checkBenchFiles(): string[] {
@@ -59,13 +63,17 @@ function checkBenchFiles(): string[] {
     console.log("\n⚠️  没有测试文件。请将 PDF 文件放入 tests/tmp/bench-files/");
     return [];
   }
-  const files = readdirSync(BENCH_FILES_DIR).filter(f => f.endsWith(".pdf")).sort();
+  const files = readdirSync(BENCH_FILES_DIR)
+    .filter((f) => f.endsWith(".pdf"))
+    .sort();
   if (files.length === 0) {
     console.log("\n⚠️  没有测试文件。请将 PDF 文件放入 tests/tmp/bench-files/");
   } else {
     console.log(`\n📁 发现 ${files.length} 个测试文件:`);
     for (const f of files) {
-      const size = (existsSync(join(BENCH_FILES_DIR, f)) ? `(${Math.round(existsSync(join(BENCH_FILES_DIR, f)) ? 0 : 0)} bytes)` : "");
+      const size = existsSync(join(BENCH_FILES_DIR, f))
+        ? `(${Math.round(existsSync(join(BENCH_FILES_DIR, f)) ? 0 : 0)} bytes)`
+        : "";
       console.log(`  - ${f}`);
     }
   }
@@ -85,7 +93,9 @@ function getProcessMemory(pid: number): { wsMB: number; privMB: number } {
         privMB: parseFloat(privStr) || 0,
       };
     }
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
   return { wsMB: 0, privMB: 0 };
 }
 
@@ -95,7 +105,16 @@ function getProcessMemory(pid: number): { wsMB: number; privMB: number } {
 //   launch + wait until the window is ready + check process memory.
 async function benchFile(filePath: string): Promise<BenchResult> {
   const fileName = basename(filePath);
-  const result: BenchResult = { file: fileName, desc: fileName, ttfpMs: 0, scrollFps: 0, scrollFps1pct: 0, memWorkingSetMB: 0, memPrivateMB: 0, tileUploadUs: 0 };
+  const result: BenchResult = {
+    file: fileName,
+    desc: fileName,
+    ttfpMs: 0,
+    scrollFps: 0,
+    scrollFps1pct: 0,
+    memWorkingSetMB: 0,
+    memPrivateMB: 0,
+    tileUploadUs: 0,
+  };
 
   const t0 = performance.now();
 
@@ -109,7 +128,7 @@ async function benchFile(filePath: string): Promise<BenchResult> {
   const maxWait = 30000;
   let frameFound = false;
   for (let i = 0; i < maxWait / 200; i++) {
-    await new Promise(r => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 200));
     try {
       // Check if process is still alive
       if (proc.exitCode !== null) {
@@ -122,7 +141,9 @@ async function benchFile(filePath: string): Promise<BenchResult> {
         frameFound = true;
         break;
       }
-    } catch { break; }
+    } catch {
+      break;
+    }
   }
 
   const t1 = performance.now();
@@ -130,7 +151,7 @@ async function benchFile(filePath: string): Promise<BenchResult> {
   if (frameFound) {
     result.ttfpMs = t1 - t0;
     // Read memory after a brief settling period
-    await new Promise(r => setTimeout(r, 1000));
+    await new Promise((r) => setTimeout(r, 1000));
     const mem = getProcessMemory(pid);
     result.memWorkingSetMB = mem.wsMB;
     result.memPrivateMB = mem.privMB;
@@ -140,15 +161,21 @@ async function benchFile(filePath: string): Promise<BenchResult> {
   }
 
   // Clean up
-  try { proc.kill(); } catch { /* may already be dead */ }
+  try {
+    proc.kill();
+  } catch {
+    /* may already be dead */
+  }
 
   // If the process is still running after kill, wait
   try {
     const exitCode = await Promise.race([
-      new Promise<number | null>(resolve => proc.on("exit", resolve)),
-      new Promise<number | null>(resolve => setTimeout(() => resolve(null), 3000)),
+      new Promise<number | null>((resolve) => proc.on("exit", resolve)),
+      new Promise<number | null>((resolve) => setTimeout(() => resolve(null), 3000)),
     ]);
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
 
   return result;
 }
@@ -159,9 +186,9 @@ function formatReport(results: BenchResult[], branch: string, commit: string): s
   const lines: string[] = [];
   const timestamp = new Date().toISOString().replace(/T/, " ").replace(/\..+/, "");
 
-  lines.push("=" .repeat(72));
+  lines.push("=".repeat(72));
   lines.push("  SumatraPDF GPU Backend Benchmark Report");
-  lines.push("=" .repeat(72));
+  lines.push("=".repeat(72));
   lines.push("");
   lines.push(`  Date:       ${timestamp}`);
   lines.push(`  Branch:     ${branch}`);
@@ -189,7 +216,7 @@ function formatReport(results: BenchResult[], branch: string, commit: string): s
   lines.push("  Test files location: tests/tmp/bench-files/");
   lines.push("  (user must provide test PDFs — not committed)");
   lines.push("");
-  lines.push("=" .repeat(72));
+  lines.push("=".repeat(72));
 
   return lines.join("\n");
 }
@@ -229,13 +256,19 @@ async function testit() {
     const desc = f.slice(0, 40); // truncate long names
     console.log(`\n📄 Testing: ${f}`);
 
-    await runTest(f, async () => {
-      const r = await benchFile(filePath);
-      results.push(r);
-      console.log(`   TTFP: ${r.ttfpMs > 0 ? r.ttfpMs.toFixed(0) + "ms" : "N/A"}  ` +
-                  `WS: ${r.memWorkingSetMB > 0 ? r.memWorkingSetMB.toFixed(0) + "MB" : "N/A"}  ` +
-                  (r.error ? `❌ ${r.error}` : "✅"));
-    }, { silent: true });
+    await runTest(
+      f,
+      async () => {
+        const r = await benchFile(filePath);
+        results.push(r);
+        console.log(
+          `   TTFP: ${r.ttfpMs > 0 ? r.ttfpMs.toFixed(0) + "ms" : "N/A"}  ` +
+            `WS: ${r.memWorkingSetMB > 0 ? r.memWorkingSetMB.toFixed(0) + "MB" : "N/A"}  ` +
+            (r.error ? `❌ ${r.error}` : "✅"),
+        );
+      },
+      { silent: true },
+    );
   }
 
   // Write report

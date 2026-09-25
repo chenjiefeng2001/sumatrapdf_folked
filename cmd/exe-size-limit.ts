@@ -24,5 +24,10 @@ export function enforceExeSizeLimit(exePath: string, limitMb: number): ExeSizeCh
   if (sizeMb <= limitMb) {
     return { ok: true, sizeMb, limitMb, msg: `size ${sizeMb.toFixed(1)} MB within limit ${limitMb} MB` };
   }
-  return { ok: false, sizeMb, limitMb, msg: `EXE size ${sizeMb.toFixed(1)} MB exceeds limit ${limitMb} MB (${exePath})` };
+  return {
+    ok: false,
+    sizeMb,
+    limitMb,
+    msg: `EXE size ${sizeMb.toFixed(1)} MB exceeds limit ${limitMb} MB (${exePath})`,
+  };
 }

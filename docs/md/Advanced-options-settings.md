@@ -117,9 +117,6 @@ ShowMenubar = true
 ; version 3.7)
 ShowMenubarWithTabs = false
 
-; if true, show tips on the home page (introduced in version 3.7)
-ShowTips = true
-
 ; up to 13 custom colors for the background color picker, separated by space
 ; (e.g. '#ff0000 #00ff00 #0000ff') (introduced in version 3.7)
 CustomColors =
@@ -641,7 +638,7 @@ AntiGravity [
     ; if true, pass --dangerously-skip-permissions to Antigravity CLI so it can
     ; read the current file etc. in headless print mode (agy cannot prompt for
     ; permissions with -p)
-    AutoApprove = true
+    AutoApprove = false
 
     ; background color of the Antigravity chat panel
     BgColor = #ffffff

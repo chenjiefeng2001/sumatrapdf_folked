@@ -58,56 +58,64 @@ startxref
 
 // Generate files
 const files: { name: string; desc: string; data: () => Uint8Array | string }[] = [
-  { name: "the-giant.pdf", desc: "简约文本 100 页", data: () => {
-    // Build a 100-page PDF by repeating the template
-    const pages: string[] = [];
-    const objs: string[] = [];
-    let objNum = 1;
-    const pageRefs: string[] = [];
+  {
+    name: "the-giant.pdf",
+    desc: "简约文本 100 页",
+    data: () => {
+      // Build a 100-page PDF by repeating the template
+      const pages: string[] = [];
+      const objs: string[] = [];
+      let objNum = 1;
+      const pageRefs: string[] = [];
 
-    // Catalog
-    objs.push(`${objNum} 0 obj\n<< /Type /Catalog /Pages ${objNum + 1} 0 R >>\nendobj\n`);
-    objNum++;
-    // Pages
-    const kids = Array.from({length: 100}, (_, i) => `${objNum + 1 + i * 4} 0 R`).join(" ");
-    objs.push(`${objNum} 0 obj\n<< /Type /Pages /Kids [${kids}] /Count 100 >>\nendobj\n`);
-    objNum++;
+      // Catalog
+      objs.push(`${objNum} 0 obj\n<< /Type /Catalog /Pages ${objNum + 1} 0 R >>\nendobj\n`);
+      objNum++;
+      // Pages
+      const kids = Array.from({ length: 100 }, (_, i) => `${objNum + 1 + i * 4} 0 R`).join(" ");
+      objs.push(`${objNum} 0 obj\n<< /Type /Pages /Kids [${kids}] /Count 100 >>\nendobj\n`);
+      objNum++;
 
-    for (let i = 0; i < 100; i++) {
-      const pageObj = objNum++;
-      const contentObj = objNum++;
-      objs.push(`${pageObj} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]\n   /Contents ${contentObj} 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n`);
-      objs.push(`${contentObj} 0 obj\n<< /Length 50 >>\nstream\nBT /F1 12 Tf 50 700 Td (Page ${i + 1} - Benchmark Test) Tj ET\nendstream\nendobj\n`);
-      pageRefs.push(String(pageObj));
-    }
-    const fontObj = objNum++;
-    objs.push(`${fontObj} 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n`);
+      for (let i = 0; i < 100; i++) {
+        const pageObj = objNum++;
+        const contentObj = objNum++;
+        objs.push(
+          `${pageObj} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]\n   /Contents ${contentObj} 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n`,
+        );
+        objs.push(
+          `${contentObj} 0 obj\n<< /Length 50 >>\nstream\nBT /F1 12 Tf 50 700 Td (Page ${i + 1} - Benchmark Test) Tj ET\nendstream\nendobj\n`,
+        );
+        pageRefs.push(String(pageObj));
+      }
+      const fontObj = objNum++;
+      objs.push(`${fontObj} 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n`);
 
-    // Build xref
-    let offset = 0;
-    const offsets: number[] = [];
-    const lines: string[] = ["%PDF-1.4\n"];
-    offsets.push(lines.join("").length);
-    for (const o of objs) {
-      lines.push(o);
-    }
-    const xrefOffset = lines.join("").length;
-    lines.push("xref\n");
-    lines.push(`0 ${objNum + 1}\n`);
-    lines.push("0000000000 65535 f \n");
-    for (const o of objs) {
-      // Simplified: use placeholder offsets. Real PDF needs exact byte offsets.
-      lines.push("0000000000 00000 n \n");
-    }
-    lines.push("trailer\n");
-    lines.push(`<< /Size ${objNum + 1} /Root 1 0 R >>\n`);
-    lines.push("startxref\n");
-    lines.push(`${xrefOffset}\n`);
-    lines.push("%%EOF");
+      // Build xref
+      let offset = 0;
+      const offsets: number[] = [];
+      const lines: string[] = ["%PDF-1.4\n"];
+      offsets.push(lines.join("").length);
+      for (const o of objs) {
+        lines.push(o);
+      }
+      const xrefOffset = lines.join("").length;
+      lines.push("xref\n");
+      lines.push(`0 ${objNum + 1}\n`);
+      lines.push("0000000000 65535 f \n");
+      for (const o of objs) {
+        // Simplified: use placeholder offsets. Real PDF needs exact byte offsets.
+        lines.push("0000000000 00000 n \n");
+      }
+      lines.push("trailer\n");
+      lines.push(`<< /Size ${objNum + 1} /Root 1 0 R >>\n`);
+      lines.push("startxref\n");
+      lines.push(`${xrefOffset}\n`);
+      lines.push("%%EOF");
 
-    const content = lines.join("");
-    return new TextEncoder().encode(content);
-  }},
+      const content = lines.join("");
+      return new TextEncoder().encode(content);
+    },
+  },
 ];
 
 // Write files

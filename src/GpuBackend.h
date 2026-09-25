@@ -49,7 +49,7 @@ struct GpuBackend {
     // temporary RT, because creating the bitmap on one RT and drawing on
     // another can cause driver-level crashes on certain GPU configurations.
     // Returns nullptr on failure.
-    ID2D1Bitmap* CreateBitmapFromPixmap(ID2D1DCRenderTarget* rt, const Pixmap* pixmap);
+    ID2D1Bitmap* CreateBitmapFromPixmap(ID2D1DCRenderTarget* rt, const Pixmap* pixmap, HRESULT* hrOut = nullptr);
 
     // Get a per-HDC D2D render target. The render target wraps an HDC so
     // D2D and GDI can interop on the same device context. Returns nullptr
@@ -100,6 +100,7 @@ struct GpuBackend {
     // acceptable since rendering is serialized in the UI thread).
     ID2D1DCRenderTarget* cachedRT = nullptr;
     HDC cachedHDC = nullptr;
+    HBITMAP cachedHBitmap = nullptr;
 
     // Generation counter for D2D device-affinity checks. Incremented when
     // the D2D factory is re-created (not yet wired; present for future use).

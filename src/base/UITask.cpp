@@ -121,7 +121,7 @@ void Destroy() {
     delete (TaskInfo*)AtomicPtrExchange(&gTaskInfoCache, nullptr);
 }
 
-void Post(const Func0& f, Kind kind) {
+bool Post(const Func0& f, Kind kind) {
     if (!gTaskDispatchHwnd) {
         // After Destroy() this is a worker that outlived the UI finishing its
         // work (the file-existence checker is the usual one). Nothing can run
@@ -131,7 +131,7 @@ void Post(const Func0& f, Kind kind) {
         // posts a *thread* message, which succeeds but is never routed to a
         // window proc, so the task would silently never run.
         ReportIf(!gWasDestroyed);
-        return;
+        return false;
     }
     TaskInfo* ti = AllocTaskInfo();
     ti->f = f;
@@ -140,7 +140,9 @@ void Post(const Func0& f, Kind kind) {
     if (!PostMessageW(gTaskDispatchHwnd, gExecuteTaskMessage, 0, (LPARAM)ti)) {
         // nothing will dispatch it, so don't lose the allocation
         FreeTaskInfo(ti);
+        return false;
     }
+    return true;
 } // NOLINT
 
 bool IsMainUIThread() {

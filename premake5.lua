@@ -1,6 +1,6 @@
 --[[
-To generate Visual Studio files (in vs2019/ or vs2022/ directory), run:
-scripts\premake-regenerate-vs-projects.ps1
+To generate Visual Studio files (in vs2022/ directory), run:
+bun cmd/premake.ts
 
 I'm using premake5 beta6 from https://premake.github.io/download/
 

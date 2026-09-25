@@ -629,11 +629,14 @@ static Pixmap* ScaleDjvuPixelsToPixmap(const u8* src, int srcDx, int srcDy, int 
 }
 
 Pixmap* EngineDjvuDec::RenderPage(RenderPageArgs& args) {
+    if (args.abort_requested && AtomicBoolGet(args.abort_requested)) {
+        return nullptr;
+    }
     DjvuDecAbortCookie* cookie = nullptr;
     const djvu_abort* ab = nullptr;
     if (args.cookie_out) {
         cookie = new DjvuDecAbortCookie();
-        *args.cookie_out = cookie;
+        SetRenderAbortCookie(args.cookie_out, cookie, args.cookie_out_lock, args.abort_requested);
         ab = &cookie->ab;
     }
     ScopedRenderSlot renderSlot(this, ab);

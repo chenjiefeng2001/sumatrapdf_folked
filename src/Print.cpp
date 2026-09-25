@@ -32,6 +32,7 @@
 
 class AbortCookieManager {
     Mutex cookieAccess;
+    AtomicBool abortRequested = 0;
 
   public:
     AbortCookie* cookie = nullptr;
@@ -40,13 +41,10 @@ class AbortCookieManager {
     ~AbortCookieManager() { Clear(); }
 
     void Abort() {
-        // don't call Clear() here: it re-locks cookieAccess, which is a
-        // non-recursive SRWLOCK, so we'd self-deadlock. Do the clear inline.
         ScopedMutex scope(&cookieAccess);
+        AtomicBoolSet(&abortRequested, true);
         if (cookie) {
             cookie->Abort();
-            delete cookie;
-            cookie = nullptr;
         }
     }
 
@@ -57,6 +55,8 @@ class AbortCookieManager {
             cookie = nullptr;
         }
     }
+    Mutex* CookieLock() { return &cookieAccess; }
+    AtomicBool* AbortRequested() { return &abortRequested; }
 };
 
 struct PrintData {
@@ -656,6 +656,8 @@ static bool PrintPageInBands(EngineBase& engine, HDC hdc, int pageNo, float zoom
         RenderPageArgs args(pageNo, zoom, rotation, &pageBand, target);
         if (abortCookie) {
             args.cookie_out = &abortCookie->cookie;
+            args.cookie_out_lock = abortCookie->CookieLock();
+            args.abort_requested = abortCookie->AbortRequested();
         }
         Pixmap* bmp = engine.RenderPage(args);
         if (abortCookie) {
@@ -2175,7 +2177,7 @@ PrintResult PrintFile(Str fileName, Str printerName, bool displayErrors, Str set
     fileName = path::NormalizeTemp(fileName);
     EngineBase* engine = CreateEngineFromFile(fileName, nullptr, true);
     if (!engine) {
-        TempStr msg = fmt("Couldn't open file '%s' for printing", fileName);
+        TempStr msg = fmt(_TRA("Couldn't open file '%s' for printing").s, fileName);
         MessageBoxWarningCond(displayErrors, msg, _TRA("Error"));
         return PrintResult::CannotLoadFile;
     }

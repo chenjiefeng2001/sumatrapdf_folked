@@ -23,6 +23,7 @@ DWORD g_mainThreadId = 0;
 GpuBackend* gGpuBackend = nullptr;
 
 GpuBackend::GpuBackend() {
+    SetPixmapD2dMainThreadId(GetCurrentThreadId());
 #ifdef DEBUG
     g_mainThreadId = GetCurrentThreadId();
 #endif
@@ -60,17 +61,17 @@ ID2D1DCRenderTarget* GpuBackend::GetRenderTarget(HDC hdc) {
     if (!factory || !hdc) {
         return nullptr;
     }
-    // Return the cached RT if it's for the same HDC (common case during a
-    // single WM_PAINT where the same HDC is used for all tiles).
-    if (cachedRT && cachedHDC == hdc) {
+    // Return the cached RT if it's for the same HDC and selected bitmap.
+    HBITMAP currentBitmap = (HBITMAP)GetCurrentObject(hdc, OBJ_BITMAP);
+    if (cachedRT && cachedHDC == hdc && cachedHBitmap == currentBitmap) {
         return cachedRT;
     }
 
     // Release the old RT before creating a new one.
     if (cachedRT) {
-        cachedRT->Release();
-        cachedRT = nullptr;
+        SafeReleaseSeh(&cachedRT);
         cachedHDC = nullptr;
+        cachedHBitmap = nullptr;
     }
 
     D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
@@ -79,7 +80,7 @@ ID2D1DCRenderTarget* GpuBackend::GetRenderTarget(HDC hdc) {
 
     HRESULT hr = factory->CreateDCRenderTarget(&props, &cachedRT);
     if (FAILED(hr) || !cachedRT) {
-        cachedRT = nullptr;
+        SafeReleaseSeh(&cachedRT);
         return nullptr;
     }
 
@@ -129,12 +130,12 @@ ID2D1DCRenderTarget* GpuBackend::GetRenderTarget(HDC hdc) {
     }
     hr = cachedRT->BindDC(hdc, &rc);
     if (FAILED(hr)) {
-        cachedRT->Release();
-        cachedRT = nullptr;
+        SafeReleaseSeh(&cachedRT);
         return nullptr;
     }
 
     cachedHDC = hdc;
+    cachedHBitmap = currentBitmap;
     return cachedRT;
 }
 
@@ -146,9 +147,9 @@ void GpuBackend::RecreateRenderTarget() {
     // TODO: add CrashIf if crash reporting infrastructure is available.
 #endif
     if (cachedRT) {
-        cachedRT->Release();
-        cachedRT = nullptr;
+        SafeReleaseSeh(&cachedRT);
         cachedHDC = nullptr;
+        cachedHBitmap = nullptr;
     }
     // Bump the generation so that all previously-uploaded ID2D1Bitmap
     // instances are detected as stale on the next PaintTile and are
@@ -164,8 +165,14 @@ void GpuBackend::RecreateRenderTarget() {
         deviceGeneration);
 }
 
-ID2D1Bitmap* GpuBackend::CreateBitmapFromPixmap(ID2D1DCRenderTarget* rt, const Pixmap* pixmap) {
+ID2D1Bitmap* GpuBackend::CreateBitmapFromPixmap(ID2D1DCRenderTarget* rt, const Pixmap* pixmap, HRESULT* hrOut) {
+    if (hrOut) {
+        *hrOut = S_OK;
+    }
     if (!factory || !rt || !pixmap || !pixmap->hbmp) {
+        if (hrOut) {
+            *hrOut = E_INVALIDARG;
+        }
         return nullptr;
     }
 
@@ -180,7 +187,10 @@ ID2D1Bitmap* GpuBackend::CreateBitmapFromPixmap(ID2D1DCRenderTarget* rt, const P
     // We need pixel data to create the D2D bitmap. The Pixmap stores its
     // pixel data in a DIB section accessible via pixmap->data. Read the
     // pixels directly from there rather than round-tripping through GDI.
-    if (!pixmap->data || pixmap->width <= 0 || pixmap->height <= 0) {
+    if (!pixmap->data || pixmap->width <= 0 || pixmap->height <= 0 || pixmap->format == PixmapFormat::Native) {
+        if (hrOut) {
+            *hrOut = E_INVALIDARG;
+        }
         return nullptr;
     }
 
@@ -206,15 +216,22 @@ ID2D1Bitmap* GpuBackend::CreateBitmapFromPixmap(ID2D1DCRenderTarget* rt, const P
     //   ID2D1RenderTarget::CreateBitmap       expects top-down→  upright on screen
     int w = pixmap->width;
     int h = pixmap->height;
-    int stride = pixmap->stride;
-    if (stride <= 0) {
-        stride = w * 4; // fallback for BGRA8
-    }
-
     D2D1_SIZE_U size = D2D1::SizeU((UINT32)w, (UINT32)h);
-    int pitch = (w * 4 + 3) & ~3; // 4-byte aligned BGRA stride
-    u8* buf = AllocArray<u8>(h * pitch);
+    i64 pitch64 = ((i64)w * 4 + 3) & ~3;
+    constexpr i64 kMaxD2dUploadBytes = 256ll * 1024 * 1024;
+    if (pitch64 <= 0 || h <= 0 || pitch64 > kMaxD2dUploadBytes / h) {
+        if (hrOut) {
+            *hrOut = E_OUTOFMEMORY;
+        }
+        return nullptr;
+    }
+    i64 bytes64 = pitch64 * h;
+    int pitch = (int)pitch64;
+    u8* buf = AllocArray<u8>((int)bytes64);
     if (!buf) {
+        if (hrOut) {
+            *hrOut = E_OUTOFMEMORY;
+        }
         return nullptr;
     }
 
@@ -224,18 +241,22 @@ ID2D1Bitmap* GpuBackend::CreateBitmapFromPixmap(ID2D1DCRenderTarget* rt, const P
     // B8G8R8A8. We handle it below by never blindly memcpy-ing RGBA8
     // (we fall through to the pixel loop and swizzle on the fly).
     int srcBpp = pixmap->format == PixmapFormat::BGR8 ? 3 : 4;
-    int srcStride = pixmap->stride > 0 ? pixmap->stride : w * srcBpp;
+    i64 srcStride64 = pixmap->stride > 0 ? pixmap->stride : (i64)w * srcBpp;
+    if (srcStride64 > INT_MAX || srcStride64 < (i64)w * srcBpp) {
+        free(buf);
+        if (hrOut) {
+            *hrOut = E_INVALIDARG;
+        }
+        return nullptr;
+    }
+    int srcStride = (int)srcStride64;
 
     // Defensive bounds: guard against corrupted-PDF scenarios where the
     // DIB section's stride or pixel depth is inconsistent with the
     // Pixmap metadata (e.g. a PDF repair changes the page dimensions
-    // but the cached Pixmap has stale width/height). If the stride is
-    // suspicious (< w*srcBpp meaning rows overlap), bail out early
+    // but the cached Pixmap has stale width/height). If the stride
+    // is suspicious (< w*srcBpp meaning rows overlap), bail out early
     // rather than memcpy past the buffer end.
-    if (srcStride < w * srcBpp) {
-        free(buf);
-        return nullptr;
-    }
 
 #ifdef DEBUG
     // Sanity check: srcStride should not be pathologically large (more
@@ -282,8 +303,12 @@ ID2D1Bitmap* GpuBackend::CreateBitmapFromPixmap(ID2D1DCRenderTarget* rt, const P
     ID2D1Bitmap* bitmap = nullptr;
     HRESULT hr = rt->CreateBitmap(size, buf, pitch, props, &bitmap);
     free(buf);
+    if (hrOut) {
+        *hrOut = hr;
+    }
 
     if (FAILED(hr) || !bitmap) {
+        SafeReleaseSeh(&bitmap);
         logf("[RenderCache Diagnostic] D2D CreateBitmap failed! w=%d h=%d pitch=%d HRESULT=0x%08X\n", w, h, pitch,
              (unsigned)hr);
         if (hr == D2DERR_RECREATE_TARGET) {
@@ -314,13 +339,29 @@ ID2D1DCRenderTarget* GpuBackend::GetRT(HDC hdc) {
     return gGpuBackend->GetRenderTarget(hdc);
 }
 
+static bool FinishD2dDraw(ID2D1DCRenderTarget* rt, Str name) {
+    HRESULT hr = rt->EndDraw();
+    if (SUCCEEDED(hr)) {
+        return true;
+    }
+    logf("[RenderCache Diagnostic] D2D EndDraw failed in %s HRESULT=0x%08X\n", name, (unsigned)hr);
+    if (hr == D2DERR_RECREATE_TARGET && gGpuBackend) {
+        gGpuBackend->RecreateRenderTarget();
+    }
+    return false;
+}
+
 ID2D1SolidColorBrush* GpuBackend::GetBrush(ID2D1DCRenderTarget* rt, COLORREF color, u8 alpha) {
     if (!rt) return nullptr;
     D2D1_COLOR_F d2dColor = D2D1::ColorF((GetRValue(color) / 255.0f), (GetGValue(color) / 255.0f),
                                          (GetBValue(color) / 255.0f), alpha / 255.0f);
     ID2D1SolidColorBrush* brush = nullptr;
     HRESULT hr = rt->CreateSolidColorBrush(d2dColor, &brush);
-    return SUCCEEDED(hr) ? brush : nullptr;
+    if (FAILED(hr)) {
+        SafeReleaseSeh(&brush);
+        return nullptr;
+    }
+    return brush;
 }
 
 bool GpuBackend::DrawOverlayRects(HDC hdc, Rect screenRc, Vec<Rect>& rects, COLORREF color, u8 alpha, int pad,
@@ -334,7 +375,7 @@ bool GpuBackend::DrawOverlayRects(HDC hdc, Rect screenRc, Vec<Rect>& rects, COLO
 
     ID2D1SolidColorBrush* brush = GetBrush(rt, color, alpha);
     if (!brush) {
-        rt->EndDraw();
+        FinishD2dDraw(rt, StrL("DrawOverlayRects"));
         return false;
     }
 
@@ -352,24 +393,18 @@ bool GpuBackend::DrawOverlayRects(HDC hdc, Rect screenRc, Vec<Rect>& rects, COLO
 
         if (drawBorder && pad > 0) {
             ID2D1SolidColorBrush* borderBrush = GetBrush(rt, RGB(0, 0, 0), alpha);
-            if (borderBrush) {
-                rt->DrawRectangle(&d2drc, borderBrush, (float)pad);
-                borderBrush->Release();
+            if (!borderBrush) {
+                brush->Release();
+                FinishD2dDraw(rt, StrL("DrawOverlayRects"));
+                return false;
             }
+            rt->DrawRectangle(&d2drc, borderBrush, (float)pad);
+            borderBrush->Release();
         }
     }
 
     brush->Release();
-    HRESULT hrEnd = rt->EndDraw();
-    if (FAILED(hrEnd)) {
-        logf("[RenderCache Diagnostic] D2D EndDraw failed in DrawOverlayRects HRESULT=0x%08X\n", (unsigned)hrEnd);
-        if (hrEnd == D2DERR_RECREATE_TARGET && gGpuBackend) {
-            InterlockedIncrement(&gDeviceGenRecreations);
-            gGpuBackend->RecreateRenderTarget();
-        }
-        return false;
-    }
-    return true;
+    return FinishD2dDraw(rt, StrL("DrawOverlayRects"));
 }
 
 bool GpuBackend::DrawDashedBorder(HDC hdc, Rect rect, COLORREF color, float width) {
@@ -383,6 +418,10 @@ bool GpuBackend::DrawDashedBorder(HDC hdc, Rect rect, COLORREF color, float widt
                                     10.0f, D2D1_DASH_STYLE_DASH, 0.0f);
     if (!gGpuBackend || !gGpuBackend->factory ||
         FAILED(gGpuBackend->factory->CreateStrokeStyle(props, nullptr, 0, &dashStyle))) {
+        SafeReleaseSeh(&dashStyle);
+        return false;
+    }
+    if (!dashStyle) {
         return false;
     }
 
@@ -390,7 +429,7 @@ bool GpuBackend::DrawDashedBorder(HDC hdc, Rect rect, COLORREF color, float widt
 
     ID2D1SolidColorBrush* brush = GetBrush(rt, color, 255);
     if (!brush) {
-        rt->EndDraw();
+        FinishD2dDraw(rt, StrL("DrawDashedBorder"));
         dashStyle->Release();
         return false;
     }
@@ -400,16 +439,7 @@ bool GpuBackend::DrawDashedBorder(HDC hdc, Rect rect, COLORREF color, float widt
 
     brush->Release();
     dashStyle->Release();
-    HRESULT hrEnd = rt->EndDraw();
-    if (FAILED(hrEnd)) {
-        logf("[RenderCache Diagnostic] D2D EndDraw failed in DrawDashedBorder HRESULT=0x%08X\n", (unsigned)hrEnd);
-        if (hrEnd == D2DERR_RECREATE_TARGET && gGpuBackend) {
-            InterlockedIncrement(&gDeviceGenRecreations);
-            gGpuBackend->RecreateRenderTarget();
-        }
-        return false;
-    }
-    return true;
+    return FinishD2dDraw(rt, StrL("DrawDashedBorder"));
 }
 
 bool GpuBackend::DrawResizeHandle(HDC hdc, int x, int y, int size) {
@@ -421,7 +451,7 @@ bool GpuBackend::DrawResizeHandle(HDC hdc, int x, int y, int size) {
     // White fill
     ID2D1SolidColorBrush* fillBrush = GetBrush(rt, RGB(255, 255, 255), 255);
     if (!fillBrush) {
-        rt->EndDraw();
+        FinishD2dDraw(rt, StrL("DrawResizeHandle"));
         return false;
     }
 
@@ -431,21 +461,14 @@ bool GpuBackend::DrawResizeHandle(HDC hdc, int x, int y, int size) {
 
     // Black border
     ID2D1SolidColorBrush* borderBrush = GetBrush(rt, RGB(0, 0, 0), 255);
-    if (borderBrush) {
-        rt->DrawRectangle(&rc, borderBrush, 1.0f);
-        borderBrush->Release();
-    }
-
-    HRESULT hrEnd = rt->EndDraw();
-    if (FAILED(hrEnd)) {
-        logf("[RenderCache Diagnostic] D2D EndDraw failed in DrawResizeHandle HRESULT=0x%08X\n", (unsigned)hrEnd);
-        if (hrEnd == D2DERR_RECREATE_TARGET && gGpuBackend) {
-            InterlockedIncrement(&gDeviceGenRecreations);
-            gGpuBackend->RecreateRenderTarget();
-        }
+    if (!borderBrush) {
+        FinishD2dDraw(rt, StrL("DrawResizeHandle"));
         return false;
     }
-    return true;
+    rt->DrawRectangle(&rc, borderBrush, 1.0f);
+    borderBrush->Release();
+
+    return FinishD2dDraw(rt, StrL("DrawResizeHandle"));
 }
 
 bool GpuBackend::DrawFillRect(HDC hdc, Rect rect, COLORREF color, u8 alpha) {
@@ -456,24 +479,14 @@ bool GpuBackend::DrawFillRect(HDC hdc, Rect rect, COLORREF color, u8 alpha) {
 
     ID2D1SolidColorBrush* brush = GetBrush(rt, color, alpha);
     if (!brush) {
-        rt->EndDraw();
+        FinishD2dDraw(rt, StrL("DrawFillRect"));
         return false;
     }
 
     D2D1_RECT_F rc = D2D1::RectF((float)rect.x, (float)rect.y, (float)(rect.x + rect.dx), (float)(rect.y + rect.dy));
     rt->FillRectangle(&rc, brush);
     brush->Release();
-
-    HRESULT hrEnd = rt->EndDraw();
-    if (FAILED(hrEnd)) {
-        logf("[RenderCache Diagnostic] D2D EndDraw failed in DrawFillRect HRESULT=0x%08X\n", (unsigned)hrEnd);
-        if (hrEnd == D2DERR_RECREATE_TARGET && gGpuBackend) {
-            InterlockedIncrement(&gDeviceGenRecreations);
-            gGpuBackend->RecreateRenderTarget();
-        }
-        return false;
-    }
-    return true;
+    return FinishD2dDraw(rt, StrL("DrawFillRect"));
 }
 
 bool GpuBackend::DrawSolidBorder(HDC hdc, Rect rect, COLORREF color, float width) {
@@ -484,24 +497,14 @@ bool GpuBackend::DrawSolidBorder(HDC hdc, Rect rect, COLORREF color, float width
 
     ID2D1SolidColorBrush* brush = GetBrush(rt, color, 255);
     if (!brush) {
-        rt->EndDraw();
+        FinishD2dDraw(rt, StrL("DrawSolidBorder"));
         return false;
     }
 
     D2D1_RECT_F rc = D2D1::RectF((float)rect.x, (float)rect.y, (float)(rect.x + rect.dx), (float)(rect.y + rect.dy));
     rt->DrawRectangle(&rc, brush, width);
     brush->Release();
-
-    HRESULT hrEnd = rt->EndDraw();
-    if (FAILED(hrEnd)) {
-        logf("[RenderCache Diagnostic] D2D EndDraw failed in DrawSolidBorder HRESULT=0x%08X\n", (unsigned)hrEnd);
-        if (hrEnd == D2DERR_RECREATE_TARGET && gGpuBackend) {
-            InterlockedIncrement(&gDeviceGenRecreations);
-            gGpuBackend->RecreateRenderTarget();
-        }
-        return false;
-    }
-    return true;
+    return FinishD2dDraw(rt, StrL("DrawSolidBorder"));
 }
 
 #endif // _MSC_VER

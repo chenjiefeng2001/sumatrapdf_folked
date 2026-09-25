@@ -105,6 +105,11 @@ static TempStr RelPathFromBaseTemp(Str filePath, Str baseDir) {
 struct MarkdownCacheEntry {
     Str url;
     Str data;
+
+    ~MarkdownCacheEntry() {
+        str::Free(url);
+        str::Free(data);
+    }
 };
 
 struct MarkdownTocTraceItem {
@@ -750,7 +755,7 @@ float MarkdownModel::GetNextZoomStep(float towardsLevel) const {
 MarkdownCacheEntry* MarkdownModel::FindDataForUrl(Str url) const {
     TempStr plainUrl = url::GetFullPathTemp(url);
     for (MarkdownCacheEntry* e : urlDataCache) {
-        if (str::Eq(e->url, plainUrl)) {
+        if (e && str::Eq(e->url, plainUrl)) {
             return e;
         }
     }
@@ -832,6 +837,8 @@ void MarkdownModel::OnDocumentComplete(Str url) {
 }
 
 Str MarkdownModel::GetDataForUrl(Str url) {
+    constexpr int kMarkdownCacheMaxEntries = 512;
+    constexpr i64 kMarkdownCacheMaxBytes = 128ll * 1024 * 1024;
     ScopedMutex scope(&docAccess);
     TempStr plainUrl = NormalizeMarkdownUrlTemp(url);
     MarkdownCacheEntry* e = FindDataForUrl(plainUrl);
@@ -845,7 +852,7 @@ Str MarkdownModel::GetDataForUrl(Str url) {
         int n = 0;
         u8* js = GetEmbeddedFileData(StrL("mermaid.min.js"), &n);
         if (js && n > 0) {
-            data = str::Dup(poolAlloc, Str((const char*)js, n));
+            data = str::Dup(Str((const char*)js, n));
         }
         free(js);
     } else {
@@ -860,6 +867,7 @@ Str MarkdownModel::GetDataForUrl(Str url) {
             Str md = file::ReadFile(filePath);
             if (md) {
                 data = MarkdownToHtmlPage(md);
+                str::Free(md);
             }
         } else if (filePath) {
             data = file::ReadFile(filePath);
@@ -869,10 +877,35 @@ Str MarkdownModel::GetDataForUrl(Str url) {
     if (!data) {
         return {};
     }
+    i64 entryBytes = (i64)len(data) + len(plainUrl);
+    if (entryBytes > kMarkdownCacheMaxBytes) {
+        str::Free(data);
+        return {};
+    }
 
-    Str urlDup = str::Dup(poolAlloc, plainUrl);
-    e = new MarkdownCacheEntry{urlDup, str::Dup(poolAlloc, data)};
-    urlDataCache.Append(e);
+    i64 cachedBytes = 0;
+    for (MarkdownCacheEntry* entry : urlDataCache) {
+        if (entry) {
+            cachedBytes += (i64)len(entry->url) + len(entry->data);
+        }
+    }
+    while (len(urlDataCache) > 0 &&
+           (len(urlDataCache) >= kMarkdownCacheMaxEntries || cachedBytes + entryBytes > kMarkdownCacheMaxBytes)) {
+        MarkdownCacheEntry* oldest = urlDataCache[0];
+        cachedBytes -= (i64)len(oldest->url) + len(oldest->data);
+        delete oldest;
+        urlDataCache.RemoveAt(0);
+    }
+    if (len(urlDataCache) >= kMarkdownCacheMaxEntries || cachedBytes + entryBytes > kMarkdownCacheMaxBytes) {
+        str::Free(data);
+        return {};
+    }
+
+    e = new MarkdownCacheEntry{str::Dup(plainUrl), data};
+    if (!e->url || !urlDataCache.Append(e)) {
+        delete e;
+        return {};
+    }
     return e->data;
 }
 

@@ -15,13 +15,13 @@
 
 #include "base/Base.h"
 #include "base/Win.h"
+#include "gui/win/Renderer.h"
 
 #ifdef _MSC_VER
 #include <d2d1.h>
 #include <d2d1helper.h>
 #include <dwrite.h>
 #include "base/ComSafe.h"
-#include "gui/win/Renderer.h"
 #include "gui/win/DWriteText.h"
 
 // last: Log.h
@@ -47,6 +47,9 @@ bool IsD2D1Available() {
     EnsureD2D1Loaded();
     return gFnD2D1CreateFactory != nullptr;
 }
+
+#endif // _MSC_VER — everything below up to D2DRenderer is platform-independent
+       // (GDI only) so the mingw cross-build gets a working GDI backend.
 
 Renderer* gRenderer = nullptr;
 RendererBackendKind gRendererKind = RendererBackendKind::GDI;
@@ -317,6 +320,7 @@ void GDIRenderer::SetTextAntialias(bool enable) {
     (void)enable;
 }
 
+#ifdef _MSC_VER
 // ── D2DRenderer ──────────────────────────────────────────────────────
 
 D2DRenderer::D2DRenderer() {
@@ -360,6 +364,8 @@ bool D2DRenderer::BeginPaint(HWND hwndIn, PAINTSTRUCT* ps) {
             0, D2D1_RENDER_TARGET_USAGE_GDI_COMPATIBLE);
         HRESULT hr = factory->CreateDCRenderTarget(&props, &rt);
         if (FAILED(hr) || !rt) {
+            SafeReleaseSeh(&cachedBrush);
+            SafeReleaseSeh(&rt);
             return false;
         }
     }
@@ -384,6 +390,8 @@ bool D2DRenderer::BeginPaint(HWND hwndIn, PAINTSTRUCT* ps) {
     }
     HRESULT hr = rt->BindDC(hdc, &rc);
     if (FAILED(hr)) {
+        SafeReleaseSeh(&cachedBrush);
+        SafeReleaseSeh(&rt);
         return false;
     }
     rt->BeginDraw();
@@ -397,6 +405,8 @@ void D2DRenderer::EndPaint() {
             // D2DERR_RECREATE_TARGET etc.: the caller keeps drawing via GDI on
             // its next paint cycle (BeginPaint will lazily rebind).
             logf("[Renderer] D2D EndDraw failed HRESULT=0x%08X\n", (unsigned)hr);
+            SafeReleaseSeh(&cachedBrush);
+            SafeReleaseSeh(&rt);
         }
     }
     hdc = nullptr;
@@ -670,11 +680,6 @@ Renderer* CreateRenderer() {
 
 #else
 // Mingw stub — Direct2D/DirectWrite not supported on the Mingw toolchain
-Renderer* gRenderer = nullptr;
-RendererBackendKind gRendererKind = RendererBackendKind::GDI;
-
-void Renderer::DrawSvgIcon(const char* svgData, int svgLen, RECT rc, RgbaColor color) {}
-
 bool IsD2D1Available() {
     return false;
 }

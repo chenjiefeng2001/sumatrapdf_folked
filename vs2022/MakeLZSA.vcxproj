@@ -951,7 +951,6 @@
     <ClInclude Include="..\src\base\DirScan.h" />
     <ClInclude Include="..\src\base\File.h" />
     <ClInclude Include="..\src\base\Geom.h" />
-    <ClInclude Include="..\src\base\Log.h" />
     <ClInclude Include="..\src\base\LzmaSimpleArchive.h" />
     <ClInclude Include="..\src\base\Pixmap.h" />
     <ClInclude Include="..\src\base\Str.h" />

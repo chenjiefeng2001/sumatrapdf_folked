@@ -47,7 +47,8 @@ static LRESULT CALLBACK WndProcThumbnail(HWND hwnd, UINT msg, WPARAM wp, LPARAM 
             if (gRenderer && gRenderer->BeginPaint(hwnd, &ps)) {
                 gRenderer->FillRect(ps.rcPaint, RgbaColor(ThemeControlBackgroundColor()));
                 if (!panel || panel->selectedPage < 0) {
-                    gRenderer->DrawTextW(WStrL(L"No thumbnails"), rc, RgbaColor(ThemeWindowTextColor()),
+                    TempWStr noThumbs = ToWStrTemp(_TRA("No thumbnails"));
+                    gRenderer->DrawTextW(WStr(noThumbs.s, noThumbs.len), rc, RgbaColor(ThemeWindowTextColor()),
                                          GetDefaultGuiFont()->GetHFont(), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 } else {
                     int y = -panel->scrollPos;
@@ -58,9 +59,9 @@ static LRESULT CALLBACK WndProcThumbnail(HWND hwnd, UINT msg, WPARAM wp, LPARAM 
                             InflateRect(&selRc, -2, -2);
                             gRenderer->FillRect(selRc, RgbaColor(ThemeWindowLinkColor()));
                         }
-                        WCHAR buf[32];
-                        int cch = swprintf_s(buf, L"Page %d", i + 1);
-                        gRenderer->DrawTextW(WStr(buf, cch), itemRc, RgbaColor(ThemeWindowTextColor()),
+                        TempStr label = fmt(_TRA("Page %d").s, i + 1);
+                        TempWStr wlabel = ToWStrTemp(label);
+                        gRenderer->DrawTextW(WStr(wlabel.s, wlabel.len), itemRc, RgbaColor(ThemeWindowTextColor()),
                                              GetDefaultGuiFont()->GetHFont(), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                     }
                 }
@@ -78,7 +79,7 @@ static LRESULT CALLBACK WndProcThumbnail(HWND hwnd, UINT msg, WPARAM wp, LPARAM 
             if (!panel || panel->selectedPage < 0) {
                 SetBkMode(hdc, TRANSPARENT);
                 SetTextColor(hdc, ThemeWindowTextColor());
-                TempWStr text = ToWStrTemp(StrL("No thumbnails"));
+                TempWStr text = ToWStrTemp(_TRA("No thumbnails"));
                 DrawTextW(hdc, text.s, text.len, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             } else {
                 int y = -panel->scrollPos;
@@ -91,11 +92,11 @@ static LRESULT CALLBACK WndProcThumbnail(HWND hwnd, UINT msg, WPARAM wp, LPARAM 
                         FillRect(hdc, &selRc, selBrush);
                         DeleteObject(selBrush);
                     }
-                    WCHAR buf[32];
-                    int cch = swprintf_s(buf, L"Page %d", i + 1);
+                    TempStr label = fmt(_TRA("Page %d").s, i + 1);
+                    TempWStr wlabel = ToWStrTemp(label);
                     SetBkMode(hdc, TRANSPARENT);
                     SetTextColor(hdc, ThemeWindowTextColor());
-                    DrawTextW(hdc, buf, cch, &itemRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                    DrawTextW(hdc, wlabel.s, wlabel.len, &itemRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 }
             }
             EndPaint(hwnd, &ps);

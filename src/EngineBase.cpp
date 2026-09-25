@@ -363,13 +363,14 @@ static bool VisitTocTreeWithParentRecursive(TocItem* ti, TocItem* parent, const 
 }
 
 RenderPageArgs::RenderPageArgs(int pageNo, float zoom, int rotation, RectF* pageRect, RenderTarget target,
-                               AbortCookie** cookie_out) {
+                               AbortCookie** cookie_out, Mutex* cookie_out_lock) {
     this->pageNo = pageNo;
     this->zoom = zoom;
     this->rotation = rotation;
     this->pageRect = pageRect;
     this->target = target;
     this->cookie_out = cookie_out;
+    this->cookie_out_lock = cookie_out_lock;
 }
 
 int EngineBase::AddRef() {

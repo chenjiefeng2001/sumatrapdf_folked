@@ -31,6 +31,7 @@ struct PageRenderServiceData {
     ThreadHandle worker = nullptr;
     EngineBase* engine = nullptr;
     AbortCookie* activeCookie = nullptr;
+    AtomicBool activeAbortRequested = 0;
     Vec<PageRenderPolicyRequest> requests;
     Vec<PageRenderCacheEntry> cache;
     PageRenderNotify* notify = nullptr;
@@ -40,6 +41,7 @@ struct PageRenderServiceData {
     u64 useSerial = 0;
     u32 generation = 1;
     PageRenderKey activeKey;
+    u32 activeGeneration = 0;
     bool hasActive = false;
     bool stopping = false;
     bool workerStopped = false;
@@ -147,18 +149,23 @@ static void RenderWorker(PageRenderServiceData* data) {
         PageRenderPolicyRequest request = data->requests[requestIdx];
         data->requests.RemoveAt(requestIdx);
         data->activeKey = request.key;
+        data->activeGeneration = request.generation;
         data->hasActive = true;
         data->activeCookie = nullptr;
+        AtomicBoolSet(&data->activeAbortRequested, false);
         data->mutex.Unlock();
 
         RenderPageArgs args(request.key.pageNo, request.key.zoom, request.key.rotation, nullptr, RenderTarget::View,
-                            &data->activeCookie);
+                            &data->activeCookie, &data->mutex);
+        args.abort_requested = &data->activeAbortRequested;
         Pixmap* pixmap = data->engine->RenderPage(args);
 
         data->mutex.Lock();
         delete data->activeCookie;
         data->activeCookie = nullptr;
         data->hasActive = false;
+        data->activeGeneration = 0;
+        AtomicBoolSet(&data->activeAbortRequested, false);
         bool accepted = false;
         if (!data->stopping && request.generation == data->generation && pixmap) {
             accepted = AddToCache(data, request.key, pixmap);
@@ -208,6 +215,7 @@ PageRenderService::~PageRenderService() {
     serviceData->mutex.Lock();
     serviceData->stopping = true;
     serviceData->requests.Reset();
+    AtomicBoolSet(&serviceData->activeAbortRequested, true);
     if (serviceData->activeCookie) {
         serviceData->activeCookie->Abort();
     }
@@ -232,6 +240,7 @@ void PageRenderService::NewGeneration() {
     serviceData->generation++;
     serviceData->requests.Reset();
     ClearCache(serviceData);
+    AtomicBoolSet(&serviceData->activeAbortRequested, true);
     if (serviceData->activeCookie) {
         serviceData->activeCookie->Abort();
     }
@@ -241,7 +250,8 @@ void PageRenderService::Request(PageRenderKey key, PageRenderPriority priority) 
     auto* serviceData = ServiceData(this);
     ScopedMutex lock(&serviceData->mutex);
     if (serviceData->stopping || FindCached(serviceData, key) >= 0 ||
-        (serviceData->hasActive && serviceData->activeKey == key)) {
+        (serviceData->hasActive && serviceData->activeKey == key &&
+         serviceData->activeGeneration == serviceData->generation)) {
         return;
     }
     PageRenderPolicyRequest request;

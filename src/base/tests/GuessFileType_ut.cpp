@@ -486,6 +486,70 @@ static void extMapTest() {
     utassert(!GetExtForFileTypeTemp(FileType::Unknown));
 }
 
+static void epsTest() {
+    u8 eps[128];
+    memset(eps, 0x8d, sizeof(eps));
+    eps[0] = 0xC5;
+    eps[1] = 0xD0;
+    eps[2] = 0xD3;
+    eps[3] = 0xC6;
+    utassert(infoFromBytes(eps, dimofi(eps)).ft == FileType::PS);
+    utassert(infoFromBytes(eps, 64).ft == FileType::PS);
+    utassert(infoFromBytes(eps, 63).ft == FileType::Unknown);
+
+    static const char kPS[] = "%!PS-Adobe-3.0";
+    int psStart = 64;
+    memcpy(eps + psStart, kPS, dimofi(kPS) - 1);
+    eps[4] = (u8)psStart;
+    eps[5] = 0;
+    eps[6] = 0;
+    eps[7] = 0;
+    utassert(infoFromBytes(eps, dimofi(eps)).ft == FileType::PS);
+
+    eps[psStart] = 'x';
+    utassert(infoFromBytes(eps, dimofi(eps)).ft == FileType::Unknown);
+}
+
+static void tgaTest() {
+    u8 tga[18 + 26] = {};
+    tga[2] = 2;
+    tga[12] = 64;
+    tga[14] = 32;
+    tga[16] = 24;
+    FileTypeInfo fti = infoFromBytes(tga, 18);
+    utassert(fti.ft == FileType::Tga);
+    utassert(fti.imageDx == 64);
+    utassert(fti.imageDy == 32);
+
+    tga[2] = 5;
+    utassert(infoFromBytes(tga, 18).ft == FileType::Unknown);
+
+    memcpy(tga + 18 + 8, "TRUEVISION-XFILE.", sizeof("TRUEVISION-XFILE."));
+    fti = infoFromBytes(tga, dimofi(tga));
+    utassert(fti.ft == FileType::Tga);
+    utassert(fti.imageDx == 64);
+    utassert(fti.imageDy == 32);
+
+    tga[18 + 8 + 17] = 0x8d;
+    utassert(infoFromBytes(tga, dimofi(tga)).ft == FileType::Tga);
+
+    tga[18 + 8] = 'X';
+    utassert(infoFromBytes(tga, dimofi(tga)).ft == FileType::Unknown);
+}
+
+static void hugeOffsetTest() {
+    static const u8 tiffHugeIfdOff[] = {'M', 'M', 0, 0x2A, 0x7F, 0xFF, 0xFF, 0xFF, 0, 0};
+    utassert(infoFromBytes(tiffHugeIfdOff, dimofi(tiffHugeIfdOff)).ft == FileType::Tiff);
+
+    static const u8 tiffHugeValOff[] = {
+        'M', 'M', 0, 0x2A, 0, 0, 0, 8, 0, 1, 0x01, 0x00, 0, 4, 0, 0, 0, 5, 0x7F, 0xFF, 0xFF, 0xFF,
+    };
+    utassert(infoFromBytes(tiffHugeValOff, dimofi(tiffHugeValOff)).ft == FileType::Tiff);
+
+    static const u8 jxrHugeIfdOff[] = {'I', 'I', 0xBC, 0, 0xFF, 0xFF, 0xFF, 0x7F, 0, 0};
+    utassert(infoFromBytes(jxrHugeIfdOff, dimofi(jxrHugeIfdOff)).ft == FileType::Jxr);
+}
+
 void GuessFileTypeTest() {
     extMapTest();
     pngTest();
@@ -498,4 +562,7 @@ void GuessFileTypeTest() {
     heifTest();
     jxlTest();
     nonImageTest();
+    tgaTest();
+    epsTest();
+    hugeOffsetTest();
 }

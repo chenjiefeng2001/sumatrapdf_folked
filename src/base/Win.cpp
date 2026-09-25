@@ -3420,6 +3420,14 @@ void AddPathToRecentDocs(Str path) {
 }
 
 TempStr HGLOBALToStrTemp(HGLOBAL h, bool isUnicode) {
+    constexpr size_t kMaxDdeStringBytes = 1024 * 1024;
+    if (!h) {
+        return {};
+    }
+    size_t size = GlobalSize(h);
+    if (size == 0 || size > kMaxDdeStringBytes) {
+        return {};
+    }
     void* mem = GlobalLock(h);
     if (!mem) {
         return {};
@@ -3427,23 +3435,47 @@ TempStr HGLOBALToStrTemp(HGLOBAL h, bool isUnicode) {
 
     TempStr res;
     if (isUnicode) {
-        res = ToUtf8Temp(WStr((WCHAR*)mem));
+        if ((size % sizeof(WCHAR)) != 0 || ((uintptr_t)mem % alignof(WCHAR)) != 0) {
+            GlobalUnlock(h);
+            return {};
+        }
+        size_t cch = size / sizeof(WCHAR);
+        size_t zero = 0;
+        while (zero < cch && ((const WCHAR*)mem)[zero] != 0) {
+            zero++;
+        }
+        if (zero == cch) {
+            GlobalUnlock(h);
+            return {};
+        }
+        res = ToUtf8Temp(WStr((const WCHAR*)mem, (int)zero));
     } else {
-        res = str::DupTemp(Str((char*)mem));
+        const u8* bytes = (const u8*)mem;
+        const u8* zero = (const u8*)memchr(bytes, 0, size);
+        if (!zero) {
+            GlobalUnlock(h);
+            return {};
+        }
+        res = str::DupTemp(Str((const char*)bytes, (int)(zero - bytes)));
     }
     GlobalUnlock(h);
     return res;
 }
 
 HGLOBAL MemToHGLOBAL(void* src, int n, UINT flags) {
+    if (!src || n <= 0) {
+        return nullptr;
+    }
     HGLOBAL h = GlobalAlloc(flags, n);
     if (!h) {
         return nullptr;
     }
     void* d = GlobalLock(h);
-    if (d) {
-        memcpy(d, src, n);
+    if (!d) {
+        GlobalFree(h);
+        return nullptr;
     }
+    memcpy(d, src, n);
     GlobalUnlock(h);
     return h;
 }

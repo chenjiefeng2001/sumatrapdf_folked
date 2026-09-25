@@ -1544,7 +1544,7 @@ using Gdiplus::UnitPixel;
 using Gdiplus::Win32Error;
 
 void DrawHtmlPage(Gdiplus::Graphics* g, PlatformTextRender* textDraw, Vec<DrawInstr>* drawInstructions, float offX,
-                  float offY, bool showBbox, Color textColor, bool* abortCookie) {
+                  float offY, bool showBbox, Color textColor, AtomicBool* abortCookie) {
     Pen debugPen(Gdiplus::Color(255, 0, 0), 1);
     // Pen linePen(Gdiplus::Color(0, 0, 0), 2.f);
     Pen linePen(Gdiplus::Color(0x5F, 0x4B, 0x32), 2.f);
@@ -1567,7 +1567,7 @@ void DrawHtmlPage(Gdiplus::Graphics* g, PlatformTextRender* textDraw, Vec<DrawIn
         } else if (DrawInstrType::SetFont == i.type) {
             textDraw->SetFont(i.font);
         }
-        if (abortCookie && *abortCookie) {
+        if (abortCookie && AtomicBoolGet(abortCookie)) {
             break;
         }
     }
@@ -1625,7 +1625,7 @@ void DrawHtmlPage(Gdiplus::Graphics* g, PlatformTextRender* textDraw, Vec<DrawIn
         } else {
             ReportIf(true);
         }
-        if (abortCookie && *abortCookie) {
+        if (abortCookie && AtomicBoolGet(abortCookie)) {
             break;
         }
     }

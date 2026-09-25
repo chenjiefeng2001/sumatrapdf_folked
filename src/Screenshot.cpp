@@ -123,7 +123,8 @@ void RegisterScreenshotHotkey(HWND hwnd) {
     }
     BOOL ok = RegisterHotKey(hwnd, kScreenshotHotkeyId, mod, vk);
     if (!ok && !IsOtherSumatraProcessRunning()) {
-        MaybeDelayedWarningNotification(fmt("Couldn't register '%s' global hotkey for taking screenshots", shortcut));
+        MaybeDelayedWarningNotification(
+            fmt(_TRA("Couldn't register '%s' global hotkey for taking screenshots").s, shortcut));
     }
 }
 

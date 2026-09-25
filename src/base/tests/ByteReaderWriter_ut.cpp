@@ -9,6 +9,32 @@
 
 #define ABC "abc"
 void ByteOrderTests() {
+    {
+        const u8 data[] = {1, 2, 3, 4, 5, 6, 7, 8};
+        ByteReader r(data, dimofi(data));
+        utassert(r.CanRead(0, 8));
+        utassert(r.CanRead(8, 0));
+        utassert(!r.CanRead(0, -1));
+        utassert(!r.CanRead(-1, 1));
+        utassert(!r.CanRead(INT_MAX, INT_MAX));
+        utassert(!r.CanRead(1, 8));
+        utassert(r.UInt16LE(6) == 0x0807);
+        utassert(r.UInt32BE(4) == 0x05060708);
+        utassert(r.UInt64LE(0) == 0x0807060504030201ULL);
+        for (int off : {-1, 8, INT_MAX - 1, INT_MAX}) {
+            utassert(r.UInt8(off) == 0);
+            utassert(r.UInt16LE(off) == 0);
+            utassert(r.UInt16BE(off) == 0);
+            utassert(r.UInt32LE(off) == 0);
+            utassert(r.UInt32BE(off) == 0);
+            utassert(r.UInt64LE(off) == 0);
+            utassert(r.UInt64BE(off) == 0);
+        }
+        ByteReader empty(nullptr, 0);
+        utassert(!empty.CanRead(0, 1));
+        utassert(empty.UInt64LE(0) == 0);
+    }
+
     u8 d1[] = {0x00, 0x01,
                0x00,                               // to skip
                0x01, 0x00, 0xff, 0xfe, 0x00, 0x00, // to skip

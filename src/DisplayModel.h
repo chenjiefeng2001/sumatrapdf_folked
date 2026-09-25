@@ -139,6 +139,7 @@ struct DisplayModel : DocController {
 
     // controller-specific data (easier to save here than on MainWindow)
     Kind engineType = nullptr;
+    AtomicInt renderGeneration = 1;
 
     Synchronizer* pdfSync = nullptr;
 

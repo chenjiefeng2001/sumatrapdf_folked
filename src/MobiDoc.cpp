@@ -547,7 +547,7 @@ bool MobiDoc::ParseHeader() {
     }
     textEncoding = (int)mobiHdr.textEncoding;
 
-    if (pdbReader->GetRecordCount() > (int)mobiHdr.imageFirstRec) {
+    if (mobiHdr.imageFirstRec < (u32)pdbReader->GetRecordCount()) {
         imageFirstRec = (int)mobiHdr.imageFirstRec;
         if (0 == imageFirstRec) {
             // I don't think this should ever happen but I've seen it
@@ -556,7 +556,7 @@ bool MobiDoc::ParseHeader() {
             imagesCount = pdbReader->GetRecordCount() - imageFirstRec;
         }
     }
-    if (kPalmDocHeaderLen + (int)mobiHdr.hdrLen > recSize) {
+    if (mobiHdr.hdrLen > (u32)(recSize - kPalmDocHeaderLen)) {
         logf("MobiHeader too big\n");
         return false;
     }
@@ -575,6 +575,9 @@ bool MobiDoc::ParseHeader() {
 
     if (COMPRESSION_HUFF == compressionType) {
         ReportIf(PdbDocType::Mobipocket != docType);
+        if (mobiHdr.huffmanFirstRec > (u32)INT_MAX - (u32)kCdicsMax) {
+            return false;
+        }
         rec = pdbReader->GetRecord((int)mobiHdr.huffmanFirstRec);
         int huffRecSize = rec.len;
         u8* recData = (u8*)rec.s;
@@ -586,12 +589,11 @@ bool MobiDoc::ParseHeader() {
         if (!huffDic->SetHuffData(recData, huffRecSize)) {
             return false;
         }
-        int cdicsCount = (int)mobiHdr.huffmanRecCount - 1;
-        if (cdicsCount > kCdicsMax) {
-            logf("MobiDoc::ParseHeader: cdicsCount: %d, kCdicsMax: %d\n", cdicsCount, kCdicsMax);
-            ReportDebugIf(true);
+        if (mobiHdr.huffmanRecCount < 1 || mobiHdr.huffmanRecCount > (u32)kCdicsMax + 1) {
+            logf("MobiDoc::ParseHeader: huffmanRecCount: %u\n", mobiHdr.huffmanRecCount);
             return false;
         }
+        int cdicsCount = (int)mobiHdr.huffmanRecCount - 1;
         for (int i = 0; i < cdicsCount; i++) {
             rec = pdbReader->GetRecord((int)mobiHdr.huffmanFirstRec + 1 + i);
             recData = (u8*)rec.s;
@@ -1440,13 +1442,13 @@ static bool FileMightBePrintReplica(Str path) {
     u32 off1 = r.UInt32BE(86);
     bool isType8 = false;
     bool sawType = false;
-    if (off0 + 28 <= (u32)n && MemEq(buf + off0 + 16, "MOBI", 4)) {
+    if (n >= 28 && off0 <= (u32)(n - 28) && MemEq(buf + off0 + 16, "MOBI", 4)) {
         sawType = true;
         isType8 = r.UInt32BE((int)off0 + 24) == 8;
     }
     bool sawRec1 = false;
     bool rec1Mop = false;
-    if (off1 + 4 <= (u32)n) {
+    if (n >= 4 && off1 <= (u32)(n - 4)) {
         sawRec1 = true;
         rec1Mop = MemEq(buf + off1, "%MOP", 4);
     }

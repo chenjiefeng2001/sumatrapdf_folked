@@ -450,6 +450,25 @@ class AbortCookie {
 
 struct DarkModeProfile;
 
+inline void SetRenderAbortCookie(AbortCookie** out, AbortCookie* cookie, Mutex* lock,
+                                 AtomicBool* abortRequested = nullptr) {
+    if (!out) {
+        return;
+    }
+    if (lock) {
+        ScopedMutex scope(lock);
+        *out = cookie;
+        if (abortRequested && AtomicBoolGet(abortRequested)) {
+            cookie->Abort();
+        }
+    } else {
+        *out = cookie;
+        if (abortRequested && AtomicBoolGet(abortRequested)) {
+            cookie->Abort();
+        }
+    }
+}
+
 struct RenderPageArgs {
     int pageNo = 0;
     float zoom = 0.f;
@@ -463,12 +482,15 @@ struct RenderPageArgs {
     // page, and so does anything that blits the result with SRCCOPY (#5844)
     bool keepAlpha = false;
     AbortCookie** cookie_out = nullptr;
+    Mutex* cookie_out_lock = nullptr;
+    AtomicBool* abort_requested = nullptr;
     // dark/recolor rendering profile for View renders (see PdfDarkMode.h);
     // owned by the caller, only valid for the duration of RenderPage()
     const DarkModeProfile* darkProfile = nullptr;
 
     RenderPageArgs(int pageNo, float zoom, int rotation, RectF* pageRect = nullptr,
-                   RenderTarget target = RenderTarget::View, AbortCookie** cookie_out = nullptr);
+                   RenderTarget target = RenderTarget::View, AbortCookie** cookie_out = nullptr,
+                   Mutex* cookie_out_lock = nullptr);
 };
 
 class EngineBase {

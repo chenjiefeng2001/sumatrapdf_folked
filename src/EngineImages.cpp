@@ -337,9 +337,15 @@ static Size ImageSizeFromDataPortable(Str data, bool partial = false) {
 }
 
 RectF EngineImages::PageMediabox(int pageNo) {
-    ReportIf((pageNo < 1) || (pageNo > pageCount));
+    ReportIf((pageNo < 1) || (pageNo > pageCount) || pageNo > len(pageInfos));
+    if (pageNo < 1 || pageNo > pageCount || pageNo > len(pageInfos)) {
+        return {};
+    }
     int n = pageNo - 1;
     ImagePageInfo* pi = pageInfos[n];
+    if (!pi) {
+        return {};
+    }
     if (pi->state == PageInfoState::Unknown) {
         pi->mediabox = LoadMediabox(pageNo);
         pi->state = PageInfoState::Known;
@@ -540,6 +546,9 @@ static void GetPixmapPixelBgraKeepAlpha(const Pixmap* pixmap, int x, int y, u8* 
 }
 
 Pixmap* EngineImages::RenderPage(RenderPageArgs& args) {
+    if (args.abort_requested && AtomicBoolGet(args.abort_requested)) {
+        return nullptr;
+    }
     auto pageNo = args.pageNo;
     auto* pageRect = args.pageRect;
     auto zoom = args.zoom;
@@ -818,8 +827,14 @@ RectF EngineImages::Transform(const RectF& rect, int pageNo, float zoom, int rot
 
 // don't delete the result
 Vec<IPageElement*> EngineImages::GetElements(int pageNo) {
-    ReportIf(pageNo < 1 || pageNo > pageCount);
+    ReportIf(pageNo < 1 || pageNo > pageCount || pageNo > len(pageInfos));
+    if (pageNo < 1 || pageNo > pageCount || pageNo > len(pageInfos)) {
+        return Vec<IPageElement*>();
+    }
     auto* pi = pageInfos[pageNo - 1];
+    if (!pi) {
+        return Vec<IPageElement*>();
+    }
     if (pi->hasImageElement) {
         return pi->allElements;
     }
@@ -851,9 +866,14 @@ RenderedBitmap* EngineImages::GetImageForPageElement(IPageElement* pel) {
     (void)pel;
     return nullptr;
 #else
-    ReportIf(pel->GetKind() != kindPageElementImage);
+    if (!pel || pel->GetKind() != kindPageElementImage) {
+        return nullptr;
+    }
     auto* ipel = (PageElementImage*)pel;
     int pageNo = ipel->pageNo;
+    if (pageNo < 1 || pageNo > pageCount || ipel->imageID != pageNo) {
+        return nullptr;
+    }
     auto* page = GetPage(pageNo);
     if (!page || page->failedToLoad) {
         if (page) {
@@ -889,7 +909,12 @@ Str EngineImages::GetImageDataForPageElement(IPageElement* pel) {
     if (!pel || pel->GetKind() != kindPageElementImage) {
         return {};
     }
-    return str::Dup(GetImageData(pel->GetPageNo()));
+    int pageNo = pel->GetPageNo();
+    if (pageNo < 1 || pageNo > pageCount) {
+        return {};
+    }
+    Str data = GetImageData(pageNo);
+    return data ? str::Dup(data) : Str{};
 }
 
 Str EngineImages::GetFileData() {
@@ -913,6 +938,9 @@ bool EngineImages::SaveFileAs(Str dstPath) {
 }
 
 ImagePage* EngineImages::GetPage(int pageNo, bool tryOnly) {
+    if (pageNo < 1 || pageNo > pageCount) {
+        return nullptr;
+    }
     ImagePage* result = nullptr;
     bool isLoader = false;
     bool waitForLoad = false;

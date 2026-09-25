@@ -211,11 +211,11 @@ static bool IsPSFileContent(Str d) {
     }
     // Windows-format EPS file - cf. http://partners.adobe.com/public/developer/en/ps/5002.EPSF_Spec.pdf
     if (str::StartsWith(header, StrL("\xC5\xD0\xD3\xC6"))) {
-        DWORD psStart = ByteReader(d).UInt32LE(4);
-        if ((int)psStart >= n - 12) {
+        u32 psStart = ByteReader(d).UInt32LE(4);
+        if (psStart >= (u32)(n - 12)) {
             return true;
         }
-        Str sub = Str(header.s + psStart, header.len - (int)psStart);
+        Str sub = Str(header.s + psStart, n - (int)psStart);
         return str::StartsWith(sub, StrL("%!PS-Adobe-"));
     }
     if (str::StartsWith(header, StrL("%!PS-Adobe-"))) {
@@ -283,10 +283,10 @@ bool FindWebpChunk(Str d, const char fourcc[4], Str& out) {
     }
     ByteReader r(d);
     int idx = 12;
-    while (idx + 8 <= r.len) {
+    while (idx <= r.len - 8) {
         int size = (int)r.UInt32LE(idx + 4);
         int payload = idx + 8;
-        if (size < 0 || payload + size > r.len) {
+        if (size < 0 || size > r.len - payload) {
             return false;
         }
         if (MemEq(r.d + idx, fourcc, 4)) {
@@ -294,13 +294,10 @@ bool FindWebpChunk(Str d, const char fourcc[4], Str& out) {
             return true;
         }
         int chunkSize = size + (size & 1);
-        if (chunkSize < size) {
+        if (chunkSize > r.len - payload) {
             return false;
         }
         idx = payload + chunkSize;
-        if (idx < 8) {
-            return false;
-        }
     }
     return false;
 }
@@ -345,7 +342,8 @@ static bool HasTgaVersion2Footer(const u8* data, size_t n) {
         return false;
     }
     const TgaFooter* footer = (const TgaFooter*)(data + n - sizeof(TgaFooter));
-    return str::EqN(footer->signature, "TRUEVISION-XFILE.", sizeof(footer->signature));
+    Str sig{footer->signature, (int)sizeof(footer->signature)};
+    return str::StartsWith(sig, StrL("TRUEVISION-XFILE."));
 }
 
 static bool IsSupportedTgaPixelFormat(const TgaHeader* header) {
@@ -697,7 +695,7 @@ static Size TiffIfdSize(ByteReader r, int off, bool isBE, bool isJxr) {
         int valOff = idx + 8;
         if (nVals > 4u / typeSize) {
             valOff = (int)r.UInt32(idx + 8, isBE);
-            if (valOff < 0 || valOff + typeSize > r.len) {
+            if (valOff < 0 || valOff > r.len - typeSize) {
                 continue;
             }
         }
@@ -730,7 +728,7 @@ static void ParseTiff(ByteReader r, FileTypeInfo& res, bool isJxr) {
     int cap = 0;
     u32 off = r.UInt32(4, isBE);
     // 4096 iterations bound protects against cycles in corrupt data
-    while (off > 0 && (int)off + 2 <= r.len && nIfds < 4096) {
+    while (off > 0 && off <= (u32)(r.len - 2) && nIfds < 4096) {
         Size size = TiffIfdSize(r, (int)off, isBE, isJxr);
         if (nIfds == 0) {
             res.imageDx = size.dx;
@@ -739,11 +737,11 @@ static void ParseTiff(ByteReader r, FileTypeInfo& res, bool isJxr) {
         AppendImageSize(res, nIfds, cap, size.dx, size.dy);
         nIfds++;
         u16 nEntries = r.UInt16((int)off, isBE);
-        int nextOff = (int)off + 2 + (nEntries * 12);
-        if (nextOff + 4 > r.len) {
+        i64 nextOff = (i64)off + 2 + (nEntries * 12);
+        if (nextOff > r.len - 4) {
             break;
         }
-        off = r.UInt32(nextOff, isBE);
+        off = r.UInt32((int)nextOff, isBE);
     }
     if (nIfds > 0) {
         res.nImages = nIfds;
@@ -792,7 +790,7 @@ static void ParseWebp(ByteReader r, FileTypeInfo& res) {
     int nFrames = 0;
     int cap = 0;
     int idx = 12;
-    while (idx + 8 <= r.len) {
+    while (idx <= r.len - 8) {
         const u8* fourcc = r.d + idx;
         u32 size = r.UInt32LE(idx + 4);
         int payload = idx + 8;
@@ -816,6 +814,9 @@ static void ParseWebp(ByteReader r, FileTypeInfo& res) {
         }
         u32 advance = size + (size & 1); // chunks are padded to even size
         if (advance >= (u32)r.len) {
+            break;
+        }
+        if (payload > r.len - (int)advance) {
             break;
         }
         idx = payload + (int)advance;

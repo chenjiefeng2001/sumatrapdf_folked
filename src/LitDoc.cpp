@@ -308,7 +308,7 @@ static void MsSha1Final(MsSha1* s, u8 digest[20]) {
 //--- little-endian readers with bounds checking
 
 static u32 LitU16(Str d, int off) {
-    if (off < 0 || off + 2 > len(d)) {
+    if (off < 0 || (i64)off + 2 > len(d)) {
         return 0;
     }
     const u8* p = (const u8*)d.s + off;
@@ -316,7 +316,7 @@ static u32 LitU16(Str d, int off) {
 }
 
 static u32 LitU32(Str d, int off) {
-    if (off < 0 || off + 4 > len(d)) {
+    if (off < 0 || (i64)off + 4 > len(d)) {
         return 0;
     }
     const u8* p = (const u8*)d.s + off;
@@ -480,7 +480,10 @@ static bool LitParseHeader(LitFile* lit) {
     int hdrLen = (int)LitU32(d, 12);
     int nPieces = (int)LitU32(d, 16);
     int secHdrLen = (int)LitU32(d, 20);
-    if (hdrLen < 0x28 || nPieces < 5 || nPieces > 16) {
+    if (hdrLen < 0x28 || nPieces < 5 || nPieces > 16 || secHdrLen < 0) {
+        return false;
+    }
+    if ((i64)hdrLen + (i64)nPieces * 16 > len(d)) {
         return false;
     }
 
@@ -490,7 +493,7 @@ static bool LitParseHeader(LitFile* lit) {
         Str sec(d.s + off, std::min(secHdrLen, len(d) - off));
         int pos = (int)LitU32(sec, 4);
         bool haveContentOffset = false;
-        while (pos >= 0 && pos + 8 <= len(sec)) {
+        while (pos >= 0 && pos <= len(sec) - 8) {
             Str blockTag(sec.s + pos, 4);
             u32 ver = LitU32(sec, pos + 4);
             if (str::Eq(blockTag, StrL("CAOL"))) {
@@ -504,7 +507,11 @@ static bool LitParseHeader(LitFile* lit) {
                 if (ver != 4 || LitU32(sec, pos + 20) != 0) {
                     return false;
                 }
-                lit->contentOffset = (int)LitU32(sec, pos + 16);
+                u32 contentOffset = LitU32(sec, pos + 16);
+                if (contentOffset > (u32)len(d)) {
+                    return false;
+                }
+                lit->contentOffset = (int)contentOffset;
                 haveContentOffset = true;
                 pos += 48;
             } else {
@@ -519,7 +526,7 @@ static bool LitParseHeader(LitFile* lit) {
     // header piece 1 is the directory
     i64 dirOff64 = LitU64(d, hdrLen + 16);
     i64 dirLen64 = LitU64(d, hdrLen + 16 + 8);
-    if (dirOff64 <= 0 || dirLen64 <= 32 || dirOff64 + dirLen64 > len(d)) {
+    if (dirOff64 <= 0 || dirLen64 <= 32 || dirOff64 > len(d) || dirLen64 > len(d) - dirOff64) {
         return false;
     }
     Str dir(d.s + (int)dirOff64, (int)dirLen64);
@@ -552,7 +559,7 @@ static bool LitParseHeader(LitFile* lit) {
         int pos = 48;
         for (int j = 0; j < nEntries && pos < dataEnd; j++) {
             int nameLen = LitEncInt(chunk, &pos);
-            if (nameLen <= 0 || pos + nameLen > dataEnd) {
+            if (nameLen <= 0 || nameLen > dataEnd - pos) {
                 break;
             }
             LitEntry e;
@@ -575,15 +582,18 @@ Str LitFile::GetFile(Str name) {
     if (!e) {
         return {};
     }
+    if (e->offset < 0 || e->size < 0) {
+        return {};
+    }
     if (e->section == 0) {
         i64 off = (i64)contentOffset + e->offset;
-        if (off + e->size > len(d)) {
+        if (off < 0 || off > len(d) || e->size > len(d) - off) {
             return {};
         }
         return Str(d.s + (int)off, e->size);
     }
     Str sec = GetSection(e->section);
-    if (e->offset + e->size > len(sec)) {
+    if (e->offset > len(sec) || e->size > len(sec) - e->offset) {
         return {};
     }
     return Str(sec.s + e->offset, e->size);
@@ -600,9 +610,12 @@ static bool LitParseSectionNames(LitFile* lit) {
     }
     int pos = 4;
     for (int i = 0; i < nSections; i++) {
+        if (pos > len(raw) - 2) {
+            return false;
+        }
         int nChars = (int)LitU16(raw, pos);
         pos += 2;
-        if (pos + nChars * 2 + 2 > len(raw)) {
+        if ((i64)nChars * 2 + 2 > (i64)len(raw) - pos) {
             return false;
         }
         WStr ws((const WCHAR*)(raw.s + pos), nChars);
@@ -686,6 +699,8 @@ static bool LitReadDrm(LitFile* lit) {
 }
 
 static Str LitLzxDecompress(Str content, Str control, Str resetTable) {
+    constexpr u32 kLitMaxIntervalBytes = 16 * 1024 * 1024;
+    constexpr u32 kLitMaxOutputBytes = 512 * 1024 * 1024;
     if (len(control) < 32 || !str::Eq(Str(control.s + 4, 4), StrL("LZXC"))) {
         return {};
     }
@@ -706,18 +721,22 @@ static Str LitLzxDecompress(Str content, Str control, Str resetTable) {
         return {};
     }
 
-    int ofsEntry = (int)LitU32(resetTable, 12) + 8;
-    int ucLength = (int)LitU32(resetTable, 16);
-    if (LitU32(resetTable, 20) != 0) {
+    u32 ofsEntry32 = LitU32(resetTable, 12);
+    u32 ucLength = LitU32(resetTable, 16);
+    u32 interval32 = LitU32(resetTable, 32);
+    if (ofsEntry32 > (u32)(len(resetTable) - 8) || ucLength > kLitMaxOutputBytes || interval32 == 0 ||
+        interval32 > kLitMaxIntervalBytes || LitU32(resetTable, 20) != 0) {
         LZXteardown(lzx);
         return {};
     }
-    int interval = (int)LitU32(resetTable, 32);
-    int bytesRemaining = ucLength;
-    if (interval <= 0) {
+    if (ucLength == 0) {
         LZXteardown(lzx);
         return {};
     }
+
+    size_t ofsEntry = (size_t)ofsEntry32 + 8;
+    int bytesRemaining = (int)ucLength;
+    int interval = (int)interval32;
 
     // the reset table stores a compressed offset at every `interval` (block_size)
     // uncompressed bytes. The LZX decoder is reset only at window boundaries;
@@ -728,25 +747,29 @@ static Str LitLzxDecompress(Str content, Str control, Str resetTable) {
     int intervalsPerWindow = (windowBytes >= interval) ? (windowBytes / interval) : 1;
     str::Builder out;
     u8* obuf = AllocArray<u8>(interval);
+    if (!obuf) {
+        LZXteardown(lzx);
+        return {};
+    }
     bool ok = true;
     int base = 0;
     int idx = 0;
-    while (bytesRemaining > 0 && ofsEntry + 8 <= len(resetTable)) {
-        int size = (int)LitU32(resetTable, ofsEntry);
-        if (LitU32(resetTable, ofsEntry + 4) != 0 || size > len(content) || size < base) {
+    while (bytesRemaining > 0 && ofsEntry <= (size_t)len(resetTable) - 8) {
+        u32 size32 = LitU32(resetTable, (int)ofsEntry);
+        if (LitU32(resetTable, (int)ofsEntry + 4) != 0 || size32 > (u32)len(content) || size32 < (u32)base) {
             ok = false;
             break;
         }
+        int size = (int)size32;
         int outThis = std::min(interval, bytesRemaining);
         if (idx % intervalsPerWindow == 0) {
             LZXreset(lzx);
         }
         int res = LZXdecompress(lzx, (u8*)content.s + base, obuf, size - base, outThis);
-        if (res != kLzxOk) {
+        if (res != kLzxOk || (u64)len(out) + outThis > kLitMaxOutputBytes || !out.Append(Str((char*)obuf, outThis))) {
             ok = false;
             break;
         }
-        out.Append(Str((char*)obuf, outThis));
         bytesRemaining -= outThis;
         base = size;
         ofsEntry += 8;
@@ -760,8 +783,8 @@ static Str LitLzxDecompress(Str content, Str control, Str resetTable) {
             LZXreset(lzx);
         }
         int res = LZXdecompress(lzx, (u8*)content.s + base, obuf, len(content) - base, bytesRemaining);
-        if (res == kLzxOk) {
-            out.Append(Str((char*)obuf, bytesRemaining));
+        if (res == kLzxOk && (u64)len(out) + bytesRemaining <= kLitMaxOutputBytes &&
+            out.Append(Str((char*)obuf, bytesRemaining))) {
             bytesRemaining = 0;
         }
     }
@@ -803,10 +826,11 @@ Str LitFile::GetSection(int section) {
     bool owned = false; // content starts as a view into d
     Str view = content;
     while (len(transform) >= 16) {
-        int csize = ((int)LitU32(control, 0) + 1) * 4;
-        if (csize <= 0 || csize > len(control)) {
+        i64 csize64 = ((i64)LitU32(control, 0) + 1) * 4;
+        if (csize64 > len(control)) {
             break;
         }
+        int csize = (int)csize64;
         TempStr guid = LitGuidTemp(transform);
         if (str::Eq(guid, Str(kDesGuid))) {
             if (drmLevel == 0 || drmLevel == 5) {
@@ -898,7 +922,7 @@ static bool LitParseManifest(LitFile* lit) {
     int pos = 0;
     while (pos < len(raw)) {
         int slen = (u8)raw.s[pos++];
-        if (slen == 0 || pos + slen > len(raw)) {
+        if (slen == 0 || slen > len(raw) - pos) {
             break;
         }
         pos += slen; // root name, unused
@@ -910,7 +934,7 @@ static bool LitParseManifest(LitFile* lit) {
                 continue;
             }
             for (int i = 0; i < nFiles; i++) {
-                if (pos + 5 > len(raw)) {
+                if (len(raw) < 5 || pos > len(raw) - 5) {
                     return len(lit->manifest) > 0;
                 }
                 pos += 4; // offset, unused
@@ -1001,7 +1025,7 @@ static void LitParseAtoms(LitFile* lit, Str internal, LitAtoms* atoms) {
             return;
         }
         int size = (u8)data.s[pos++];
-        if (size == 0 || pos + size > len(data)) {
+        if (size == 0 || size > len(data) - pos) {
             return;
         }
         atoms->tags.Append(Str(data.s + pos, size));
@@ -1018,7 +1042,7 @@ static void LitParseAtoms(LitFile* lit, Str internal, LitAtoms* atoms) {
         }
         int size = (int)LitU32(data, pos);
         pos += 4;
-        if (size <= 0 || pos + size > len(data)) {
+        if (size <= 0 || size > len(data) - pos) {
             return;
         }
         atoms->attrs.Append(Str(data.s + pos, size));

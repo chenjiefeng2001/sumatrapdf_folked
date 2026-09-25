@@ -576,12 +576,14 @@ bool ChmModel::Load(Str fileName) {
 }
 
 struct ChmCacheEntry {
-    // owned by ChmModel::poolAllocator
     Str url;
     Str data;
 
     explicit ChmCacheEntry(Str url);
-    ~ChmCacheEntry() { str::Free(data); };
+    ~ChmCacheEntry() {
+        str::Free(url);
+        str::Free(data);
+    }
 };
 
 ChmCacheEntry::ChmCacheEntry(Str url) {
@@ -592,7 +594,7 @@ ChmCacheEntry* ChmModel::FindDataForUrl(Str url) const {
     int n = len(urlDataCache);
     for (int i = 0; i < n; i++) {
         ChmCacheEntry* e = urlDataCache[i];
-        if (str::Eq(url, e->url)) {
+        if (e && str::Eq(url, e->url)) {
             return e;
         }
     }
@@ -757,18 +759,52 @@ static Str ChmThemeApplyToData(Str raw) {
 }
 
 Str ChmModel::GetDataForUrl(Str url) {
+    constexpr int kChmCacheMaxEntries = 512;
+    constexpr i64 kChmCacheMaxBytes = 128ll * 1024 * 1024;
     ScopedMutex scope(&docAccess);
     TempStr plainUrl = url::GetFullPathTemp(url);
     ChmCacheEntry* e = FindDataForUrl(plainUrl);
-    if (!e) {
-        Str raw = doc->GetDataTemp(plainUrl);
-        if (len(raw) == 0) {
-            return {};
+    if (e) {
+        return e->data;
+    }
+
+    Str raw = doc->GetDataTemp(plainUrl);
+    if (len(raw) == 0) {
+        return {};
+    }
+    Str data = ChmThemeApplyToData(raw);
+    if (!data) {
+        return {};
+    }
+    i64 entryBytes = (i64)len(data) + len(plainUrl);
+    if (entryBytes > kChmCacheMaxBytes) {
+        str::Free(data);
+        return {};
+    }
+
+    i64 cachedBytes = 0;
+    for (ChmCacheEntry* entry : urlDataCache) {
+        if (entry) {
+            cachedBytes += (i64)len(entry->url) + len(entry->data);
         }
-        Str s = str::Dup(poolAlloc, plainUrl);
-        e = new ChmCacheEntry(s);
-        e->data = ChmThemeApplyToData(raw);
-        urlDataCache.Append(e);
+    }
+    while (len(urlDataCache) > 0 &&
+           (len(urlDataCache) >= kChmCacheMaxEntries || cachedBytes + entryBytes > kChmCacheMaxBytes)) {
+        ChmCacheEntry* oldest = urlDataCache[0];
+        cachedBytes -= (i64)len(oldest->url) + len(oldest->data);
+        delete oldest;
+        urlDataCache.RemoveAt(0);
+    }
+    if (len(urlDataCache) >= kChmCacheMaxEntries || cachedBytes + entryBytes > kChmCacheMaxBytes) {
+        str::Free(data);
+        return {};
+    }
+
+    e = new ChmCacheEntry(str::Dup(plainUrl));
+    e->data = data;
+    if (!e->url || !urlDataCache.Append(e)) {
+        delete e;
+        return {};
     }
     return e->data;
 }

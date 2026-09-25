@@ -289,29 +289,47 @@ static void RenderFinishedOnUIThread(PageRenderRequest* req) {
 }
 
 void DisplayModel::RenderFinishedAsync(PageRenderRequest* req) {
-    if (req->abort) {
+    if (AtomicBoolGet(&req->abort) || !gRenderCache ||
+        req->darkModeEpoch != (u32)AtomicIntGet(&gRenderCache->darkModeEpoch) ||
+        req->renderGeneration != (u32)AtomicIntGet(&gRenderCache->renderGeneration) ||
+        req->dmRenderGeneration != (u32)AtomicIntGet(&renderGeneration)) {
         return;
     }
     auto* copy = new PageRenderRequest(*req);
     auto fn = MkFunc0(RenderFinishedOnUIThread, copy);
-    uitask::Post(fn, "RenderFinished");
+    if (!uitask::Post(fn, "RenderFinished")) {
+        delete copy;
+    }
 }
 
 void DisplayModel::RenderFinished(PageRenderRequest* req) {
-    if (req->errorCode != 0) {
+    if (!gRenderCache || req->darkModeEpoch != (u32)AtomicIntGet(&gRenderCache->darkModeEpoch) ||
+        req->renderGeneration != (u32)AtomicIntGet(&gRenderCache->renderGeneration) ||
+        req->dmRenderGeneration != (u32)AtomicIntGet(&renderGeneration)) {
+        return;
+    }
+    if (req->errorCode == 1) {
         PageInfo* pageInfo = GetPageInfo(req->pageNo);
         if (pageInfo) {
             pageInfo->failedToRender = true;
         }
         RepaintDisplay();
-    } else if (PageVisibleNearby(req->pageNo)) {
+    } else if (req->errorCode == 0) {
+        PageInfo* pageInfo = GetPageInfo(req->pageNo);
+        if (pageInfo) {
+            pageInfo->failedToRender = false;
+        }
+        if (PageVisibleNearby(req->pageNo)) {
+            RepaintDisplay();
+        }
+    } else if (req->errorCode != 2 && PageVisibleNearby(req->pageNo)) {
         RepaintDisplay();
     }
     // continue chained predictive rendering: render the next predicted page
     // (RequestPredictiveRendering stops the chain if the origin page is no
     // longer visible). A failed render still continues the chain so one bad
     // page doesn't stop predicting the rest.
-    if (req->nPredictiveRequests > 0) {
+    if (req->errorCode != 2 && req->nPredictiveRequests > 0 && cb) {
         cb->RequestPredictiveRendering(this, req->predictiveOriginPageNo, req->predictiveRequests,
                                        req->nPredictiveRequests);
     }

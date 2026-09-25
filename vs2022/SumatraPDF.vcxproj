@@ -1294,7 +1294,6 @@ cd ../out/rel64_prefast_asan &amp; if not exist InstallerData.dat ..\..\bin\Make
     <ClInclude Include="..\src\TextSelection.h" />
     <ClInclude Include="..\src\TextToSpeech.h" />
     <ClInclude Include="..\src\Theme.h" />
-    <ClInclude Include="..\src\TipText.h" />
     <ClInclude Include="..\src\Toolbar.h" />
     <ClInclude Include="..\src\ToolbarInternal.h" />
     <ClInclude Include="..\src\Translations.h" />

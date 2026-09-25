@@ -107,9 +107,9 @@ struct PageAnchor {
 
 class EbookAbortCookie : public AbortCookie {
   public:
-    bool abort = false;
+    AtomicBool abort = 0;
     EbookAbortCookie() {}
-    void Abort() override { abort = true; }
+    void Abort() override { AtomicBoolSet(&abort, true); }
     void* GetData() override { return nullptr; }
 };
 
@@ -275,16 +275,17 @@ void EngineEbook::GetTransform(Matrix& m, float zoom, int rotation) {
 #endif
 
 Vec<DrawInstr>* EngineEbook::GetHtmlPage(int pageNo) {
-    ReportIf(pageNo < 1 || PageCount() < pageNo);
-    if (pageNo < 1 || PageCount() < pageNo) {
+    ReportIf(pageNo < 1 || PageCount() < pageNo || !pages || pageNo > len(*pages));
+    if (pageNo < 1 || PageCount() < pageNo || !pages || pageNo > len(*pages)) {
         return nullptr;
     }
-    return &(*pages)[pageNo - 1]->instructions;
+    HtmlPage* page = (*pages)[pageNo - 1];
+    return page ? &page->instructions : nullptr;
 }
 
 HtmlPage* EngineEbook::GetHtmlPage2(int pageNo) {
-    ReportIf(pageNo < 1 || PageCount() < pageNo);
-    if (pageNo < 1 || PageCount() < pageNo) {
+    ReportIf(pageNo < 1 || PageCount() < pageNo || !pages || pageNo > len(*pages));
+    if (pageNo < 1 || PageCount() < pageNo || !pages || pageNo > len(*pages)) {
         return nullptr;
     }
     return (*pages)[pageNo - 1];
@@ -357,6 +358,9 @@ RectF EngineEbook::Transform(const RectF& rect, int pageNo, float zoom, int rota
 }
 
 Pixmap* EngineEbook::RenderPage(RenderPageArgs& args) {
+    if (args.abort_requested && AtomicBoolGet(args.abort_requested)) {
+        return nullptr;
+    }
     auto pageNo = args.pageNo;
     auto zoom = args.zoom;
     auto rotation = args.rotation;
@@ -370,9 +374,9 @@ Pixmap* EngineEbook::RenderPage(RenderPageArgs& args) {
     EbookAbortCookie* cookie = nullptr;
     if (args.cookie_out) {
         cookie = new EbookAbortCookie();
-        *args.cookie_out = cookie;
+        SetRenderAbortCookie(args.cookie_out, cookie, args.cookie_out_lock, args.abort_requested);
     }
-    if (cookie && cookie->abort) {
+    if (cookie && AtomicBoolGet(&cookie->abort)) {
         return nullptr;
     }
     Pixmap* pixmap = AllocPixmap(screen.dx, screen.dy);
@@ -413,7 +417,7 @@ Pixmap* EngineEbook::RenderPage(RenderPageArgs& args) {
     EbookAbortCookie* cookie = nullptr;
     if (args.cookie_out) {
         cookie = new EbookAbortCookie();
-        *args.cookie_out = cookie;
+        SetRenderAbortCookie(args.cookie_out, cookie, args.cookie_out_lock, args.abort_requested);
     }
 
     ScopedMutex scope(&pagesAccess);
@@ -424,7 +428,7 @@ Pixmap* EngineEbook::RenderPage(RenderPageArgs& args) {
     delete textDraw;
     DeleteDC(hDC);
 
-    if (cookie && cookie->abort) {
+    if (cookie && AtomicBoolGet(&cookie->abort)) {
         DeleteObject(hbmp);
         CloseHandle(hMap);
         return nullptr;
@@ -452,6 +456,9 @@ PageText EngineEbook::ExtractPageText(int pageNo) {
     bool insertSpace = false;
 
     Vec<DrawInstr>* pageInstrs = GetHtmlPage(pageNo);
+    if (!pageInstrs) {
+        return {};
+    }
     for (DrawInstr& i : *pageInstrs) {
         Rect bbox = GetInstrBbox(i, pageBorder);
         switch (i.type) {
@@ -530,6 +537,9 @@ PageText EngineEbook::ExtractPageText(int pageNo) {
 }
 
 IPageElement* EngineEbook::CreatePageLink(DrawInstr* link, Rect rect, int pageNo) {
+    if (!link || pageNo < 1 || pageNo > len(baseAnchors)) {
+        return nullptr;
+    }
     Str linkStr = link->str;
     TempStr url = strconv::HtmlUtf8ToStrTemp(linkStr);
     if (url::IsAbsolute(url)) {
@@ -552,6 +562,9 @@ IPageElement* EngineEbook::CreatePageLink(DrawInstr* link, Rect rect, int pageNo
 
 Vec<IPageElement*> EngineEbook::GetElements(int pageNo) {
     HtmlPage* pi = GetHtmlPage2(pageNo);
+    if (!pi) {
+        return Vec<IPageElement*>();
+    }
     if (pi->gotElements) {
         return pi->elements;
     }
@@ -565,11 +578,13 @@ Vec<IPageElement*> EngineEbook::GetElements(int pageNo) {
         if (DrawInstrType::Image == i.type) {
             auto box = GetInstrBbox(i, pageBorder);
             auto el = NewImageDataElement(pageNo, box, idx);
-            els.Append(el);
+            if (el && !els.Append(el)) {
+                delete el;
+            }
         } else if (DrawInstrType::LinkStart == i.type && !i.bbox.IsEmpty()) {
             IPageElement* link = CreatePageLink(&i, GetInstrBbox(i, pageBorder), pageNo);
-            if (link) {
-                els.Append(link);
+            if (link && !els.Append(link)) {
+                delete link;
             }
         }
     }
@@ -596,14 +611,22 @@ RenderedBitmap* EngineEbook::GetImageForPageElement(IPageElement* iel) {
     (void)iel;
     return nullptr;
 #else
-    ReportIf(iel->GetKind() != kindPageElementImage);
+    if (!iel || iel->GetKind() != kindPageElementImage) {
+        return nullptr;
+    }
     PageElementImage* el = (PageElementImage*)iel;
     int pageNo = el->pageNo;
     int idx = el->imageID;
     Vec<DrawInstr>* pageInstrs = GetHtmlPage(pageNo);
+    if (!pageInstrs || idx < 0 || idx >= len(*pageInstrs)) {
+        return nullptr;
+    }
     auto&& i = (*pageInstrs)[idx];
-    ReportIf(i.type != DrawInstrType::Image);
-    return getImageFromData(i.GetImage());
+    if (i.type != DrawInstrType::Image) {
+        return nullptr;
+    }
+    Str imageData = i.GetImage();
+    return imageData ? getImageFromData(imageData) : nullptr;
 #endif
 }
 
@@ -620,7 +643,8 @@ Str EngineEbook::GetImageDataForPageElement(IPageElement* iel) {
     if (i.type != DrawInstrType::Image) {
         return {};
     }
-    return str::Dup(i.GetImage());
+    Str imageData = i.GetImage();
+    return imageData ? str::Dup(imageData) : Str{};
 }
 
 // don't delete the result
@@ -628,7 +652,7 @@ IPageElement* EngineEbook::GetElementAtPos(int pageNo, PointF pt) {
     auto els = GetElements(pageNo);
 
     for (auto& el : els) {
-        if (el->GetRect().Contains(pt)) {
+        if (el && el->GetRect().Contains(pt)) {
             return el;
         }
     }

@@ -100,7 +100,8 @@ static bool HasVersion2Footer(const u8* data, size_t n) {
         return false;
     }
     const TgaFooter* footerLE = (const TgaFooter*)(data + n - sizeof(TgaFooter));
-    return str::EqN(footerLE->signature, TGA_FOOTER_SIGNATURE, sizeof(footerLE->signature));
+    Str sig{footerLE->signature, (int)sizeof(footerLE->signature)};
+    return str::StartsWith(sig, StrL(TGA_FOOTER_SIGNATURE));
 }
 
 static const TgaExtArea* GetExtAreaPtr(const u8* data, size_t n) {
@@ -108,11 +109,12 @@ static const TgaExtArea* GetExtAreaPtr(const u8* data, size_t n) {
         return nullptr;
     }
     const TgaFooter* footerLE = (const TgaFooter*)(data + n - sizeof(TgaFooter));
-    if (convLE(footerLE->extAreaOffset) < sizeof(TgaHeader) ||
-        convLE(footerLE->extAreaOffset) + sizeof(TgaExtArea) + sizeof(TgaFooter) > n) {
+    size_t offset = convLE(footerLE->extAreaOffset);
+    size_t dataEnd = n - sizeof(TgaFooter);
+    if (offset < sizeof(TgaHeader) || offset > dataEnd || sizeof(TgaExtArea) > dataEnd - offset) {
         return nullptr;
     }
-    const TgaExtArea* extAreaLE = (const TgaExtArea*)(data + convLE(footerLE->extAreaOffset));
+    const TgaExtArea* extAreaLE = (const TgaExtArea*)(data + offset);
     if (convLE(extAreaLE->size) < sizeof(TgaExtArea)) {
         return nullptr;
     }

@@ -3108,16 +3108,18 @@ static bool PaintAnnotationOverlaysGPU(MainWindow* win, HDC hdc, DisplayModel* d
             int midY = rect.y + rect.dy / 2 - hh;
             int bottom = rect.y + rect.dy - hh;
 
-            // corners
-            GpuBackend::DrawResizeHandle(hdc, left, top, hs);
-            GpuBackend::DrawResizeHandle(hdc, right, top, hs);
-            GpuBackend::DrawResizeHandle(hdc, right, bottom, hs);
-            GpuBackend::DrawResizeHandle(hdc, left, bottom, hs);
-            // edges
-            GpuBackend::DrawResizeHandle(hdc, midX, top, hs);
-            GpuBackend::DrawResizeHandle(hdc, right, midY, hs);
-            GpuBackend::DrawResizeHandle(hdc, midX, bottom, hs);
-            GpuBackend::DrawResizeHandle(hdc, left, midY, hs);
+            bool handlesOk = true;
+            handlesOk &= GpuBackend::DrawResizeHandle(hdc, left, top, hs);
+            handlesOk &= GpuBackend::DrawResizeHandle(hdc, right, top, hs);
+            handlesOk &= GpuBackend::DrawResizeHandle(hdc, right, bottom, hs);
+            handlesOk &= GpuBackend::DrawResizeHandle(hdc, left, bottom, hs);
+            handlesOk &= GpuBackend::DrawResizeHandle(hdc, midX, top, hs);
+            handlesOk &= GpuBackend::DrawResizeHandle(hdc, right, midY, hs);
+            handlesOk &= GpuBackend::DrawResizeHandle(hdc, midX, bottom, hs);
+            handlesOk &= GpuBackend::DrawResizeHandle(hdc, left, midY, hs);
+            if (!handlesOk) {
+                return false;
+            }
         }
     }
 
@@ -3429,22 +3431,6 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
         }
     }
 
-    // Phase 3: page fade-in after navigation — overlay the canvas background at
-    // (1 - pageFade) opacity so a freshly shown page fades in from the background.
-    // GDI+ alpha-blends onto the memory DC; in GDI-only builds the overlay is
-    // skipped when pageFade is already 1.0 (i.e. no animation in flight).
-    if (win->pageFadeAnim && win->pageFadeAnim->active && win->pageFade < 1.0f) {
-        COLORREF fadeCol = colDocBg;
-        if (fadeCol == kColorUnset) {
-            ThemeDocumentColors(fadeCol); // fills in the default canvas background
-        }
-        BYTE alpha = (BYTE)((1.0f - win->pageFade) * 255.0f);
-        Gdiplus::Color gcol(alpha, GetRValue(fadeCol), GetGValue(fadeCol), GetBValue(fadeCol));
-        Gdiplus::Graphics gfxFade(hdc);
-        Gdiplus::SolidBrush br(gcol);
-        gfxFade.FillRectangle(&br, (Gdiplus::REAL)rcArea.x, (Gdiplus::REAL)rcArea.y, (Gdiplus::REAL)rcArea.dx,
-                              (Gdiplus::REAL)rcArea.dy);
-    }
     return shouldPaint;
 }
 
@@ -3511,19 +3497,6 @@ static void OnPaintDocument(MainWindow* win) {
     } else if (win->presentation == PM_WHITE_SCREEN) {
         HdcFillRect(hdc, ToRect(ps.rcPaint), GetStockBrush(WHITE_BRUSH));
     } else {
-        // Page fade-in — start the transition when the displayed page changes
-        // (page navigation). Scroll / zoom repaints keep the same page and
-        // don't restart it. The animation timer is pumped once here so WM_TIMER
-        // starts delivering frames for the fade.
-        int curPageNo = win->AsFixed() ? win->AsFixed()->CurrentPageNo() : 0;
-        if (win->pageFadeAnim && curPageNo > 0 && curPageNo != win->lastPaintPageNo && AnimationsEnabled()) {
-            win->lastPaintPageNo = curPageNo;
-            win->pageFade = 0;
-            win->pageFadeAnim->Animate(&win->pageFade, 1.0f, 200, Easing::EaseOutQuad);
-            if (win->animMgr) {
-                win->animMgr->Tick(); // (re)start the per-window animation timer
-            }
-        }
         bool shouldPaint = DrawDocument(win, win->buffer->GetDC(), ToRect(ps.rcPaint));
         // Flush when the focus ring is needed so DrawFocusRect is not XOR'd
         // on top of a stale frame that already had a ring.
@@ -5020,7 +4993,7 @@ void ScheduleRepaint(MainWindow* win, int delayInMs) {
     uitask::Post(fn, nullptr);
 }
 
-static void OnTimer(MainWindow* win, HWND hwnd, WPARAM timerId) {
+void CanvasOnTimer(MainWindow* win, HWND hwnd, WPARAM timerId) {
     Point pt;
 
     if (!IsMainWindowValidAndNotClosing(win)) {
@@ -5148,12 +5121,14 @@ static void OnTimer(MainWindow* win, HWND hwnd, WPARAM timerId) {
                         RelayoutSidebarAnimated(win, -1);
                     }
                 }
-                if (stillActive > 0) {
+                if (stillActive > 0 || sidebarWasActive) {
                     // Repaint to reflect animated values. Client-area-only
                     // invalidation: animations only change canvas content, and
                     // this fires every tick (~60/s), so avoid the uitask hop,
                     // the per-tick task allocation and the RDW_FRAME
                     // non-client redraw that ScheduleRepaint funnels into.
+                    // The wasActive term presents the final frame: the tick
+                    // that finishes an animation reports stillActive == 0.
                     InvalidateRect(win->hwndCanvas, nullptr, FALSE);
                 }
             }
@@ -5740,7 +5715,7 @@ LRESULT CALLBACK WndProcCanvas(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     // messages that require win
     switch (msg) {
         case WM_TIMER:
-            OnTimer(win, hwnd, wp);
+            CanvasOnTimer(win, hwnd, wp);
             return 0;
 
         case WM_KILLFOCUS:

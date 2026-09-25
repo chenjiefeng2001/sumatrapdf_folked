@@ -302,21 +302,30 @@ GfxDirect2D::GfxDirect2D(HDC hdc) {
 }
 
 GfxDirect2D::~GfxDirect2D() {
-    if (!target) {
-        return;
-    }
-    // an unbalanced PushClip would make EndDraw fail
-    while (len(clipDepth) > 0) {
-        PopClip();
-    }
-    if (drawing) {
-        HRESULT hr = target->EndDraw();
-        if (FAILED(hr)) {
-            logf("GfxDirect2D: EndDraw failed 0x%x\n", (int)hr);
+    if (target) {
+        // an unbalanced PushClip would make EndDraw fail
+        while (len(clipDepth) > 0) {
+            PopClip();
+        }
+        if (drawing) {
+            HRESULT hr = target->EndDraw();
+            if (FAILED(hr)) {
+                logf("GfxDirect2D: EndDraw failed 0x%x\n", (int)hr);
+            }
         }
     }
-    target->Release();
-    target = nullptr;
+    if (brush) {
+        brush->Release();
+        brush = nullptr;
+    }
+    if (dottedStroke) {
+        dottedStroke->Release();
+        dottedStroke = nullptr;
+    }
+    if (target) {
+        target->Release();
+        target = nullptr;
+    }
 }
 
 // every draw needs a brush and they are cheap to make, but not free; one brush
@@ -327,7 +336,8 @@ ID2D1SolidColorBrush* GfxDirect2D::GetBrush(Color col, u8 alpha) {
     }
     if (!brush) {
         HRESULT hr = target->CreateSolidColorBrush(ToD2DColor(col, alpha), &brush);
-        if (FAILED(hr)) {
+        if (FAILED(hr) || !brush) {
+            brush = nullptr;
             return nullptr;
         }
         return brush;
@@ -519,7 +529,11 @@ void GfxDirect2D::DrawFocusRect(const Rect& r) {
     if (!dottedStroke) {
         D2D1_STROKE_STYLE_PROPERTIES props = D2D1::StrokeStyleProperties();
         props.dashStyle = D2D1_DASH_STYLE_DOT;
-        gD2DFactory->CreateStrokeStyle(props, nullptr, 0, &dottedStroke);
+        HRESULT hr = gD2DFactory->CreateStrokeStyle(props, nullptr, 0, &dottedStroke);
+        if (FAILED(hr) || !dottedStroke) {
+            dottedStroke = nullptr;
+            return;
+        }
     }
     D2D1_RECT_F rf =
         D2D1::RectF((float)r.x + 0.5f, (float)r.y + 0.5f, (float)r.Right() - 0.5f, (float)r.Bottom() - 0.5f);

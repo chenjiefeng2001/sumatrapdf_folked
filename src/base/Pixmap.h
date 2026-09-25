@@ -57,9 +57,6 @@ struct Pixmap {
     HANDLE hMap = nullptr; // optional file mapping backing hbmp
 #endif
 
-    // Optional GPU texture (Direct2D bitmap), owned by the Pixmap. Freed in
-    // FreePixmapNativeBitmap. Only populated when GpuBackend is active.
-    // Guarded by _MSC_VER since D2D types aren't available on mingw.
 #ifdef _MSC_VER
     struct ID2D1Bitmap* d2dBitmap = nullptr;
     // Device generation of the GpuBackend when d2dBitmap was last uploaded.
@@ -67,8 +64,17 @@ struct Pixmap {
     // must be evicted before drawing to avoid D2DERR_WRONG_RESOURCE_DOMAIN.
     // See docs/reports/annot-render-crash-analysis.md §4.
     int d2dDeviceGeneration = 0;
+    void* d2dReleaseObject = nullptr;
+    Pixmap* d2dReleaseNext = nullptr;
+    bool d2dReleasePending = false;
 #endif
 };
+
+#if _MSC_VER
+void SetPixmapD2dMainThreadId(ThreadId threadId);
+bool FreePixmapD2dBitmap(Pixmap* p);
+void FlushPixmapD2dReleases();
+#endif
 
 Str PixmapToBmpFormat(const Pixmap* pixmap);
 Pixmap* GetClipboardImageAsPixmap();
@@ -142,6 +148,11 @@ inline void FreePixmap(Pixmap* p) {
     if (!p) {
         return;
     }
+#if _MSC_VER
+    if ((p->d2dBitmap || p->d2dReleasePending) && FreePixmapD2dBitmap(p)) {
+        return;
+    }
+#endif
 #if OS_WIN
     if (p->hbmp) {
         FreePixmapNativeBitmap(p);

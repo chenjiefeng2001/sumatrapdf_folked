@@ -147,7 +147,7 @@ class FitzAbortCookie : public AbortCookie {
         // Unknown progress avoids MuPDF pre-counting annotations; the cookie is only used for aborting.
         cookie.progress_max = (size_t)-1;
     }
-    void Abort() override { cookie.abort = 1; }
+    void Abort() override { AtomicIntSet(reinterpret_cast<AtomicInt*>(&cookie.abort), 1); }
     void* GetData() override { return (void*)&cookie; }
 };
 
@@ -1958,9 +1958,12 @@ static bool RemoveHeWhoFullyContains(Vec<IPageElement*>& els) {
     int n = len(els);
     ReportIf(n < 2);
     for (int i = 0; i < n; i++) {
+        if (!els[i]) {
+            continue;
+        }
         RectF r1 = els[i]->GetRect();
         for (int j = 0; j < n; j++) {
-            if (j == i) {
+            if (j == i || !els[j]) {
                 continue; // skip checking against self
             }
             auto r2 = els[j]->GetRect();
@@ -1978,6 +1981,11 @@ static bool RemoveHeWhoFullyContains(Vec<IPageElement*>& els) {
 // that is fully obscured by all other elements
 // if not fully obscured, return the first one
 static IPageElement* PickBestElement(Vec<IPageElement*>& els) {
+    for (int i = len(els) - 1; i >= 0; i--) {
+        if (!els[i]) {
+            els.RemoveAtFast(i);
+        }
+    }
     int n = len(els);
     if (n == 0) {
         return nullptr;
@@ -1989,7 +1997,7 @@ static IPageElement* PickBestElement(Vec<IPageElement*>& els) {
     // for https://github.com/sumatrapdfreader/sumatrapdf/issues/5200
     // priority for destinations (e.g. links) over images
     for (IPageElement* el : els) {
-        if (el->GetKind() == kindPageElementDest) {
+        if (el && el->GetKind() == kindPageElementDest) {
             return el;
         }
     }
@@ -2014,25 +2022,28 @@ NO_INLINE static IPageElement* FzGetElementAtPos(FzPageInfo* pageInfo, PointF pt
     Vec<IPageElement*> res;
 
     for (auto* pel : pageInfo->links) {
-        if (pel->GetRect().Contains(pt)) {
+        if (pel && pel->GetRect().Contains(pt)) {
             res.Append(pel);
         }
     }
 
     for (auto* pel : pageInfo->autoLinks) {
-        if (pel->GetRect().Contains(pt)) {
+        if (pel && pel->GetRect().Contains(pt)) {
             res.Append(pel);
         }
     }
 
     for (auto* pel : pageInfo->comments) {
-        if (pel->GetRect().Contains(pt)) {
+        if (pel && pel->GetRect().Contains(pt)) {
             res.Append(pel);
         }
     }
 
     fz_point p = {pt.x, pt.y};
     for (auto& img : pageInfo->images) {
+        if (!img || !img->imageElement) {
+            continue;
+        }
         fz_rect ir = img->rect;
         if (IsPointInRect(ir, p)) {
             res.Append(img->imageElement);
@@ -2048,23 +2059,50 @@ static void BuildElementsInfo(FzPageInfo* pageInfo) {
     pageInfo->elementsNeedRebuilding = false;
     auto& els = pageInfo->allElements;
 
-    int total = len(pageInfo->images) + len(pageInfo->links) + len(pageInfo->autoLinks) + len(pageInfo->comments);
+    i64 total64 =
+        (i64)len(pageInfo->images) + len(pageInfo->links) + len(pageInfo->autoLinks) + len(pageInfo->comments);
+    if (total64 > INT_MAX) {
+        pageInfo->elementsNeedRebuilding = true;
+        return;
+    }
+    int total = (int)total64;
     els.Clear();
-    VecReserve(els, total);
+    AtomicIntInc(&gAllowAllocFailure);
+    AutoCall allowAllocFailure(AtomicIntDec, &gAllowAllocFailure);
+    if (total > 0 && !VecReserve(els, total)) {
+        pageInfo->elementsNeedRebuilding = true;
+        return;
+    }
 
     // since all elements lists are in last-to-first order, append
     // item types in inverse order and reverse the whole list at the end
     for (auto& img : pageInfo->images) {
-        els.Append(img->imageElement);
+        if (img && img->imageElement && !els.Append(img->imageElement)) {
+            els.Reset();
+            pageInfo->elementsNeedRebuilding = true;
+            return;
+        }
     }
     for (auto& pel : pageInfo->links) {
-        els.Append(pel);
+        if (pel && !els.Append(pel)) {
+            els.Reset();
+            pageInfo->elementsNeedRebuilding = true;
+            return;
+        }
     }
     for (auto& pel : pageInfo->autoLinks) {
-        els.Append(pel);
+        if (pel && !els.Append(pel)) {
+            els.Reset();
+            pageInfo->elementsNeedRebuilding = true;
+            return;
+        }
     }
     for (auto& comment : pageInfo->comments) {
-        els.Append(comment);
+        if (comment && !els.Append(comment)) {
+            els.Reset();
+            pageInfo->elementsNeedRebuilding = true;
+            return;
+        }
     }
     VecReverse(els);
 }
@@ -2091,7 +2129,7 @@ static void FzLinkifyPageText(FzPageInfo* pageInfo, fz_stext_page* stext) {
         fz_rect bbox = list->coords[i];
         bool overlaps = false;
         for (auto* pel : pageInfo->links) {
-            if (FzRectOverlap(bbox, pel->GetRect()) >= 0.25f) {
+            if (pel && FzRectOverlap(bbox, pel->GetRect()) >= 0.25f) {
                 overlaps = true;
                 break;
             }
@@ -2145,6 +2183,9 @@ static void FzFindImagePositions(fz_context* ctx, int pageNo, Vec<FitzPageImageI
 }
 
 static fz_image* FzFindImageAtIdx(fz_context* ctx, FzPageInfo* pageInfo, int idx) {
+    if (!ctx || !pageInfo || !pageInfo->page || idx < 0) {
+        return nullptr;
+    }
     fz_stext_options opts = NewTextPageOptions(FZ_STEXT_PRESERVE_IMAGES);
     fz_stext_page* stext = nullptr;
     fz_var(stext);
@@ -5264,9 +5305,12 @@ IPageDestination* EngineMupdf::GetNamedDest(Str name) {
 // return a page but only if is fully loaded
 FzPageInfo* EngineMupdf::GetFzPageInfoFast(int pageNo) {
     ScopedRecursiveMutex scope(&pagesLock);
-    ReportIf(pageNo < 1 || pageNo > pageCount);
+    ReportIf(pageNo < 1 || pageNo > pageCount || pageNo > len(pages));
+    if (pageNo < 1 || pageNo > pageCount || pageNo > len(pages)) {
+        return nullptr;
+    }
     FzPageInfo* pageInfo = pages[pageNo - 1];
-    if (!pageInfo->page || !pageInfo->fullyLoaded) {
+    if (!pageInfo || !pageInfo->page || !pageInfo->fullyLoaded) {
         return nullptr;
     }
     return pageInfo;
@@ -5542,8 +5586,8 @@ FzPageInfo* EngineMupdf::GetFzPageInfo(int pageNo, bool loadQuick, fz_cookie* co
     // (shared image objects race in mupdf under concurrent decode).
     ScopedRecursiveMutex ctxScope(&renderLock);
 
-    ReportIf(pageNo < 1 || pageNo > pageCount);
-    if (pageNo < 1 || pageNo > pageCount) {
+    ReportIf(pageNo < 1 || pageNo > pageCount || pageNo > len(pages));
+    if (pageNo < 1 || pageNo > pageCount || pageNo > len(pages)) {
         return nullptr;
     }
     int pageIdx = pageNo - 1;
@@ -5702,29 +5746,6 @@ FzPageInfo* EngineMupdf::GetFzPageInfo(int pageNo, bool loadQuick, fz_cookie* co
     return pageInfo;
 }
 
-// Data for deferred text-extraction caching via uitask::Post (see ExtractTextLazy).
-struct ExtractTextLazyData {
-    EngineMupdf* engine;
-    int pageNo;
-    fz_stext_page* stext;
-};
-
-static void ExtractTextLazyPostCb(ExtractTextLazyData* data) {
-    ScopedRecursiveMutex cs(&data->engine->pagesLock);
-    FzPageInfo* pageInfo = data->engine->pages[data->pageNo - 1];
-    if (pageInfo && !pageInfo->textExtracted) {
-        pageInfo->stextPage = data->stext;
-        pageInfo->textExtracted = true;
-    } else {
-        // Page was already extracted or pageInfo was recycled — safe to drop.
-        auto uiCtx = data->engine->Ctx();
-        if (uiCtx) {
-            fz_drop_stext_page(uiCtx, data->stext);
-        }
-    }
-    delete data;
-}
-
 // Deferred text extraction: call after releasing pagesLock and renderLock.
 // Acquires docLock internally, so concurrent UI queries are not blocked.
 // Extracted text is cached in pageInfo->stextPage for reuse by search,
@@ -5741,52 +5762,37 @@ void ExtractTextLazy(EngineMupdf* engine, FzPageInfo* pageInfo, fz_cookie* cooki
     fz_stext_page* stext = nullptr;
     fz_var(stext);
     fz_stext_options opts = NewTextPageOptions(FZ_STEXT_PRESERVE_IMAGES);
-    ScopedRecursiveMutex docScope(&engine->docLock);
-    fz_try(ctx) {
-        stext = fz_new_stext_page_from_page2(ctx, pageInfo->page, &opts, cookie);
-    }
-    fz_catch(ctx) {
-        fz_report_error(ctx);
+    {
+        ScopedRecursiveMutex docScope(&engine->docLock);
+        fz_try(ctx) {
+            stext = fz_new_stext_page_from_page2(ctx, pageInfo->page, &opts, cookie);
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+        }
     }
 
     if (!stext) {
         return;
     }
-
-    // Store the result in pageInfo (under pagesLock to synchronize with UI thread).
-    // Use TryLock (non-blocking) here to avoid a circular-wait deadlock with
-    // the UI thread:
-    //
-    //   UI thread: holds pagesLock → waiting for docLock (GetPropertyTemp)
-    //   Render thd: holds docLock           → waiting for pagesLock (this store)
-    //
-    // If pagesLock is held by the UI thread we post the caching to the UI
-    // thread via uitask::Post instead of discarding the result; when the UI
-    // thread finishes its current work (and releases pagesLock), it can
-    // safely write the result.
-    if (engine->pagesLock.TryLock()) {
-        pageInfo->stextPage = stext;
-        pageInfo->textExtracted = true;
-        engine->pagesLock.Unlock();
-    } else {
-        // Post the caching to the UI thread to avoid discarding the result.
-        // The UI thread has its own mupdf context (Ctx returns per-thread clone)
-        // so it can safely free the stext page if needed.
-        auto* data = new ExtractTextLazyData();
-        data->engine = engine;
-        data->pageNo = pageInfo->pageNo;
-        data->stext = stext;
-        Func0 fn = MkFunc0(ExtractTextLazyPostCb, data);
-        uitask::Post(fn);
+    if (!engine->pagesLock.TryLock()) {
+        fz_drop_stext_page(ctx, stext);
         return;
     }
-
-    // Run text-based post-processing (auto-links, image positions).
-    // These operate on the cached stext, not on MuPDF objects, so no lock needed.
+    if (pageInfo->pageNo < 1 || pageInfo->pageNo > len(engine->pages) ||
+        engine->pages[pageInfo->pageNo - 1] != pageInfo) {
+        engine->pagesLock.Unlock();
+        fz_drop_stext_page(ctx, stext);
+        return;
+    }
+    pageInfo->stextPage = stext;
+    pageInfo->textExtracted = true;
     if (!engine->disableAutoLinks) {
         FzLinkifyPageText(pageInfo, stext);
     }
     FzFindImagePositions(ctx, pageInfo->pageNo, pageInfo->images, stext);
+    pageInfo->elementsNeedRebuilding = true;
+    engine->pagesLock.Unlock();
 }
 
 // like GetFzPageInfo() but fails if we can't acquire locks
@@ -6662,6 +6668,9 @@ void EngineMupdf::ToggleCadEnhanceOverride() {
 }
 
 Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
+    if (args.abort_requested && AtomicBoolGet(args.abort_requested)) {
+        return nullptr;
+    }
     auto* ctx = Ctx();
     auto pageNo = args.pageNo;
 
@@ -6669,7 +6678,7 @@ Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
     FitzAbortCookie* cookie = nullptr;
     if (args.cookie_out) {
         cookie = new FitzAbortCookie();
-        *args.cookie_out = cookie;
+        SetRenderAbortCookie(args.cookie_out, cookie, args.cookie_out_lock, args.abort_requested);
         fzcookie = (fz_cookie*)cookie->GetData();
     }
 
@@ -6896,6 +6905,7 @@ Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
 
 // don't delete the result
 IPageElement* EngineMupdf::GetElementAtPos(int pageNo, PointF pt) {
+    ScopedRecursiveMutex scope(&pagesLock);
     FzPageInfo* pageInfo = GetFzPageInfoCanFail(pageNo);
     return FzGetElementAtPos(pageInfo, pt);
 }
@@ -6903,6 +6913,7 @@ IPageElement* EngineMupdf::GetElementAtPos(int pageNo, PointF pt) {
 // TOOD: optimize by returning reference or pointer so that
 // we don't have to re-create the Vec every time
 Vec<IPageElement*> EngineMupdf::GetElements(int pageNo) {
+    ScopedRecursiveMutex scope(&pagesLock);
     auto* pageInfo = GetFzPageInfoFast(pageNo);
     if (!pageInfo) {
         return Vec<IPageElement*>();
@@ -6917,12 +6928,15 @@ Vec<IPageElement*> EngineMupdf::GetElements(int pageNo) {
 // queued on renderLock. Skip the decoration for this paint rather than freeze
 // the window; the next repaint draws it.
 bool EngineMupdf::TryGetElements(int pageNo, Vec<IPageElement*>* out) {
+    if (!out) {
+        return false;
+    }
     *out = Vec<IPageElement*>();
     if (!pagesLock.TryLock()) {
         return false;
     }
-    ReportIf(pageNo < 1 || pageNo > pageCount);
-    if (pageNo >= 1 && pageNo <= pageCount) {
+    ReportIf(pageNo < 1 || pageNo > pageCount || pageNo > len(pages));
+    if (pageNo >= 1 && pageNo <= pageCount && pageNo <= len(pages)) {
         FzPageInfo* pageInfo = pages[pageNo - 1];
         if (pageInfo && pageInfo->page && pageInfo->fullyLoaded) {
             BuildElementsInfo(pageInfo);
@@ -6999,8 +7013,13 @@ bool EngineMupdf::HandleLink(IPageDestination* dest, ILinkHandler* linkHandler) 
 
 RenderedBitmap* EngineMupdf::GetImageForPageElement(IPageElement* ipel) {
 #if OS_WIN
-    ReportIf(kindPageElementImage != ipel->GetKind());
+    if (!ipel || ipel->GetKind() != kindPageElementImage) {
+        return nullptr;
+    }
     auto* pel = (PageElementImage*)ipel;
+    if (pel->pageNo < 1 || pel->imageID < 0) {
+        return nullptr;
+    }
     auto r = pel->rect;
     int pageNo = pel->pageNo;
     int imageID = pel->imageID;
@@ -7018,6 +7037,11 @@ Str EngineMupdf::GetImageDataForPageElement(IPageElement* ipel) {
         return {};
     }
     auto* pel = (PageElementImage*)ipel;
+    if (pel->pageNo < 1 || pel->imageID < 0) {
+        return {};
+    }
+    ScopedRecursiveMutex pagesScope(&pagesLock);
+    ScopedRecursiveMutex renderScope(&renderLock);
     FzPageInfo* pageInfo = GetFzPageInfo(pel->pageNo, false);
     if (!pageInfo || !pageInfo->page) {
         return {};
@@ -7028,6 +7052,9 @@ Str EngineMupdf::GetImageDataForPageElement(IPageElement* ipel) {
     if (!image) {
         return {};
     }
+    defer {
+        fz_drop_image(ctx, image);
+    };
     fz_compressed_buffer* cbuf = fz_compressed_image_buffer(ctx, image);
     if (!cbuf || !cbuf->buffer) {
         return {};
@@ -7082,14 +7109,19 @@ RenderedBitmap* EngineMupdf::GetPageImage(int pageNo, RectF rect, int imageIdx) 
     (void)imageIdx;
     return nullptr;
 #else
+    ScopedRecursiveMutex pagesScope(&pagesLock);
+    ScopedRecursiveMutex renderScope(&renderLock);
     auto* ctx = Ctx();
 
     FzPageInfo* pageInfo = GetFzPageInfo(pageNo, false);
-    if (!pageInfo->page) {
+    if (!pageInfo || !pageInfo->page) {
         return nullptr;
     }
     const auto& images = pageInfo->images;
-    bool outOfBounds = imageIdx >= len(images);
+    bool outOfBounds = imageIdx < 0 || imageIdx >= len(images);
+    if (outOfBounds || !images[imageIdx]) {
+        return nullptr;
+    }
     fz_rect imgRect = images[imageIdx]->rect;
     bool badRect = ToRectF(imgRect) != rect;
     ReportIf(outOfBounds);
@@ -8174,43 +8206,67 @@ bool EngineMupdfSaveCopy(EngineBase* engine, Str path) {
 }
 
 // caller must hold pagesLock (protects pages[] and pageInfo->images)
-static bool HasClipOptimizationsLocked(EngineMupdf* e, int pageNo) {
-    ReportIf(pageNo < 1 || pageNo > e->pageCount);
-    if (pageNo < 1 || pageNo > e->pageCount) {
-        return false;
+// returns 1 or 0, or -1 while the page isn't fully loaded
+static int HasClipOptimizationsLocked(EngineMupdf* e, int pageNo) {
+    ReportIf(pageNo < 1 || pageNo > e->pageCount || pageNo > len(e->pages));
+    if (pageNo < 1 || pageNo > e->pageCount || pageNo > len(e->pages)) {
+        return 0;
     }
     FzPageInfo* pageInfo = e->pages[pageNo - 1];
     if (!pageInfo || !pageInfo->page || !pageInfo->fullyLoaded) {
-        return false;
+        return -1;
     }
 
     fz_rect mbox = ToFzRect(e->PageMediabox(pageNo));
     // check if any image covers at least 90% of the page
     for (auto& img : pageInfo->images) {
+        if (!img) {
+            continue;
+        }
         fz_rect ir = img->rect;
         if (FzRectOverlap(mbox, ir) >= 0.9f) {
-            return false;
+            return 0;
         }
     }
-    return true;
+    return 1;
 }
 
 bool EngineMupdf::HasClipOptimizations(int pageNo) {
-    if (!pdfdoc) {
+    if (!pdfdoc || pageNo < 1 || pageNo > pageCount || pageNo > len(pages)) {
         return false;
     }
-    // This only tunes tile size (RenderCache::GetTileRes) and the UI thread asks
-    // on every zoom/scroll, so never wait for the answer: pagesLock can be held
-    // for the length of an image decode by a render thread that is itself queued
-    // on renderLock, which stalls the UI mid-mouse-wheel. "false" is what we
-    // already return for a page that isn't loaded yet, i.e. "can't tell, use the
-    // smaller tiles".
-    if (!pagesLock.TryLock()) {
-        return false;
+    // The UI thread asks on every zoom/scroll (RenderCache::GetTileRes), so never
+    // wait for the answer: pagesLock can be held for the length of an image
+    // decode by a render thread that is itself queued on renderLock, which
+    // stalls the UI mid-mouse-wheel.
+    // The answer must not flip-flop, though: it picks the tile resolution, and
+    // RenderCache::Paint frees every tile of a page that isn't at the current
+    // resolution. Answering "no" only while pagesLock happens to be busy made
+    // the visible tiles re-render in a loop at higher zoom (#6154), so fall
+    // back to the last answer we got for the page.
+    if (pagesLock.TryLock()) {
+        int res = HasClipOptimizationsLocked(this, pageNo);
+        pagesLock.Unlock();
+        if (res >= 0) {
+            ScopedMutex scope(&clipOptLock);
+            if (len(clipOptKnown) < pageNo) {
+                int prevLen = len(clipOptKnown);
+                AtomicIntInc(&gAllowAllocFailure);
+                AutoCall allowAllocFailure(AtomicIntDec, &gAllowAllocFailure);
+                if (!VecResize(clipOptKnown, pageNo)) {
+                    return res != 0;
+                }
+                for (int i = prevLen; i < pageNo; i++) {
+                    clipOptKnown[i] = 0;
+                }
+            }
+            clipOptKnown[pageNo - 1] = res ? 2 : 1;
+            return res != 0;
+        }
     }
-    bool res = HasClipOptimizationsLocked(this, pageNo);
-    pagesLock.Unlock();
-    return res;
+    // a page never seen loaded answers "no", same as before it's loaded
+    ScopedMutex scope(&clipOptLock);
+    return pageNo <= len(clipOptKnown) && clipOptKnown[pageNo - 1] == 2;
 }
 
 TempStr EngineMupdf::GetPageLabeTemp(int pageNo) const {
@@ -8594,6 +8650,7 @@ void EngineMupdfInvalidateDarkMode(EngineBase* engine) {
         return;
     }
     ScopedRecursiveMutex scope(&epdf->pagesLock);
+    ScopedRecursiveMutex renderScope(&epdf->renderLock);
     fz_context* ctx = epdf->Ctx();
     if (epdf->darkModeEngineCache) {
         PdfDarkModeEngineCacheClear(ctx, epdf->darkModeEngineCache);
@@ -8695,6 +8752,7 @@ Annotation* EngineMupdfGetAnnotationAtPos(EngineBase* engine, int pageNo, PointF
     if (!epdf->pdfdoc) {
         return nullptr;
     }
+    ScopedRecursiveMutex pagesScope(&epdf->pagesLock);
     FzPageInfo* pi = epdf->GetFzPageInfoCanFail(pageNo);
     if (!pi) {
         return nullptr;
@@ -8715,6 +8773,7 @@ Annotation* EngineMupdfGetWidgetAtPos(EngineBase* engine, int pageNo, PointF pos
     if (!epdf->pdfdoc) {
         return nullptr;
     }
+    ScopedRecursiveMutex pagesScope(&epdf->pagesLock);
     FzPageInfo* pi = epdf->GetFzPageInfoCanFail(pageNo);
     if (!pi) {
         return nullptr;
@@ -8737,6 +8796,7 @@ Annotation* EngineMupdfGetAdjacentWidget(EngineBase* engine, Annotation* cur, bo
     if (!epdf->pdfdoc || !cur) {
         return nullptr;
     }
+    ScopedRecursiveMutex pagesScope(&epdf->pagesLock);
     FzPageInfo* pi = epdf->GetFzPageInfoCanFail(cur->pageNo);
     if (!pi) {
         return nullptr;
@@ -8792,6 +8852,7 @@ void EngineMupdfGetFormFieldHighlightRects(EngineBase* engine, int pageNo, Annot
     if (!epdf || !epdf->pdfdoc) {
         return;
     }
+    ScopedRecursiveMutex pagesScope(&epdf->pagesLock);
     FzPageInfo* pi = epdf->GetFzPageInfoCanFail(pageNo);
     if (!pi) {
         return;
@@ -8919,6 +8980,7 @@ NO_INLINE void MarkNotificationAsModified(EngineMupdf* e, Annotation* annot, Ann
         // invalidates the spatial hit-test indexes; they are rebuilt lazily on
         // the next EngineMupdfGetAnnotationAtPos / GetWidgetAtPos call
         pageInfo->hitIndexDirty = true;
+        pageInfo->elementsNeedRebuilding = true;
     }
 
     // Phase 2: Rebuild MuPDF comments under docLock.
@@ -8933,7 +8995,6 @@ NO_INLINE void MarkNotificationAsModified(EngineMupdf* e, Annotation* annot, Ann
     } // docLock released
 
     pageInfo->annotGeneration++;
-    pageInfo->elementsNeedRebuilding = true;
 
     // Phase 3: Drop the stale *annotation overlay* display list under
     // renderLock.  The page contents display list (displayList) is

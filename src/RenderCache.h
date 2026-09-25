@@ -62,11 +62,14 @@ struct BitmapCacheEntry {
 
     // owned by the BitmapCacheEntry
     Pixmap* bitmap = nullptr;
+    bool pageVisibleNearby = true;
     bool outOfDate = false;
     int refs = 1;
     // RenderCache::darkModeEpoch at render time; entries from an older epoch
     // were rendered/recolored with stale colors and must not be reused
     u32 darkModeEpoch = 0;
+    u32 renderGeneration = 0;
+    u32 dmRenderGeneration = 0;
 
     BitmapCacheEntry(DisplayModel* dm, int pageNo, int rotation, float zoom, TilePosition tile, Pixmap* bitmap) {
         this->dm = dm;
@@ -88,11 +91,15 @@ struct PageRenderRequest {
     int rotation = 0;
     float zoom = 0.f;
     TilePosition tile;
+    bool pageVisibleNearby = true;
+    bool pauseRendering = false;
 
     RectF pageRect; // calculated from TilePosition
-    bool abort = false;
+    AtomicBool abort = 0;
     AbortCookie* abortCookie = nullptr;
     u32 darkModeEpoch = 0;
+    u32 renderGeneration = 0;
+    u32 dmRenderGeneration = 0;
     u64 timestamp = 0;
 
     // set by render thread before calling renderFinishedCb
@@ -173,6 +180,7 @@ struct RenderCache {
     // per-thread current request tracking (index matches thread index)
     PageRenderRequest* curReqs[kMaxRenderThreads]{};
     RecursiveMutex requestAccess;
+    Mutex cookieAccess;
     ThreadHandle renderThreads[kMaxRenderThreads]{};
     // Render threads are spawned lazily: nRenderThreads is the count actually
     // running so far, maxRenderThreads is the cap. Threads track idleThreads
@@ -194,7 +202,8 @@ struct RenderCache {
     // bumped by UpdateDocumentColors when page render colors / the PDF
     // document color mode change; renders started under an older epoch are
     // discarded instead of cached
-    u32 darkModeEpoch = 0;
+    AtomicInt darkModeEpoch = 0;
+    AtomicInt renderGeneration = 0;
 
     /* Interface for page rendering thread */
     HANDLE startRendering = nullptr; // semaphore, signaled once per queued request
@@ -226,7 +235,7 @@ struct RenderCache {
 
     bool ClearCurrentRequest(int threadIdx);
     bool GetNextRequest(PageRenderRequest* req, int threadIdx);
-    void Add(PageRenderRequest& req, Pixmap* bmp);
+    bool Add(PageRenderRequest& req, Pixmap* bmp);
 
     USHORT GetTileRes(DisplayModel* dm, int pageNo) const;
     USHORT GetMaxTileRes(DisplayModel* dm, int pageNo, int rotation);

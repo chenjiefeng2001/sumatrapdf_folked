@@ -3,7 +3,26 @@
 
 #include "base/Base.h"
 #include "base/Win.h"
+#include "base/ComSafe.h"
 #include "base/Pixmap.h"
+
+#ifdef _MSC_VER
+static CRITICAL_SECTION gPixmapD2dReleaseCS;
+static Pixmap* gPixmapD2dReleaseHead = nullptr;
+static volatile LONG gPixmapD2dMainThreadId = 0;
+static bool gPixmapD2dReleaseInit = []() {
+    InitializeCriticalSection(&gPixmapD2dReleaseCS);
+    return true;
+}();
+
+static bool IsPixmapD2dUiThread() {
+    return (DWORD)InterlockedCompareExchange(&gPixmapD2dMainThreadId, 0, 0) == GetCurrentThreadId();
+}
+
+void SetPixmapD2dMainThreadId(ThreadId threadId) {
+    InterlockedExchange(&gPixmapD2dMainThreadId, (LONG)threadId);
+}
+#endif
 
 Pixmap* AllocPixmapDIB(int w, int h) {
     if (w <= 0 || h <= 0) {
@@ -198,6 +217,65 @@ void FreePixmapNativeBitmap(Pixmap* p) {
     }
     p->data = nullptr;
 }
+
+#ifdef _MSC_VER
+bool FreePixmapD2dBitmap(Pixmap* p) {
+    if (!p) {
+        return false;
+    }
+    if (p->d2dReleasePending) {
+        return true;
+    }
+    if (!p->d2dBitmap) {
+        return false;
+    }
+    if (IsPixmapD2dUiThread()) {
+        IUnknown* bitmap = static_cast<IUnknown*>(static_cast<void*>(p->d2dBitmap));
+        p->d2dBitmap = nullptr;
+        p->d2dDeviceGeneration = 0;
+        SafeReleaseSeh(&bitmap);
+        return false;
+    }
+
+    p->d2dReleaseObject = p->d2dBitmap;
+    p->d2dBitmap = nullptr;
+    p->d2dDeviceGeneration = 0;
+    EnterCriticalSection(&gPixmapD2dReleaseCS);
+    p->d2dReleaseNext = gPixmapD2dReleaseHead;
+    p->d2dReleasePending = true;
+    gPixmapD2dReleaseHead = p;
+    LeaveCriticalSection(&gPixmapD2dReleaseCS);
+    return true;
+}
+
+void FlushPixmapD2dReleases() {
+    if (!IsPixmapD2dUiThread()) {
+        ReportIf(InterlockedCompareExchange(&gPixmapD2dMainThreadId, 0, 0) != 0);
+        return;
+    }
+
+    EnterCriticalSection(&gPixmapD2dReleaseCS);
+    Pixmap* pixmap = gPixmapD2dReleaseHead;
+    gPixmapD2dReleaseHead = nullptr;
+    LeaveCriticalSection(&gPixmapD2dReleaseCS);
+
+    while (pixmap) {
+        Pixmap* next = pixmap->d2dReleaseNext;
+        pixmap->d2dReleaseNext = nullptr;
+        pixmap->d2dReleasePending = false;
+        IUnknown* bitmap = static_cast<IUnknown*>(pixmap->d2dReleaseObject);
+        pixmap->d2dReleaseObject = nullptr;
+        SafeReleaseSeh(&bitmap);
+        if (pixmap->hbmp) {
+            FreePixmapNativeBitmap(pixmap);
+        } else {
+            free(pixmap->data);
+        }
+        delete pixmap;
+        pixmap = next;
+    }
+}
+#endif
 
 static bool BlitPixmapRegionComposited(Pixmap* p, HDC hdc, Rect target, Rect source);
 

@@ -3,7 +3,15 @@
 
 struct MainWindow;
 struct WindowTab;
+struct PlatformFont;
 struct WebViewResourceResult;
+
+struct AIChatCaptureSink {
+    str::Builder text;
+    str::Builder err;
+    bool finished = false;
+    bool truncated = false;
+};
 
 constexpr int kAIChatProviderCount = 4;
 
@@ -38,6 +46,7 @@ struct AIChatProcessLaunchResult {
     bool ok = false;
     HANDLE hProcess = nullptr;
     HANDLE hReadPipe = nullptr;
+    HANDLE hWritePipe = nullptr;
     DWORD processId = 0;
 };
 
@@ -57,10 +66,13 @@ struct AIChatStreamCtx {
     HWND hwndFrame = nullptr;
     int providerId = 0;
     Str sessionId; // owned; the session the output belongs to
+    u64 requestToken = 0;
+    AIChatCaptureSink* capture = nullptr;
 };
 
 void AIChatPostUpdate(AIChatStreamCtx* ctx, AIChatUpdateType type, Str text);
 void AIChatStreamSetSessionId(AIChatStreamCtx* ctx, Str sessionId);
+bool AIChatSessionIdIsValid(Str sessionId);
 
 // everything needed to build a provider's command line
 struct AIChatCmdArgs {
@@ -130,6 +142,12 @@ bool IsAIChatAvailable();
 bool IsAIChatSupportedForFile(Str filePath, Kind engineKind = nullptr);
 bool IsAIChatSupportedForTab(WindowTab* tab);
 
+// Marker file written next to the exe by the installer when AI chat is opted
+// in. Installed copies only offer AI chat with the marker present; dev and
+// portable (uninstalled) copies keep it always on.
+TempStr AIChatMarkerPathTemp(Str dir);
+bool IsAIChatInstallEnabled();
+
 TempStr AIChatJsEscapeTemp(Str s);
 TempStr AIChatJsonStrTemp(Str json, Str key);
 
@@ -140,6 +158,7 @@ void AIChatSortSessionsByTimestampDesc(Vec<AIChatSessionInfo>& sessions);
 i64 AIChatFileTimeToMs(const FILETIME& ft);
 
 void AIChatLog(AIChatLogger* logger, Str direction, Str text);
+void AIChatLogMeta(AIChatLogger* logger, Str direction, Str key, i64 value);
 
 // in-memory record of the most recent chat traffic, for debugging failures
 void AIChatDebugReset();
@@ -167,6 +186,7 @@ TempStr AIChatFormatChatHtmlTemp(Str virtualHost, Str bgColor);
 
 void AIChatCloseProcess(HANDLE* processHandle, bool terminateIfRunning);
 bool AIChatLaunchProcessWithStdoutPipe(Str cmdLine, Str cwd, AIChatProcessLaunchResult* out);
+bool AIChatLaunchProcessWithStdinPipe(Str cmdLine, Str cwd, AIChatProcessLaunchResult* out);
 
 int AIChatLabelMaxTextDx(int labelDx);
 TempStr AIChatFitPanelTitleTemp(PlatformFont* font, Str prefix, Str docName, int maxDx);

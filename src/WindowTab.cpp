@@ -23,6 +23,8 @@
 #include "ReadAloudHighlight.h"
 #include "Translations.h"
 #include "EditAnnotations.h"
+#include "AIChatCommon.h"
+#include "AIChatPanel.h"
 
 WindowTab::WindowTab(MainWindow* win) {
     this->win = win;
@@ -121,12 +123,14 @@ WindowTab::~WindowTab() {
         ReadAloudHighlightFree(readAloudHighlight);
         delete readAloudHighlight;
     }
+    UnregisterAIChatRequestsForTab(this);
     for (AIChatTabState& st : aiChat) {
         str::Free(st.sessionId);
         st.sessionId = {};
-        if (st.process) {
-            TerminateProcess(st.process, 0);
-            CloseHandle(st.process);
+        AIChatCloseProcess(&st.process, true);
+        if (st.readerDone) {
+            CloseHandle(st.readerDone);
+            st.readerDone = nullptr;
         }
     }
 }

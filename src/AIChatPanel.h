@@ -2,6 +2,7 @@
    License: GPLv3 */
 
 struct MainWindow;
+struct WindowTab;
 struct AIChatProvider;
 
 bool IsClaudeCodeInstalled();
@@ -25,6 +26,7 @@ AIChatProvider* GetAIChatProvider(int providerId);
 void CreateAIChatPanel(MainWindow* win);
 void DestroyAIChatPanel(MainWindow* win);
 void ShutdownAIChatForMainWindow(MainWindow* win);
+void UnregisterAIChatRequestsForTab(WindowTab* tab);
 
 void OnAIChatToggle(MainWindow* win, int providerId);
 void OnAIChatTabChanged(MainWindow* win);

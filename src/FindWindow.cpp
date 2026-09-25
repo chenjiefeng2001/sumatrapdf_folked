@@ -678,7 +678,9 @@ void FindWindowWnd::OnResultSelected() {
     data->endPage = fm.endPage;
     data->endGlyph = fm.endGlyph;
     data->epoch = AtomicIntInc(&pendingNavEpoch);
-    uitask::Post(MkFunc0<DeferredGoToFindMatchData>(DeferredGoToFindMatch, data), "GoToFindMatch");
+    if (!uitask::Post(MkFunc0<DeferredGoToFindMatchData>(DeferredGoToFindMatch, data), "GoToFindMatch")) {
+        delete data;
+    }
 }
 
 // remember which match the list is on, by identity rather than by row, so the

@@ -123,6 +123,7 @@ struct Flags {
     bool uninstall = false;
     bool withFilter = false;
     bool withPreview = false;
+    bool withAI = false;
     bool justExtractFiles = false;
     bool log = false;
     Str logFile;

@@ -116,6 +116,7 @@ struct SelectionTranslateWnd : WindowBase {
     // AI backend of the in-flight translation (for error formatting)
     AIChatBackend backend = AIChatBackend::Grok;
     bool translating = false;
+    u64 translationGeneration = 0;
     bool resultVisible = false;
     // true after the first size-to-content layout
     bool sizeInitialized = false;
@@ -140,6 +141,7 @@ struct SelectionTranslateWnd : WindowBase {
 };
 
 static SelectionTranslateWnd* gSelectionTranslateWnd = nullptr;
+static u64 gSelectionTranslateGeneration = 0;
 
 SelectionTranslateWnd::~SelectionTranslateWnd() = default;
 
@@ -148,6 +150,7 @@ struct SelectionTranslateTaskData {
     // translation thread runs, so remember only its HWND, never the object.
     // OnTranslateDone re-validates the HWND against gSelectionTranslateWnd.
     HWND hwndDlg = nullptr;
+    u64 generation = 0;
     AIChatBackend backend = AIChatBackend::Grok;
     Str srcLang;
     Str dstLang;
@@ -161,6 +164,7 @@ struct SelectionTranslateTaskData {
 
 struct SelectionTranslateDoneData {
     HWND hwndDlg = nullptr;
+    u64 generation = 0;
     bool ok = false;
     Str msg;
     ~SelectionTranslateDoneData() { str::Free(msg); }
@@ -358,7 +362,7 @@ static Str BackendLogName(AIChatBackend backend) {
 }
 
 static void LogTranslation(AIChatBackend backend, Str direction, Str text) {
-    logf("selection-translate %s %s: %s", BackendLogName(backend), direction, text);
+    logf("selection-translate %s %s: bytes=%d", BackendLogName(backend), direction, text ? len(text) : 0);
 }
 
 static bool TranslationLooksLikeError(Str text) {
@@ -459,113 +463,72 @@ static TempStr BuildTranslationPromptTemp(Str srcLang, Str dstLang, Str text) {
         srcLang, dstLang, normalized);
 }
 
-static void ReadPipeToStrBuilder(HANDLE hPipe, str::Builder& out) {
+enum class TranslationPipeResult {
+    Ok,
+    TimedOut,
+    OutputLimit,
+    Failed,
+};
+
+static TranslationPipeResult ReadPipeToStrBuilder(HANDLE hPipe, HANDLE hProcess, str::Builder& out,
+                                                  ULONGLONG startedAt) {
+    constexpr u64 kMaxOutputBytes = 8 * 1024 * 1024;
+    constexpr ULONGLONG kTimeoutMs = 5 * 60 * 1000;
     char buf[4096];
-    DWORD bytesRead = 0;
-    while (ReadFile(hPipe, buf, sizeof(buf) - 1, &bytesRead, nullptr) && bytesRead > 0) {
-        out.Append(Str(buf, (int)bytesRead));
-    }
-}
-
-static void AppendGrokTranslationText(Str line, str::Builder& out) {
-    TempStr eventType = AIChatJsonStrTemp(line, "type");
-    if (eventType && str::Eq(eventType, StrL("text"))) {
-        TempStr text = AIChatJsonStrTemp(line, "data");
-        if (len(text) > 0) {
-            out.Append(text);
+    for (;;) {
+        if (GetTickCount64() - startedAt >= kTimeoutMs) {
+            return TranslationPipeResult::TimedOut;
         }
-    }
-}
-
-static void AppendClaudeTranslationText(Str line, str::Builder& out) {
-    TempStr eventType = AIChatJsonStrTemp(line, "type");
-    if (!eventType) {
-        return;
-    }
-    if (str::Eq(eventType, StrL("result"))) {
-        bool isError = str::Contains(line, StrL("\"is_error\":true"));
-        TempStr text = AIChatJsonStrTemp(line, "result");
-        if (len(text) > 0) {
-            if (isError) {
-                out.Reset();
-                out.Append(text);
-            } else if (len(out) == 0) {
-                out.Append(text);
+        DWORD available = 0;
+        if (PeekNamedPipe(hPipe, nullptr, 0, nullptr, &available, nullptr)) {
+            if (available > 0) {
+                DWORD toRead = std::min<DWORD>(available, dimof(buf));
+                DWORD bytesRead = 0;
+                if (!ReadFile(hPipe, buf, toRead, &bytesRead, nullptr) || bytesRead == 0) {
+                    return TranslationPipeResult::Failed;
+                }
+                if ((u64)len(out) + bytesRead > kMaxOutputBytes) {
+                    return TranslationPipeResult::OutputLimit;
+                }
+                out.Append(Str(buf, (int)bytesRead));
+                continue;
+            }
+            if (WaitForSingleObject(hProcess, 0) != WAIT_TIMEOUT) {
+                return TranslationPipeResult::Ok;
+            }
+        } else {
+            DWORD err = GetLastError();
+            if (err == ERROR_BROKEN_PIPE || WaitForSingleObject(hProcess, 0) != WAIT_TIMEOUT) {
+                return TranslationPipeResult::Ok;
             }
         }
-        return;
-    }
-    if (str::Contains(line, StrL("authentication_failed")) || str::Contains(line, StrL("\"is_error\":true"))) {
-        return;
-    }
-    if (str::Eq(eventType, StrL("assistant")) && str::Contains(line, StrL("\"type\":\"text\""))) {
-        TempStr text = AIChatJsonStrTemp(line, "text");
-        if (len(text) > 0 && !TranslationLooksLikeError(text)) {
-            out.Append(text);
-        }
-    } else if (str::Eq(eventType, StrL("content_block_delta"))) {
-        TempStr text = AIChatJsonStrTemp(line, "text");
-        if (len(text) > 0) {
-            out.Append(text);
-        }
+        Sleep(10);
     }
 }
 
-static void AppendCodexTranslationText(Str line, str::Builder& out) {
-    if (!line || line.s[0] != '{') {
-        return;
-    }
-    TempStr eventType = AIChatJsonStrTemp(line, "type");
-    if (!eventType || !str::Eq(eventType, StrL("item.completed"))) {
-        return;
-    }
-    TempStr text = AIChatJsonStrTemp(line, "text");
-    if (len(text) > 0) {
-        out.Append(text);
-        return;
-    }
-    Str agentMsg;
-    if (str::Cut(line, StrL("\"type\":\"agent_message\""), nullptr, &agentMsg)) {
-        text = AIChatJsonStrTemp(agentMsg, "text");
-        if (len(text) > 0) {
-            out.Append(text);
-        }
-    }
-}
-
-// antigravity's stream-json isn't claude's: text arrives as `text_delta` in
-// `event:step_update` lines with `step_type:agent_response`, and errors as an
-// `event:result` with status ERROR (see AIAntiGravity.cpp::ParseStreamLine).
-static void AppendAntiGravityTranslationText(Str line, str::Builder& out) {
-    TempStr eventName = AIChatJsonStrTemp(line, "event");
-    if (!eventName) {
-        return;
-    }
-    if (str::Eq(eventName, StrL("step_update"))) {
-        if (str::Contains(line, StrL("\"step_type\":\"agent_response\""))) {
-            TempStr delta = AIChatJsonStrTemp(line, "text_delta");
-            if (len(delta) > 0) {
-                out.Append(delta);
-            }
-        }
-        return;
-    }
-    if (str::Eq(eventName, StrL("result"))) {
-        TempStr status = AIChatJsonStrTemp(line, "status");
-        if (status && str::Eq(status, StrL("ERROR"))) {
-            TempStr err = AIChatJsonStrTemp(line, "error");
-            if (len(err) > 0) {
-                out.Reset();
-                out.Append(err);
-            }
-        }
-    }
-}
-
-static void ParseTranslationOutput(AIChatBackend backend, Str output, str::Builder& translationOut) {
+static bool ParseTranslationOutput(AIChatBackend backend, Str output, str::Builder& translationOut,
+                                   str::Builder& errorOut) {
     if (str::IsEmptyOrWhiteSpace(output)) {
-        return;
+        return true;
     }
+    AIChatProvider* provider = nullptr;
+    if (backend == AIChatBackend::Grok) {
+        provider = GetGrokBuildProvider();
+    } else if (backend == AIChatBackend::Claude) {
+        provider = GetClaudeCodeProvider();
+    } else if (backend == AIChatBackend::Codex) {
+        provider = GetCodexBuildProvider();
+    } else if (backend == AIChatBackend::AntiGravity) {
+        provider = GetAntiGravityProvider();
+    }
+    if (!provider) {
+        return false;
+    }
+
+    AIChatCaptureSink capture;
+    AIChatStreamCtx ctx;
+    ctx.providerId = (int)backend;
+    ctx.capture = &capture;
     int off = 0;
     while (off < output.len) {
         int lineStart = off;
@@ -574,25 +537,15 @@ static void ParseTranslationOutput(AIChatBackend backend, Str output, str::Build
         }
         if (off > lineStart) {
             TempStr line = str::DupTemp(Str(output.s + lineStart, off - lineStart));
-            if (backend == AIChatBackend::Grok) {
-                AppendGrokTranslationText(line, translationOut);
-            } else if (backend == AIChatBackend::Claude) {
-                AppendClaudeTranslationText(line, translationOut);
-            } else if (backend == AIChatBackend::Codex) {
-                AppendCodexTranslationText(line, translationOut);
-            } else if (backend == AIChatBackend::AntiGravity) {
-                AppendAntiGravityTranslationText(line, translationOut);
-            }
+            provider->ParseStreamLine(line, &ctx);
         }
         while (off < output.len && (output.s[off] == '\n' || output.s[off] == '\r')) {
             off++;
         }
     }
-    {
-        Str s = ToStr(translationOut);
-        str::TrimWSInPlace(s, str::TrimOpt::Both);
-        translationOut.len = s.len;
-    }
+    str::Free(ctx.sessionId);
+    errorOut.Append(ToStr(capture.err));
+    translationOut.Append(ToStr(capture.text));
     if (len(translationOut) == 0 && output && !str::Contains(output, StrL("{\"type\":")) &&
         !str::Contains(output, StrL("{\"event\":"))) {
         TempStr trimmed = str::DupTemp(output.s);
@@ -601,114 +554,58 @@ static void ParseTranslationOutput(AIChatBackend backend, Str output, str::Build
             translationOut.Append(trimmed);
         }
     }
+    return true;
 }
 
-static TempStr BuildGrokTranslateCmdLineTemp(Str exePath, Str prompt, Str cwd) {
-    Str model = gGlobalPrefs->grokBuild.model;
-    if (str::IsEmptyOrWhiteSpace(model)) {
-        model = "grok-composer-2.5-fast";
+static AIChatProvider* TranslationProvider(AIChatBackend backend) {
+    if (backend == AIChatBackend::Grok) {
+        return GetGrokBuildProvider();
     }
-    Str permsFlag = gGlobalPrefs->grokBuild.alwaysApprove ? StrL("--always-approve") : Str{};
-    // QuoteCmdLineArgTemp: full Windows argv quoting (not just " -> \") so
-    // prompt text ending in \" cannot inject extra CLI flags (CWE-88 / GHSA).
-    return fmt("%s -p %s --cwd %s --output-format streaming-json --model %s --effort low %s",
-               QuoteCmdLineArgTemp(exePath), QuoteCmdLineArgTemp(prompt), QuoteCmdLineArgTemp(cwd),
-               QuoteCmdLineArgTemp(model), permsFlag);
+    if (backend == AIChatBackend::Claude) {
+        return GetClaudeCodeProvider();
+    }
+    if (backend == AIChatBackend::Codex) {
+        return GetCodexBuildProvider();
+    }
+    if (backend == AIChatBackend::AntiGravity) {
+        return GetAntiGravityProvider();
+    }
+    return nullptr;
 }
 
-static TempStr BuildClaudeTranslateCmdLineTemp(Str exePath, Str prompt) {
-    Str model = gGlobalPrefs->claudeCode.model;
-    if (str::IsEmptyOrWhiteSpace(model)) {
-        model = "claude-sonnet-4-20250514";
+static TempStr BuildTranslateCmdLineTemp(AIChatBackend backend, Str exePath, Str prompt, Str cwd) {
+    AIChatProvider* provider = TranslationProvider(backend);
+    if (!provider) {
+        return {};
     }
-    Str permsFlag = gGlobalPrefs->claudeCode.skipPermissions ? StrL("--dangerously-skip-permissions") : Str{};
-    TempStr sessionId = AIChatGenerateSessionIdTemp();
-    return fmt("%s -p --verbose --output-format stream-json --model %s %s --session-id %s %s",
-               QuoteCmdLineArgTemp(exePath), QuoteCmdLineArgTemp(model), permsFlag, sessionId,
-               QuoteCmdLineArgTemp(prompt));
-}
-
-static TempStr BuildCodexTranslateCmdLineTemp(Str exePath, Str prompt, Str cwd) {
-    Str model = gGlobalPrefs->codexBuild.model;
-    bool hasModel = !str::IsEmptyOrWhiteSpace(model);
-    Str skipFlag = gGlobalPrefs->codexBuild.skipSandbox ? StrL("--dangerously-bypass-approvals-and-sandbox") : Str{};
-    if (skipFlag) {
-        if (hasModel) {
-            return fmt("%s exec --json -C %s --skip-git-repo-check -m %s -s read-only %s %s",
-                       QuoteCmdLineArgTemp(exePath), QuoteCmdLineArgTemp(cwd), QuoteCmdLineArgTemp(model), skipFlag,
-                       QuoteCmdLineArgTemp(prompt));
-        }
-        return fmt("%s exec --json -C %s --skip-git-repo-check -s read-only %s %s", QuoteCmdLineArgTemp(exePath),
-                   QuoteCmdLineArgTemp(cwd), skipFlag, QuoteCmdLineArgTemp(prompt));
-    }
-    if (hasModel) {
-        return fmt("%s exec --json -C %s --skip-git-repo-check -m %s -s read-only %s", QuoteCmdLineArgTemp(exePath),
-                   QuoteCmdLineArgTemp(cwd), QuoteCmdLineArgTemp(model), QuoteCmdLineArgTemp(prompt));
-    }
-    return fmt("%s exec --json -C %s --skip-git-repo-check -s read-only %s", QuoteCmdLineArgTemp(exePath),
-               QuoteCmdLineArgTemp(cwd), QuoteCmdLineArgTemp(prompt));
-}
-
-static TempStr BuildAntiGravityTranslateCmdLineTemp(Str exePath, Str prompt) {
-    Str model = gGlobalPrefs->antiGravity.model;
-    if (str::IsEmptyOrWhiteSpace(model)) {
-        model = "gemini-3.6-flash";
-    }
-    // the antigravity CLI takes different flags than claude (see the chat
-    // provider in AIAntiGravity.cpp): --effort instead of --session-id, and
-    // --dangerously-skip-permissions instead of --auto-approve. A one-shot
-    // translation needs no --conversation.
-    Str permsFlag = gGlobalPrefs->antiGravity.autoApprove ? StrL("--dangerously-skip-permissions") : Str{};
-    return fmt("%s -p --model %s --effort low --output-format stream-json %s %s", QuoteCmdLineArgTemp(exePath),
-               QuoteCmdLineArgTemp(model), permsFlag, QuoteCmdLineArgTemp(prompt));
+    StrVec models;
+    provider->BuildModelsList(models);
+    AIChatCmdArgs args;
+    args.exePath = exePath;
+    args.model = AIChatResolveModel(models, provider->GetModel(), provider->defaultModel);
+    args.sessionId = provider->generatesSessionId ? AIChatGenerateSessionIdTemp() : Str{};
+    args.filePath = Str{};
+    args.dir = cwd;
+    args.escapedInput = prompt;
+    args.option = 0;
+    args.flag = provider->GetFlag();
+    args.isNewSession = true;
+    return provider->BuildCmdLineTemp(args);
 }
 
 static TempStr FindBackendExecutableTemp(AIChatBackend backend) {
-    if (backend == AIChatBackend::Grok) {
-        return GrokBuildExecutablePathTemp();
-    }
-    if (backend == AIChatBackend::Claude) {
-        return ClaudeCodeExecutablePathTemp();
-    }
-    if (backend == AIChatBackend::Codex) {
-        return CodexBuildExecutablePathTemp();
-    }
-    if (backend == AIChatBackend::AntiGravity) {
-        return AntiGravityExecutablePathTemp();
-    }
-    return {};
+    AIChatProvider* provider = TranslationProvider(backend);
+    return provider ? provider->FindExecutableTemp() : TempStr{};
 }
 
 static bool IsBackendInstalled(AIChatBackend backend) {
-    if (backend == AIChatBackend::Grok) {
-        return IsGrokBuildInstalled();
-    }
-    if (backend == AIChatBackend::Claude) {
-        return IsClaudeCodeInstalled();
-    }
-    if (backend == AIChatBackend::Codex) {
-        return IsCodexBuildInstalled();
-    }
-    if (backend == AIChatBackend::AntiGravity) {
-        return IsAntiGravityInstalled();
-    }
-    return false;
+    AIChatProvider* provider = TranslationProvider(backend);
+    return provider && provider->IsInstalled();
 }
 
 static Str BackendDisplayName(AIChatBackend backend) {
-    if (backend == AIChatBackend::Grok) {
-        return StrL("Grok Build");
-    }
-    if (backend == AIChatBackend::Claude) {
-        return StrL("Claude Code");
-    }
-    if (backend == AIChatBackend::Codex) {
-        return StrL("OpenAI Codex");
-    }
-    if (backend == AIChatBackend::AntiGravity) {
-        return StrL("Antigravity");
-    }
-    return StrL("AI");
+    AIChatProvider* provider = TranslationProvider(backend);
+    return provider ? provider->name : StrL("AI");
 }
 
 // in dropdown order
@@ -751,10 +648,11 @@ static Str EngineDisplayName(TranslateEngine engine) {
 
 static bool IsEngineAvailable(TranslateEngine engine) {
     if (EngineIsAI(engine)) {
-        return IsBackendInstalled(BackendFromEngine(engine));
+        return HasPermission(Perm::InternetAccess) && CanAccessDisk() && HasPermission(Perm::CopySelection) &&
+               IsAIChatAvailable() && IsBackendInstalled(BackendFromEngine(engine));
     }
     // Google / DeepL translate by opening a browser
-    return HasPermission(Perm::InternetAccess);
+    return HasPermission(Perm::InternetAccess) && HasPermission(Perm::CopySelection);
 }
 
 static TranslateEngine EngineFromName(Str name) {
@@ -780,7 +678,7 @@ static TranslateEngine ResolveEngine(TranslateEngine engine) {
             return cand;
         }
     }
-    return TranslateEngine::Google;
+    return TranslateEngine::Default;
 }
 
 static void PopulateEngineDropDown(DropDown* dd, TranslateEngine selected) {
@@ -794,9 +692,6 @@ static void PopulateEngineDropDown(DropDown* dd, TranslateEngine selected) {
             selIdx = len(items);
         }
         items.Append(EngineDisplayName(engine));
-    }
-    if (len(items) == 0) {
-        items.Append(EngineDisplayName(TranslateEngine::Google));
     }
     dd->SetItems(items);
     dd->SetCurrentSelection(selIdx);
@@ -830,6 +725,11 @@ static TempStr BuildTranslateUrlTemp(TranslateEngine engine, Str srcLang, Str ds
 }
 
 static bool RunTranslation(AIChatBackend backend, Str srcLang, Str dstLang, Str text, Str& msgOut) {
+    if (!IsAIChatAvailable() || !HasPermission(Perm::InternetAccess) || !CanAccessDisk() ||
+        !HasPermission(Perm::CopySelection)) {
+        msgOut = str::Dup(_TRA("Translation is unavailable."));
+        return false;
+    }
     TempStr exePath = FindBackendExecutableTemp(backend);
     if (!exePath) {
         msgOut = str::Dup(_TRA("The selected AI CLI is not installed."));
@@ -838,15 +738,10 @@ static bool RunTranslation(AIChatBackend backend, Str srcLang, Str dstLang, Str 
 
     TempStr prompt = BuildTranslationPromptTemp(srcLang, dstLang, text);
     TempStr cwd = StripTrailingSlashTemp(GetTempDirTemp());
-    TempStr cmdLine;
-    if (backend == AIChatBackend::Grok) {
-        cmdLine = BuildGrokTranslateCmdLineTemp(exePath, prompt, cwd);
-    } else if (backend == AIChatBackend::Claude) {
-        cmdLine = BuildClaudeTranslateCmdLineTemp(exePath, prompt);
-    } else if (backend == AIChatBackend::Codex) {
-        cmdLine = BuildCodexTranslateCmdLineTemp(exePath, prompt, cwd);
-    } else if (backend == AIChatBackend::AntiGravity) {
-        cmdLine = BuildAntiGravityTranslateCmdLineTemp(exePath, prompt);
+    TempStr cmdLine = BuildTranslateCmdLineTemp(backend, exePath, prompt, cwd);
+    if (!cmdLine) {
+        msgOut = str::Dup(_TRA("Failed to build the AI CLI command."));
+        return false;
     }
 
     LogTranslation(backend, ">>> backend", BackendDisplayName(backend));
@@ -862,25 +757,38 @@ static bool RunTranslation(AIChatBackend backend, Str srcLang, Str dstLang, Str 
         return false;
     }
 
+    ULONGLONG startedAt = GetTickCount64();
     str::Builder output(4096);
-    ReadPipeToStrBuilder(launch.hReadPipe, output);
-    CloseHandle(launch.hReadPipe);
-    launch.hReadPipe = nullptr;
-
-    DWORD waitRes = WaitForSingleObject(launch.hProcess, 5 * 60 * 1000);
-    if (waitRes == WAIT_TIMEOUT) {
-        TerminateProcess(launch.hProcess, 1);
-        AIChatCloseProcess(&launch.hProcess, false);
-        msgOut = str::Dup(_TRA("Translation timed out."));
+    TranslationPipeResult readResult = ReadPipeToStrBuilder(launch.hReadPipe, launch.hProcess, output, startedAt);
+    if (launch.hReadPipe) {
+        CloseHandle(launch.hReadPipe);
+        launch.hReadPipe = nullptr;
+    }
+    if (readResult != TranslationPipeResult::Ok) {
+        Str reason = readResult == TranslationPipeResult::TimedOut      ? _TRA("Translation timed out.")
+                     : readResult == TranslationPipeResult::OutputLimit ? _TRA("Translation response was too large.")
+                                                                        : _TRA("Failed to read the AI CLI response.");
+        AIChatCloseProcess(&launch.hProcess, true);
+        msgOut = str::Dup(reason);
         LogTranslation(backend, "<<< error", msgOut);
         return false;
     }
-    AIChatCloseProcess(&launch.hProcess, false);
+    AIChatCloseProcess(&launch.hProcess, true);
 
     LogTranslation(backend, "<<< raw", ToStr(output));
 
     str::Builder translation(1024);
-    ParseTranslationOutput(backend, ToStr(output), translation);
+    str::Builder errorOutput(256);
+    if (!ParseTranslationOutput(backend, ToStr(output), translation, errorOutput)) {
+        msgOut = str::Dup(_TRA("Failed to parse the AI CLI response."));
+        LogTranslation(backend, "<<< error", msgOut);
+        return false;
+    }
+    if (len(errorOutput) > 0) {
+        msgOut = errorOutput.TakeStr();
+        LogTranslation(backend, "<<< error", msgOut);
+        return false;
+    }
     LogTranslation(backend, "<<< parsed", ToStr(translation));
     if (len(translation) == 0) {
         msgOut = str::Dup(_TRA("Translation response did not contain text."));
@@ -1029,6 +937,9 @@ void SelectionTranslateWnd::ShowTranslationResult(Str text, bool isError) {
 }
 
 void SelectionTranslateWnd::StartTranslation(VirtMouseEvent*) {
+    if (!HasPermission(Perm::InternetAccess) || !HasPermission(Perm::CopySelection)) {
+        return;
+    }
     if (translating) {
         return;
     }
@@ -1040,6 +951,9 @@ void SelectionTranslateWnd::StartTranslation(VirtMouseEvent*) {
     }
 
     TranslateEngine curEngine = ResolveEngine(dropEngine ? EngineFromName(dropEngine->GetTextTemp()) : engine);
+    if (curEngine == TranslateEngine::Default) {
+        return;
+    }
     MaybeSaveTranslatePrefs(curEngine, srcLang, dstLang);
 
     if (!EngineIsAI(curEngine)) {
@@ -1078,13 +992,22 @@ void SelectionTranslateWnd::StartTranslation(VirtMouseEvent*) {
         Relayout();
     }
 
+    u64 generation = ++gSelectionTranslateGeneration;
+    translationGeneration = generation;
     auto* task = new SelectionTranslateTaskData();
     task->hwndDlg = hwnd;
+    task->generation = generation;
     task->backend = backend;
     task->srcLang = str::Dup(srcLang);
     task->dstLang = str::Dup(dstLang);
     task->text = str::Dup(text);
-    RunAsync(MkFunc0(SelectionTranslateThread, task), "SelectionTranslate");
+    ThreadHandle thread = StartThread(MkFunc0(SelectionTranslateThread, task), "SelectionTranslate");
+    if (!thread) {
+        delete task;
+        OnTranslationFinished(false, _TRA("Translation failed."));
+        return;
+    }
+    SafeCloseThreadHandle(&thread);
 }
 
 void SelectionTranslateWnd::OnTranslationFinished(bool ok, Str msg) {
@@ -1113,7 +1036,8 @@ void SelectionTranslateWnd::OnCloseClicked(VirtMouseEvent*) {
 static void OnTranslateDone(SelectionTranslateDoneData* data) {
     AutoDelete del(data);
     if (!gSelectionTranslateWnd || !IsWindow(gSelectionTranslateWnd->hwnd) ||
-        gSelectionTranslateWnd->hwnd != data->hwndDlg) {
+        gSelectionTranslateWnd->hwnd != data->hwndDlg ||
+        gSelectionTranslateWnd->translationGeneration != data->generation) {
         return;
     }
     gSelectionTranslateWnd->OnTranslationFinished(data->ok, data->msg);
@@ -1129,9 +1053,12 @@ static void SelectionTranslateThread(SelectionTranslateTaskData* data) {
 
     auto* done = new SelectionTranslateDoneData();
     done->hwndDlg = data->hwndDlg;
+    done->generation = data->generation;
     done->ok = ok;
     done->msg = result;
-    uitask::Post(MkFunc0(OnTranslateDone, done), "SelectionTranslateDone");
+    if (!uitask::Post(MkFunc0(OnTranslateDone, done), "SelectionTranslateDone")) {
+        delete done;
+    }
 }
 
 static void TeardownSelectionTranslateWnd() {

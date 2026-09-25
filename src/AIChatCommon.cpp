@@ -2,6 +2,7 @@
    License: GPLv3 */
 
 #include "base/Base.h"
+#include "base/CmdLineArgsIter.h"
 #include "gui/Dpi.h"
 #include "base/File.h"
 #include "base/Win.h"
@@ -28,10 +29,30 @@
 
 #include "AIChatCommon.h"
 #include "EngineAll.h"
+#include "Installer.h"
+
+static Str kAIChatMarkerFileName = StrL("AIChat.enabled");
+
+TempStr AIChatMarkerPathTemp(Str dir) {
+    return path::JoinTemp(dir, kAIChatMarkerFileName);
+}
+
+bool IsAIChatInstallEnabled() {
+    TempStr marker = AIChatMarkerPathTemp(GetSelfExeDirTemp());
+    return file::Exists(marker);
+}
 
 bool IsAIChatAvailable() {
     // the chat UI is a WebView
-    return HasWebView();
+    if (!HasWebView()) {
+        return false;
+    }
+    // uninstalled (dev / portable) copies keep AI chat as before; installed
+    // copies only when the installer checkbox opted in (marker file)
+    if (!IsOurExeInstalled()) {
+        return true;
+    }
+    return IsAIChatInstallEnabled();
 }
 
 bool IsAIChatSupportedForFile(Str filePath, Kind engineKind) {
@@ -175,17 +196,16 @@ TempStr AIChatDebugGetTemp() {
     return str::DupTemp(ToStr(gAIChatDbgLog));
 }
 
-void AIChatLog(AIChatLogger* logger, Str direction, Str text) {
-    if (!text) {
-        text = "";
-    }
-
+static void AIChatWriteLogEntry(AIChatLogger* logger, Str direction, Str safeText) {
     SYSTEMTIME st;
     GetLocalTime(&st);
     str::Builder entry;
     entry.Append(fmt("[%04d-%02d-%02d %02d:%02d:%02d] %s: ", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute,
-                     st.wSecond, direction));
-    entry.Append(text);
+                     st.wSecond, direction ? direction : StrL("event")));
+    if (safeText) {
+        entry.AppendChar(' ');
+        entry.Append(safeText);
+    }
     if (entry.LastChar() != '\n') {
         entry.AppendChar('\n');
     }
@@ -202,7 +222,7 @@ void AIChatLog(AIChatLogger* logger, Str direction, Str text) {
         return;
     }
     if (logger->logTag) {
-        logf("%s %s: %s", logger->logTag, direction, text);
+        logf("%s %s: %s", logger->logTag, direction ? direction : StrL("event"), safeText ? safeText : StrL(""));
     }
 
     TempStr dir = GetSumatraDataDirTemp();
@@ -215,13 +235,21 @@ void AIChatLog(AIChatLogger* logger, Str direction, Str text) {
     }
 
     logger->mutex->Lock();
-    FILE* f = fopen(path.s, "a");
+    FILE* f = fopen(CStrTemp(path), "a");
     if (f) {
         fwrite(ToStr(entry).s, 1, len(entry), f);
         fflush(f);
         fclose(f);
     }
     logger->mutex->Unlock();
+}
+
+void AIChatLog(AIChatLogger* logger, Str direction, Str text) {
+    AIChatWriteLogEntry(logger, direction, fmt("bytes=%d", text ? len(text) : 0));
+}
+
+void AIChatLogMeta(AIChatLogger* logger, Str direction, Str key, i64 value) {
+    AIChatWriteLogEntry(logger, direction, fmt("%s=%lld", key ? key : StrL("value"), value));
 }
 
 constexpr int kBtnIdAIChatLearnMore = 100;
@@ -474,16 +502,31 @@ function scrollToBottom() {
 }
 </script></body></html>)";
 
+static bool IsHexColor(Str value) {
+    if (len(value) != 4 && len(value) != 7 && len(value) != 9) {
+        return false;
+    }
+    if (value.s[0] != '#') {
+        return false;
+    }
+    for (int i = 1; i < len(value); i++) {
+        u8 c = (u8)value.s[i];
+        bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+        if (!hex) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static TempStr ColorToCssTemp(Color c) {
     return fmt("#%02x%02x%02x", (int)GetRValue(c), (int)GetGValue(c), (int)GetBValue(c));
 }
 
-// bgColor is the per-backend BgColor setting; "#ffffff" is its default value
-// and means "follow the theme". An explicitly different color keeps the
-// classic light chat colors on top of that background.
 TempStr AIChatFormatChatHtmlTemp(Str virtualHost, Str bgColor) {
     Str host = virtualHost ? virtualHost : StrL("");
-    bool followTheme = str::IsEmptyOrWhiteSpace(bgColor) || str::EqI(bgColor, StrL("#ffffff"));
+    bool validBg = IsHexColor(bgColor);
+    bool followTheme = !validBg || str::EqI(bgColor, StrL("#ffffff"));
     Color themeBg = ThemeControlBackgroundColor();
     bool dark = followTheme && !IsLightColor(themeBg);
     TempStr bg = followTheme ? ColorToCssTemp(themeBg) : str::DupTemp(bgColor);
@@ -498,60 +541,227 @@ TempStr AIChatFormatChatHtmlTemp(Str virtualHost, Str bgColor) {
     return fmt(kAIChatHtmlFmt, host, cssVars);
 }
 
+static void AIChatTerminateProcessTree(DWORD rootPid) {
+    if (!rootPid || rootPid == GetCurrentProcessId()) {
+        return;
+    }
+
+    Vec<DWORD> pendingPids;
+    pendingPids.Append(rootPid);
+    for (int i = 0; i < len(pendingPids); i++) {
+        HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snapshot == INVALID_HANDLE_VALUE) {
+            continue;
+        }
+        PROCESSENTRY32W entry = {};
+        entry.dwSize = sizeof(entry);
+        if (Process32FirstW(snapshot, &entry)) {
+            do {
+                if (entry.th32ParentProcessID != pendingPids[i] || entry.th32ProcessID == 0 ||
+                    pendingPids.Contains(entry.th32ProcessID)) {
+                    continue;
+                }
+                pendingPids.Append(entry.th32ProcessID);
+                HANDLE child = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, entry.th32ProcessID);
+                if (child) {
+                    TerminateProcess(child, 0);
+                    CloseHandle(child);
+                }
+            } while (Process32NextW(snapshot, &entry));
+        }
+        CloseHandle(snapshot);
+    }
+}
+
 void AIChatCloseProcess(HANDLE* processHandle, bool terminateIfRunning) {
     if (!processHandle || !*processHandle) {
         return;
     }
     HANDLE h = *processHandle;
     *processHandle = nullptr;
-    if (terminateIfRunning && WaitForSingleObject(h, 0) == WAIT_TIMEOUT) {
+    DWORD waitResult = WaitForSingleObject(h, 0);
+    if (terminateIfRunning && waitResult != WAIT_OBJECT_0) {
+        DWORD processId = GetProcessId(h);
+        if (processId) {
+            AIChatTerminateProcessTree(processId);
+        }
         TerminateProcess(h, 0);
     }
     CloseHandle(h);
 }
 
-bool AIChatLaunchProcessWithStdoutPipe(Str cmdLine, Str cwd, AIChatProcessLaunchResult* out) {
+static bool IsSafeCmdScriptArg(Str value) {
+    for (int i = 0; i < len(value); i++) {
+        char c = value.s[i];
+        if (c == '"' || c == '&' || c == '|' || c == '<' || c == '>' || c == '^' || c == '(' || c == ')' || c == '%' ||
+            c == '!' || c == '\r' || c == '\n') {
+            return false;
+        }
+    }
+    return true;
+}
+
+static TempStr AIChatPrepareProcessCommandLine(Str cmdLine) {
+    int argc = 0;
+    WCHAR** argv = CommandLineToArgvW(CWStrTemp(cmdLine), &argc);
+    if (!argv || argc < 1) {
+        if (argv) {
+            LocalFree(argv);
+        }
+        return {};
+    }
+
+    TempStr exePath = ToUtf8Temp(argv[0]);
+    bool isScript = str::EndsWithI(exePath, StrL(".cmd")) || str::EndsWithI(exePath, StrL(".bat"));
+    if (!isScript) {
+        LocalFree(argv);
+        return str::DupTemp(cmdLine);
+    }
+    if (!IsSafeCmdScriptArg(exePath)) {
+        LocalFree(argv);
+        return {};
+    }
+    for (int i = 1; i < argc; i++) {
+        if (!IsSafeCmdScriptArg(ToUtf8Temp(argv[i]))) {
+            LocalFree(argv);
+            return {};
+        }
+    }
+
+    WCHAR systemDir[MAX_PATH]{};
+    UINT systemDirLen = GetSystemDirectoryW(systemDir, dimof(systemDir));
+    if (systemDirLen == 0 || systemDirLen >= dimof(systemDir)) {
+        LocalFree(argv);
+        return {};
+    }
+    TempStr cmdExe = path::JoinTemp(ToUtf8Temp(systemDir), StrL("cmd.exe"));
+    if (!file::Exists(cmdExe)) {
+        LocalFree(argv);
+        return {};
+    }
+
+    str::Builder payload;
+    payload.Append(QuoteCmdLineArgTemp(exePath));
+    for (int i = 1; i < argc; i++) {
+        payload.AppendChar(' ');
+        payload.Append(QuoteCmdLineArgTemp(ToUtf8Temp(argv[i])));
+    }
+    LocalFree(argv);
+    return fmt("%s /d /s /c \"%s\"", QuoteCmdLineArgTemp(cmdExe), ToStr(payload));
+}
+
+static bool AIChatLaunchProcessWithPipes(Str cmdLine, Str cwd, bool withStdin, AIChatProcessLaunchResult* out) {
     if (!out || len(cmdLine) == 0) {
         return false;
     }
     *out = {};
 
-    SECURITY_ATTRIBUTES sa;
+    TempStr processCmdLine = AIChatPrepareProcessCommandLine(cmdLine);
+    if (!processCmdLine) {
+        return false;
+    }
+
+    SECURITY_ATTRIBUTES sa = {};
     sa.nLength = sizeof(sa);
-    sa.lpSecurityDescriptor = nullptr;
     sa.bInheritHandle = TRUE;
 
-    HANDLE hReadPipe, hWritePipe;
-    if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) {
+    HANDLE hStdoutRead = nullptr;
+    HANDLE hStdoutWrite = nullptr;
+    HANDLE hStdinRead = nullptr;
+    HANDLE hStdinWrite = nullptr;
+    auto closeHandle = [](HANDLE& h) {
+        if (h && h != INVALID_HANDLE_VALUE) {
+            CloseHandle(h);
+            h = nullptr;
+        }
+    };
+
+    if (!CreatePipe(&hStdoutRead, &hStdoutWrite, &sa, 0) ||
+        !SetHandleInformation(hStdoutRead, HANDLE_FLAG_INHERIT, 0)) {
+        closeHandle(hStdoutRead);
+        closeHandle(hStdoutWrite);
         return false;
     }
-    SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
-
-    STARTUPINFOW si = {};
-    si.cb = sizeof(si);
-    si.hStdOutput = hWritePipe;
-    si.hStdError = hWritePipe;
-    si.dwFlags = STARTF_USESTDHANDLES;
-
-    PROCESS_INFORMATION pi = {};
-    WCHAR* cmdLineW = CWStrTemp(cmdLine);
-    WCHAR* dirW = cwd ? CWStrTemp(cwd) : nullptr;
-
-    BOOL ok = CreateProcessW(nullptr, cmdLineW, nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, cwd ? dirW : nullptr,
-                             &si, &pi);
-    CloseHandle(hWritePipe);
-
-    if (!ok) {
-        CloseHandle(hReadPipe);
+    if (withStdin && (!CreatePipe(&hStdinRead, &hStdinWrite, &sa, 0) ||
+                      !SetHandleInformation(hStdinWrite, HANDLE_FLAG_INHERIT, 0))) {
+        closeHandle(hStdoutRead);
+        closeHandle(hStdoutWrite);
+        closeHandle(hStdinRead);
+        closeHandle(hStdinWrite);
         return false;
     }
 
-    CloseHandle(pi.hThread);
+    HANDLE inheritedHandles[2] = {hStdoutWrite, hStdinRead};
+    SIZE_T inheritedCount = withStdin ? 2 : 1;
+    SIZE_T attributeBytes = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attributeBytes);
+    if (attributeBytes == 0) {
+        closeHandle(hStdoutRead);
+        closeHandle(hStdoutWrite);
+        closeHandle(hStdinRead);
+        closeHandle(hStdinWrite);
+        return false;
+    }
+    void* attributeMemory = malloc(attributeBytes);
+    if (!attributeMemory) {
+        closeHandle(hStdoutRead);
+        closeHandle(hStdoutWrite);
+        closeHandle(hStdinRead);
+        closeHandle(hStdinWrite);
+        return false;
+    }
+    PPROC_THREAD_ATTRIBUTE_LIST attributes = (PPROC_THREAD_ATTRIBUTE_LIST)attributeMemory;
+    bool attributesInitialized = InitializeProcThreadAttributeList(attributes, 1, 0, &attributeBytes) != FALSE;
+    bool attributesReady = attributesInitialized;
+    if (attributesReady) {
+        attributesReady = UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inheritedHandles,
+                                                    inheritedCount * sizeof(HANDLE), nullptr, nullptr) != FALSE;
+    }
+
+    STARTUPINFOEXW startupInfo = {};
+    startupInfo.StartupInfo.cb = sizeof(startupInfo);
+    startupInfo.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startupInfo.StartupInfo.hStdInput = withStdin ? hStdinRead : nullptr;
+    startupInfo.StartupInfo.hStdOutput = hStdoutWrite;
+    startupInfo.StartupInfo.hStdError = hStdoutWrite;
+
+    PROCESS_INFORMATION processInfo = {};
+    WCHAR* commandLineW = CWStrTemp(processCmdLine);
+    WCHAR* dirW = len(cwd) > 0 ? CWStrTemp(cwd) : nullptr;
+    BOOL created = FALSE;
+    if (attributesReady) {
+        created = CreateProcessW(nullptr, commandLineW, nullptr, nullptr, TRUE,
+                                 EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW, nullptr, dirW,
+                                 &startupInfo.StartupInfo, &processInfo);
+    }
+    if (attributesInitialized) {
+        DeleteProcThreadAttributeList(attributes);
+    }
+    free(attributeMemory);
+
+    closeHandle(hStdoutWrite);
+    closeHandle(hStdinRead);
+    if (!created) {
+        closeHandle(hStdoutRead);
+        closeHandle(hStdinWrite);
+        return false;
+    }
+
+    CloseHandle(processInfo.hThread);
     out->ok = true;
-    out->hProcess = pi.hProcess;
-    out->hReadPipe = hReadPipe;
-    out->processId = pi.dwProcessId;
+    out->hProcess = processInfo.hProcess;
+    out->hReadPipe = hStdoutRead;
+    out->hWritePipe = hStdinWrite;
+    out->processId = processInfo.dwProcessId;
     return true;
+}
+
+bool AIChatLaunchProcessWithStdoutPipe(Str cmdLine, Str cwd, AIChatProcessLaunchResult* out) {
+    return AIChatLaunchProcessWithPipes(cmdLine, cwd, false, out);
+}
+
+bool AIChatLaunchProcessWithStdinPipe(Str cmdLine, Str cwd, AIChatProcessLaunchResult* out) {
+    return AIChatLaunchProcessWithPipes(cmdLine, cwd, true, out);
 }
 
 constexpr int kAIChatLabelCloseBtnDx = 16;
@@ -671,7 +881,8 @@ void AIChatWaitForTabProcessesToFinish(MainWindow* win, bool (*tabHasRunningProc
     if (!win || !tabHasRunningProcess) {
         return;
     }
-    for (int i = 0; i < 20; i++) {
+    u64 deadline = GetTickCount64() + 5000;
+    for (;;) {
         uitask::DrainQueue();
         bool anyRunning = false;
         for (WindowTab* tab : win->Tabs()) {
@@ -679,7 +890,7 @@ void AIChatWaitForTabProcessesToFinish(MainWindow* win, bool (*tabHasRunningProc
                 anyRunning = true;
             }
         }
-        if (!anyRunning) {
+        if (!anyRunning || GetTickCount64() >= deadline) {
             break;
         }
         Sleep(10);

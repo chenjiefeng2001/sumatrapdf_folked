@@ -31,6 +31,7 @@
 
 #include "resource.h"
 #include "Settings.h"
+#include "AIChatCommon.h"
 #include "AppSettings.h"
 #include "Flags.h"
 #include "Version.h"
@@ -70,6 +71,7 @@ struct InstallerWnd {
     Checkbox* checkboxForAllUsers = nullptr;
     Checkbox* checkboxRegisterSearchFilter = nullptr;
     Checkbox* checkboxRegisterPreview = nullptr;
+    Checkbox* checkboxEnableAIChat = nullptr;
     int currProgress = 0;
     Progress* progressBar = nullptr;
     Button* btnExit = nullptr;
@@ -1180,6 +1182,25 @@ static void AddInstallDirToPath(bool allUsers, Str installDir) {
     SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, (LPARAM)L"Environment", SMTO_ABORTIFHUNG, 5000, nullptr);
 }
 
+// The app enables AI chat for installed copies only with this marker next to
+// the exe (see IsAIChatInstallEnabled). Written when the installer checkbox
+// (or -with-ai) opts in, removed otherwise so reinstalling without it opts out.
+static void SetAIChatInstallMarker(Str installDir, bool enable) {
+    if (!installDir) {
+        return;
+    }
+    TempStr marker = AIChatMarkerPathTemp(installDir);
+    if (enable) {
+        if (!file::WriteFile(marker, StrL("enabled\n"))) {
+            logf("SetAIChatInstallMarker: failed to write '%s'\n", marker);
+        }
+    } else if (file::Exists(marker)) {
+        if (!file::Delete(marker)) {
+            logf("SetAIChatInstallMarker: failed to delete '%s'\n", marker);
+        }
+    }
+}
+
 static void InstallerThread(Flags* cli) {
     bool ok;
 
@@ -1187,8 +1208,10 @@ static void InstallerThread(Flags* cli) {
 
     TempStr installedExePath = path::JoinTemp(cli->installDir, kExeName);
     auto allUsers = cli->allUsers;
-    logf("InstallerThread: cli->allUsers: %d, cli->withFilter: %d, cli->withPreview: %d, installerExePath: '%s'\n",
-         (int)cli->allUsers, (int)cli->withFilter, (int)cli->withPreview, installedExePath);
+    logf(
+        "InstallerThread: cli->allUsers: %d, cli->withFilter: %d, cli->withPreview: %d, cli->withAI: %d, "
+        "installerExePath: '%s'\n",
+        (int)cli->allUsers, (int)cli->withFilter, (int)cli->withPreview, (int)cli->withAI, installedExePath);
     HKEY key = cli->allUsers ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER;
 
     // Unregister shell extensions and kill holders BEFORE extract. PdfFilter.dll
@@ -1236,6 +1259,10 @@ static void InstallerThread(Flags* cli) {
     if (cli->withPreview) {
         RegisterPreviewer(allUsers, cli->installDir);
     }
+
+    // AI chat is opt-in: leave a marker for the app to pick up, or remove a
+    // stale one when upgrading/reinstalling without the checkbox
+    SetAIChatInstallMarker(cli->installDir, cli->withAI);
 
     CreateAppShortcuts(allUsers, installedExePath);
 
@@ -1291,6 +1318,9 @@ static void RestartElevatedForAllUsers(Flags* cli) {
     }
     if (cli->withPreview) {
         cmdLine = str::JoinTemp(cmdLine, StrL(" -with-preview"));
+    }
+    if (cli->withAI) {
+        cmdLine = str::JoinTemp(cmdLine, StrL(" -with-ai"));
     }
     if (cli->silent) {
         cmdLine = str::JoinTemp(cmdLine, StrL(" -silent"));
@@ -1360,6 +1390,7 @@ static void StartInstallation(InstallerWnd* wnd) {
     DeleteWnd(&wnd->checkboxForAllUsers);
     DeleteWnd(&wnd->checkboxRegisterSearchFilter);
     DeleteWnd(&wnd->checkboxRegisterPreview);
+    DeleteWnd(&wnd->checkboxEnableAIChat);
     DeleteWnd(&wnd->btnOptions);
 
     SetMsg(_TRA("Installation in progress..."), COLOR_MSG_INSTALLATION);
@@ -1419,6 +1450,7 @@ static void OnButtonInstall(InstallerWnd* wnd) {
     cli->withFilter = wnd->checkboxRegisterSearchFilter && wnd->checkboxRegisterSearchFilter->IsChecked();
     // note: this checkbox isn't created on Windows 2000 and XP
     cli->withPreview = wnd->checkboxRegisterPreview && wnd->checkboxRegisterPreview->IsChecked();
+    cli->withAI = wnd->checkboxEnableAIChat && wnd->checkboxEnableAIChat->IsChecked();
 
     // Program Files always needs machine-style install + elevation
     if (IsPathUnderProgramFiles(cli->installDir) && !cli->allUsers) {
@@ -1658,6 +1690,7 @@ static void UpdateUIForOptionsState(InstallerWnd* wnd) {
     ShowAndEnable(wnd->checkboxForAllUsers, showOpts);
     ShowAndEnable(wnd->checkboxRegisterSearchFilter, showOpts);
     ShowAndEnable(wnd->checkboxRegisterPreview, showOpts);
+    ShowAndEnable(wnd->checkboxEnableAIChat, showOpts);
 
     auto* btnOptions = wnd->btnOptions;
     //[ ACCESSKEY_GROUP Installer
@@ -1841,6 +1874,20 @@ static void CreateInstallerWindowControls(InstallerWnd* wnd, Flags* cli) {
         wnd->checkboxForAllUsers->onStateChanged = MkFunc0Void(ForAllUsersStateChanged);
     }
 
+    {
+        // AI chat is opt-in: default off, checked when -with-ai was passed or
+        // a previous install left the marker file behind
+        Str s = _TRA("Enable &AI chat support");
+        bool isChecked = cli->withAI;
+        if (!isChecked && cli->installDir) {
+            isChecked = file::Exists(AIChatMarkerPathTemp(cli->installDir));
+        }
+        if (isChecked) {
+            showOptions = true;
+        }
+        wnd->checkboxEnableAIChat = CreateCheckbox(hwnd, s, isChecked);
+    }
+
     wnd->btnBrowseDir = CreateDefaultButton(hwnd, "&...", isRtl);
     wnd->btnBrowseDir->onClick = MkFunc0(OnButtonBrowse, wnd);
 
@@ -1887,6 +1934,7 @@ static void CreateInstallerWindowControls(InstallerWnd* wnd, Flags* cli) {
     addCheck(wnd->checkboxForAllUsers, opts);
     addCheck(wnd->checkboxRegisterSearchFilter, opts);
     addCheck(wnd->checkboxRegisterPreview, opts);
+    addCheck(wnd->checkboxEnableAIChat, opts);
     wnd->optionsBox = new Padding(opts, Insets{0, margin, 0, margin});
 
     // options sit at the bottom of the branded area, above the button row
@@ -1913,7 +1961,7 @@ static void CreateInstallerWindowControls(InstallerWnd* wnd, Flags* cli) {
     wnd->showOptions = showOptions;
     UpdateUIForOptionsState(wnd);
 
-    HWND hwnds[8] = {};
+    HWND hwnds[9] = {};
     int nHwnds = 0;
     if (showInstallButton) {
         hwnds[nHwnds++] = wnd->btnInstall->hwnd;
@@ -1926,6 +1974,9 @@ static void CreateInstallerWindowControls(InstallerWnd* wnd, Flags* cli) {
     }
     if (wnd->checkboxRegisterPreview) {
         hwnds[nHwnds++] = wnd->checkboxRegisterPreview->hwnd;
+    }
+    if (wnd->checkboxEnableAIChat) {
+        hwnds[nHwnds++] = wnd->checkboxEnableAIChat->hwnd;
     }
     hwnds[nHwnds++] = wnd->btnOptions->hwnd;
     SetTabOrder(hwnds, nHwnds);

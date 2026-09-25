@@ -573,6 +573,16 @@ enum class ControlArgType : u16 {
     List = 4,
 };
 
+constexpr size_t kControlMaxRequestBytes = 16ll * 1024 * 1024;
+constexpr size_t kControlMaxResponseBytes = 16ll * 1024 * 1024;
+constexpr size_t kControlMaxArgBytes = 4ll * 1024 * 1024;
+constexpr int kControlMaxArgDepth = 32;
+constexpr int kControlMaxArgCount = 4096;
+constexpr DWORD kControlIdleReadTimeoutMs = 5 * 60 * 1000;
+constexpr DWORD kControlRequestReadTimeoutMs = 15 * 1000;
+constexpr DWORD kControlResponseTimeoutMs = 2 * 60 * 1000;
+constexpr DWORD kControlErrorWriteTimeoutMs = 5 * 1000;
+
 struct ControlArg {
     ControlArgType type = ControlArgType::End;
     i32 intVal = 0;
@@ -610,6 +620,8 @@ struct ControlRequest {
     str::Builder results;
     HANDLE done = nullptr;
     RenderIdleState idleState = RenderIdleState::NotReady;
+    const char* parseError = nullptr;
+    AtomicInt refs = 1;
     char idleInfo[320]{};
 };
 
@@ -624,13 +636,19 @@ static void DeleteControlRequest(ControlRequest* req) {
     delete req;
 }
 
+static void ReleaseControlRequest(ControlRequest* req) {
+    if (req && AtomicIntDec(&req->refs) == 0) {
+        DeleteControlRequest(req);
+    }
+}
+
 struct PacketReader {
     const u8* data = nullptr;
     size_t size = 0;
     size_t pos = 0;
 
     bool ReadU16(u16& v) {
-        if (pos + 2 > size) {
+        if (data == nullptr || pos > size || size - pos < 2) {
             return false;
         }
         v = (u16)(data[pos] | (data[pos + 1] << 8));
@@ -639,7 +657,7 @@ struct PacketReader {
     }
 
     bool ReadU32(u32& v) {
-        if (pos + 4 > size) {
+        if (data == nullptr || pos > size || size - pos < 4) {
             return false;
         }
         v = (u32)data[pos] | ((u32)data[pos + 1] << 8) | ((u32)data[pos + 2] << 16) | ((u32)data[pos + 3] << 24);
@@ -648,64 +666,117 @@ struct PacketReader {
     }
 
     bool ReadBytes(u8* dst, size_t n) {
-        if (pos + n > size) {
+        if ((n > 0 && dst == nullptr) || pos > size || n > size - pos) {
             return false;
         }
-        memcpy(dst, data + pos, n);
+        if (n > 0) {
+            memcpy(dst, data + pos, n);
+        }
         pos += n;
         return true;
     }
 };
 
-static void AppendU16(str::Builder& s, u16 v) {
-    u8 buf[2] = {(u8)(v & 0xff), (u8)((v >> 8) & 0xff)};
-    s.Append(Str((char*)(buf), (int)(sizeof(buf))));
+struct ControlParseBudget {
+    int argCount = 0;
+};
+
+static bool AppendControlData(ControlRequest* req, Str data) {
+    if (!req || data.len < 0 || len(req->results) < 0 || (size_t)len(req->results) > kControlMaxResponseBytes) {
+        return false;
+    }
+    if ((size_t)data.len > kControlMaxResponseBytes - (size_t)len(req->results)) {
+        return false;
+    }
+    return req->results.Append(data);
 }
 
-static void AppendU32(str::Builder& s, u32 v) {
-    u8 buf[4] = {(u8)(v & 0xff), (u8)((v >> 8) & 0xff), (u8)((v >> 16) & 0xff), (u8)((v >> 24) & 0xff)};
-    s.Append(Str((char*)(buf), (int)(sizeof(buf))));
+static void SetProtocolError(ControlRequest* req, Str msg) {
+    if (!req) {
+        return;
+    }
+    req->results.Reset();
+    size_t msgLen = (size_t)std::max(msg.len, 0);
+    msgLen = std::min(msgLen, kControlMaxResponseBytes - 15);
+    i32 errorCode = -1;
+    u32 errorCodeBytes = (u32)errorCode;
+    u8 intHeader[6] = {(u8)ControlArgType::Int32,  0,
+                       (u8)errorCodeBytes,         (u8)(errorCodeBytes >> 8),
+                       (u8)(errorCodeBytes >> 16), (u8)(errorCodeBytes >> 24)};
+    u8 stringHeader[6] = {(u8)ControlArgType::String, 0, (u8)msgLen, (u8)(msgLen >> 8), (u8)(msgLen >> 16),
+                          (u8)(msgLen >> 24)};
+    u8 zero = 0;
+    u8 end[2] = {(u8)ControlArgType::End, 0};
+    if (!AppendControlData(req, Str((char*)intHeader, dimof(intHeader))) ||
+        !AppendControlData(req, Str((char*)stringHeader, dimof(stringHeader))) ||
+        !AppendControlData(req, Str(msg.s, (int)msgLen)) || !AppendControlData(req, Str((char*)&zero, 1)) ||
+        !AppendControlData(req, Str((char*)end, dimof(end)))) {
+        req->results.Reset();
+    }
 }
 
-static void AppendArgEnd(str::Builder& s) {
-    AppendU16(s, (u16)ControlArgType::End);
+static bool AppendArgEnd(ControlRequest* req) {
+    u8 data[2] = {(u8)ControlArgType::End, 0};
+    return AppendControlData(req, Str((char*)data, dimof(data)));
 }
 
-static void AppendArgInt(str::Builder& s, i32 v) {
-    AppendU16(s, (u16)ControlArgType::Int32);
-    AppendU32(s, (u32)v);
+static bool AppendArgInt(ControlRequest* req, i32 v) {
+    u32 n = (u32)v;
+    u8 data[6] = {(u8)ControlArgType::Int32, 0, (u8)n, (u8)(n >> 8), (u8)(n >> 16), (u8)(n >> 24)};
+    return AppendControlData(req, Str((char*)data, dimof(data)));
 }
 
-static void AppendArgString(str::Builder& s, Str str) {
+static bool AppendArgString(ControlRequest* req, Str str) {
     if (!str) {
         str = StrL("");
     }
     size_t n = (size_t)str.len;
-    AppendU16(s, (u16)ControlArgType::String);
-    AppendU32(s, (u32)n);
-    s.Append(str);
-    s.AppendChar(0);
+    if (n > (size_t)INT_MAX || n > kControlMaxResponseBytes - 7) {
+        return false;
+    }
+    u8 header[6] = {(u8)ControlArgType::String, 0, (u8)n, (u8)(n >> 8), (u8)(n >> 16), (u8)(n >> 24)};
+    u8 zero = 0;
+    return AppendControlData(req, Str((char*)header, dimof(header))) && AppendControlData(req, str) &&
+           AppendControlData(req, Str((char*)&zero, 1));
 }
 
-static bool ParseArg(PacketReader& r, ControlArg** argOut);
+static bool ParseArg(PacketReader& r, ControlArg** argOut, int depth, ControlParseBudget* budget, Str* error);
 
-static bool ParseArgList(PacketReader& r, Vec<ControlArg*>* args, bool explicitCount, u16 count = 0) {
+static bool ParseArgList(PacketReader& r, Vec<ControlArg*>* args, bool explicitCount, int depth,
+                         ControlParseBudget* budget, Str* error, u16 count = 0) {
+    if (!args || !budget || !error) {
+        return false;
+    }
     for (u16 i = 0; !explicitCount || i < count; i++) {
         ControlArg* arg = nullptr;
-        if (!ParseArg(r, &arg)) {
+        if (!ParseArg(r, &arg, depth, budget, error)) {
             return false;
         }
         if (!arg) {
+            if (explicitCount) {
+                *error = StrL("unexpected end marker in control list");
+            }
             return !explicitCount;
         }
-        args->Append(arg);
+        if (!args->Append(arg)) {
+            DeleteControlArg(arg);
+            *error = StrL("out of memory");
+            return false;
+        }
     }
     return true;
 }
 
-static bool ParseArg(PacketReader& r, ControlArg** argOut) {
+static bool ParseArg(PacketReader& r, ControlArg** argOut, int depth, ControlParseBudget* budget, Str* error) {
+    if (!argOut || !budget || !error || depth > kControlMaxArgDepth) {
+        if (error) {
+            *error = StrL("control argument nesting is too deep");
+        }
+        return false;
+    }
     u16 typeRaw = 0;
     if (!r.ReadU16(typeRaw)) {
+        *error = StrL("truncated control argument");
         return false;
     }
     ControlArgType type = (ControlArgType)typeRaw;
@@ -713,6 +784,11 @@ static bool ParseArg(PacketReader& r, ControlArg** argOut) {
         *argOut = nullptr;
         return true;
     }
+    if (budget->argCount >= kControlMaxArgCount) {
+        *error = StrL("too many control arguments");
+        return false;
+    }
+    budget->argCount++;
 
     ControlArg* arg = new ControlArg();
     arg->type = type;
@@ -720,6 +796,7 @@ static bool ParseArg(PacketReader& r, ControlArg** argOut) {
         u32 v = 0;
         if (!r.ReadU32(v)) {
             DeleteControlArg(arg);
+            *error = StrL("truncated int32 control argument");
             return false;
         }
         arg->intVal = (i32)v;
@@ -727,44 +804,66 @@ static bool ParseArg(PacketReader& r, ControlArg** argOut) {
         u32 n = 0;
         if (!r.ReadU32(n)) {
             DeleteControlArg(arg);
+            *error = StrL("truncated bytes control argument");
+            return false;
+        }
+        if ((size_t)n > kControlMaxArgBytes) {
+            DeleteControlArg(arg);
+            *error = StrL("bytes control argument is too large");
             return false;
         }
         arg->bytes = AllocArray<u8>((int)n + 1);
-        arg->bytesLen = n;
-        if (!r.ReadBytes(arg->bytes, n)) {
+        if (!arg->bytes || !r.ReadBytes(arg->bytes, n)) {
             DeleteControlArg(arg);
+            *error = StrL("out of memory reading bytes control argument");
             return false;
         }
+        arg->bytesLen = n;
     } else if (type == ControlArgType::String) {
         u32 n = 0;
         if (!r.ReadU32(n)) {
             DeleteControlArg(arg);
+            *error = StrL("truncated string control argument");
+            return false;
+        }
+        if ((size_t)n > kControlMaxArgBytes) {
+            DeleteControlArg(arg);
+            *error = StrL("string control argument is too large");
             return false;
         }
         char* strBuf = AllocArray<char>((int)n + 1);
-        if (!r.ReadBytes((u8*)strBuf, n)) {
+        if (!strBuf || !r.ReadBytes((u8*)strBuf, n)) {
             DeleteControlArg(arg);
+            *error = StrL("out of memory reading string control argument");
             return false;
         }
         arg->str = Str(strBuf, (int)n);
         u8 zero = 1;
         if (!r.ReadBytes(&zero, 1) || zero != 0) {
             DeleteControlArg(arg);
+            *error = StrL("invalid control string terminator");
             return false;
         }
     } else if (type == ControlArgType::List) {
         u16 count = 0;
         if (!r.ReadU16(count)) {
             DeleteControlArg(arg);
+            *error = StrL("truncated control list");
+            return false;
+        }
+        if (depth >= kControlMaxArgDepth) {
+            DeleteControlArg(arg);
+            *error = StrL("control argument nesting is too deep");
             return false;
         }
         arg->list = new Vec<ControlArg*>();
-        if (!ParseArgList(r, arg->list, true, count)) {
+        if (!ParseArgList(r, arg->list, true, depth + 1, budget, error, count)) {
             DeleteControlArg(arg);
             return false;
         }
     } else {
         DeleteControlArg(arg);
+        *error = StrL("unknown control argument type");
         return false;
     }
     *argOut = arg;
@@ -772,11 +871,11 @@ static bool ParseArg(PacketReader& r, ControlArg** argOut) {
 }
 
 static ControlArg* ArgAt(ControlRequest* req, size_t idx, ControlArgType type) {
-    if (idx >= (size_t)len(req->args)) {
+    if (!req || idx >= (size_t)len(req->args)) {
         return nullptr;
     }
     ControlArg* arg = req->args[(int)idx];
-    if (arg->type != type) {
+    if (!arg || arg->type != type) {
         return nullptr;
     }
     return arg;
@@ -797,28 +896,28 @@ static bool IntArg(ControlRequest* req, size_t idx, i32& valOut) {
 }
 
 static void AppendError(ControlRequest* req, Str msg) {
-    req->results.Reset();
-    AppendArgInt(req->results, -1);
-    AppendArgString(req->results, msg);
-    AppendArgEnd(req->results);
+    SetProtocolError(req, msg);
 }
 
 static void AppendTestResult(ControlRequest* req, int exitCode, Str result) {
-    AppendArgInt(req->results, exitCode);
-    AppendArgString(req->results, result);
-    AppendArgEnd(req->results);
+    if (!AppendArgInt(req, exitCode) || !AppendArgString(req, result) || !AppendArgEnd(req)) {
+        SetProtocolError(req, StrL("control response is too large"));
+    }
 }
 
 static void ExecuteControlRequest(ControlRequest* req) {
+    AutoCall releaseReq(ReleaseControlRequest, req);
     switch ((ControlCmd)req->cmd) {
         case ControlCmd::Ping:
-            AppendArgString(req->results, "pong");
-            AppendArgEnd(req->results);
+            if (!AppendArgString(req, StrL("pong")) || !AppendArgEnd(req)) {
+                SetProtocolError(req, StrL("control response is too large"));
+            }
             break;
 
         case ControlCmd::Quit:
-            AppendArgInt(req->results, 0);
-            AppendArgEnd(req->results);
+            if (!AppendArgInt(req, 0) || !AppendArgEnd(req)) {
+                SetProtocolError(req, StrL("control response is too large"));
+            }
             PostAppExit();
             break;
 
@@ -1511,6 +1610,7 @@ static void ExecuteControlRequest(ControlRequest* req) {
 // and the cache walk both belong there. Does not block; the control thread
 // polls so WM_PAINT can still request missing tiles.
 static void SnapshotRenderIdle(ControlRequest* req) {
+    AutoCall releaseReq(ReleaseControlRequest, req);
     req->idleState = RenderIdleState::NotReady;
     req->idleInfo[0] = 0;
     if (gIsStartup) {
@@ -1586,93 +1686,243 @@ static void SnapshotRenderIdle(ControlRequest* req) {
     SetEvent(req->done);
 }
 
+static DWORD ControlTimeRemaining(u64 deadline) {
+    u64 now = GetTickCount64();
+    if (now >= deadline) {
+        return 0;
+    }
+    u64 remaining = deadline - now;
+    return remaining > MAXDWORD ? MAXDWORD : (DWORD)remaining;
+}
+
+static void CancelControlIo(HANDLE h, OVERLAPPED& ov) {
+    CancelIoEx(h, &ov);
+    DWORD transferred = 0;
+    GetOverlappedResult(h, &ov, &transferred, TRUE);
+}
+
 // Block on the control thread until visible tiles are cached at target
 // resolution, or until timeoutMs. Optional first int arg is the timeout.
-static void RunWaitRenderIdle(ControlRequest* req) {
+static bool RunWaitRenderIdle(ControlRequest* req) {
     i32 timeoutMs = 15000;
     IntArg(req, 0, timeoutMs);
-    if (timeoutMs < 1) {
-        timeoutMs = 1;
-    }
+    timeoutMs = std::max(timeoutMs, 1);
+    timeoutMs = std::min(timeoutMs, 60000);
     u64 deadline = GetTickCount64() + (u64)timeoutMs;
     for (;;) {
         ResetEvent(req->done);
-        uitask::Post(MkFunc0<ControlRequest>(SnapshotRenderIdle, req), "WaitRenderIdle");
-        WaitForSingleObject(req->done, INFINITE);
+        AtomicIntInc(&req->refs);
+        if (!uitask::Post(MkFunc0<ControlRequest>(SnapshotRenderIdle, req), "WaitRenderIdle")) {
+            ReleaseControlRequest(req);
+            return false;
+        }
+        DWORD wait = WaitForSingleObject(req->done, ControlTimeRemaining(deadline));
+        if (wait != WAIT_OBJECT_0) {
+            if (WaitForSingleObject(req->done, 0) != WAIT_OBJECT_0) {
+                return false;
+            }
+        }
         if (req->idleState == RenderIdleState::Idle) {
             AppendTestResult(req, 0, req->idleInfo[0] ? Str(req->idleInfo) : StrL("idle"));
-            return;
+            return true;
         }
         if (GetTickCount64() >= deadline) {
             Str kind = req->idleState == RenderIdleState::NotReady ? StrL("timeout-notready") : StrL("timeout-busy");
             AppendTestResult(req, 1, req->idleInfo[0] ? fmt("%s %s", kind, Str(req->idleInfo)) : kind);
-            return;
+            return true;
         }
-        Sleep(20);
+        DWORD sleepMs = std::min<DWORD>(20, ControlTimeRemaining(deadline));
+        if (sleepMs > 0) {
+            Sleep(sleepMs);
+        }
     }
 }
 
-static bool ReadExact(HANDLE h, void* data, DWORD n) {
-    u8* d = (u8*)data;
+static bool ReadExact(HANDLE h, void* data, DWORD n, u64 deadline, bool* anyBytes = nullptr) {
+    if (anyBytes) {
+        *anyBytes = false;
+    }
+    if (n == 0) {
+        return true;
+    }
+    if (!h || !data) {
+        return false;
+    }
+    u8* bytes = (u8*)data;
     DWORD total = 0;
     while (total < n) {
-        DWORD nRead = 0;
-        if (!ReadFile(h, d + total, n - total, &nRead, nullptr) || nRead == 0) {
+        OVERLAPPED ov{};
+        ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!ov.hEvent) {
             return false;
         }
+        BOOL ok = ReadFile(h, bytes + total, n - total, nullptr, &ov);
+        if (!ok) {
+            DWORD err = GetLastError();
+            if (err != ERROR_IO_PENDING) {
+                CloseHandle(ov.hEvent);
+                return false;
+            }
+            if (WaitForSingleObject(ov.hEvent, ControlTimeRemaining(deadline)) != WAIT_OBJECT_0) {
+                CancelControlIo(h, ov);
+                CloseHandle(ov.hEvent);
+                return false;
+            }
+        }
+        DWORD nRead = 0;
+        if (!GetOverlappedResult(h, &ov, &nRead, FALSE) || nRead == 0 || nRead > n - total) {
+            CloseHandle(ov.hEvent);
+            return false;
+        }
+        CloseHandle(ov.hEvent);
         total += nRead;
+        if (anyBytes) {
+            *anyBytes = true;
+        }
     }
     return true;
 }
 
-static bool WriteExact(HANDLE h, Str data) {
-    const u8* d = (const u8*)data.s;
+static bool WriteExact(HANDLE h, Str data, u64 deadline) {
+    if (data.len == 0) {
+        return true;
+    }
+    if (!h || !data.s || data.len < 0) {
+        return false;
+    }
+    const u8* bytes = (const u8*)data.s;
     int total = 0;
     while (total < data.len) {
-        DWORD nWritten = 0;
-        if (!WriteFile(h, d + total, (DWORD)(data.len - total), &nWritten, nullptr) || nWritten == 0) {
+        OVERLAPPED ov{};
+        ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!ov.hEvent) {
             return false;
         }
+        BOOL ok = WriteFile(h, bytes + total, (DWORD)(data.len - total), nullptr, &ov);
+        if (!ok) {
+            DWORD err = GetLastError();
+            if (err != ERROR_IO_PENDING) {
+                CloseHandle(ov.hEvent);
+                return false;
+            }
+            if (WaitForSingleObject(ov.hEvent, ControlTimeRemaining(deadline)) != WAIT_OBJECT_0) {
+                CancelControlIo(h, ov);
+                CloseHandle(ov.hEvent);
+                return false;
+            }
+        }
+        DWORD nWritten = 0;
+        if (!GetOverlappedResult(h, &ov, &nWritten, FALSE) || nWritten == 0 || nWritten > (u32)(data.len - total)) {
+            CloseHandle(ov.hEvent);
+            return false;
+        }
+        CloseHandle(ov.hEvent);
         total += (int)nWritten;
     }
     return true;
 }
 
+static ControlRequest* NewControlError(u16 reqId, Str error) {
+    auto* req = new ControlRequest();
+    req->reqId = reqId;
+    req->parseError = error.s;
+    return req;
+}
+
 static ControlRequest* ReadControlRequest(HANDLE h) {
-    u32 size = 0;
-    if (!ReadExact(h, &size, sizeof(size))) {
-        return nullptr;
+    u8 firstSizeByte = 0;
+    bool gotBytes = false;
+    u64 idleDeadline = GetTickCount64() + kControlIdleReadTimeoutMs;
+    if (!ReadExact(h, &firstSizeByte, 1, idleDeadline, &gotBytes)) {
+        return gotBytes ? NewControlError(0, StrL("truncated control request size")) : nullptr;
     }
-    if (size < 4 || size > 16 * 1024 * 1024) {
-        return nullptr;
+
+    u64 requestDeadline = GetTickCount64() + kControlRequestReadTimeoutMs;
+    u8 remainingSize[3]{};
+    if (!ReadExact(h, remainingSize, dimof(remainingSize), requestDeadline, &gotBytes)) {
+        return NewControlError(0, StrL("truncated control request size"));
     }
+    u32 size = (u32)firstSizeByte | ((u32)remainingSize[0] << 8) | ((u32)remainingSize[1] << 16) |
+               ((u32)remainingSize[2] << 24);
+    if (size < 4 || (size_t)size > kControlMaxRequestBytes) {
+        return NewControlError(0, StrL("invalid control request size"));
+    }
+
+    u8 header[4]{};
+    if (!ReadExact(h, header, dimof(header), requestDeadline, &gotBytes)) {
+        return NewControlError(0, StrL("truncated control request header"));
+    }
+    PacketReader headerReader{header, dimof(header)};
+    u16 cmd = 0;
+    u16 reqId = 0;
+    if (!headerReader.ReadU16(cmd) || !headerReader.ReadU16(reqId)) {
+        return NewControlError(0, StrL("invalid control request header"));
+    }
+
+    ControlRequest* req = new ControlRequest();
+    req->cmd = cmd;
+    req->reqId = reqId;
+    AtomicIntInc(&gAllowAllocFailure);
+    AutoCall allowAllocFailure(AtomicIntDec, &gAllowAllocFailure);
     u8* data = AllocArray<u8>((int)size);
-    if (!ReadExact(h, data, size)) {
+    if (!data) {
+        req->parseError = "out of memory reading control request";
+        return req;
+    }
+    memcpy(data, header, sizeof(header));
+    if (!ReadExact(h, data + sizeof(header), size - sizeof(header), requestDeadline, &gotBytes)) {
+        req->parseError = "truncated control request payload";
         free(data);
-        return nullptr;
+        return req;
     }
 
     PacketReader r{data, size};
-    ControlRequest* req = new ControlRequest();
-    if (!r.ReadU16(req->cmd) || !r.ReadU16(req->reqId) || !ParseArgList(r, &req->args, false)) {
-        DeleteControlRequest(req);
-        free(data);
-        return nullptr;
+    r.pos = sizeof(header);
+    ControlParseBudget budget;
+    Str parseError;
+    bool ok = ParseArgList(r, &req->args, false, 0, &budget, &parseError) && r.pos == r.size;
+    if (!ok) {
+        req->parseError = parseError.s ? parseError.s : "malformed control request";
+    } else {
+        req->done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!req->done) {
+            req->parseError = "out of memory creating control request event";
+        }
     }
-    req->done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     free(data);
     return req;
 }
 
-static bool WriteControlResponse(HANDLE h, ControlRequest* req) {
-    str::Builder payload;
-    AppendU16(payload, req->reqId);
-    payload.Append(ToStr(req->results));
+static bool WriteControlResponse(HANDLE h, ControlRequest* req, u64 deadline) {
+    if (!h || !req) {
+        return false;
+    }
+    if (len(req->results) < 2 || (size_t)len(req->results) > kControlMaxResponseBytes - 2) {
+        SetProtocolError(req, StrL("control response is too large"));
+    }
+    Str results = ToStr(req->results);
+    if (len(results) < 2 || (u8)results.s[len(results) - 2] != (u8)ControlArgType::End ||
+        (u8)results.s[len(results) - 1] != 0) {
+        SetProtocolError(req, StrL("malformed control response"));
+        results = ToStr(req->results);
+    }
+    if (len(results) < 2) {
+        return false;
+    }
 
+    u8 reqId[2] = {(u8)req->reqId, (u8)(req->reqId >> 8)};
+    str::Builder payload;
+    if (!payload.Append(Str((char*)reqId, dimof(reqId))) || !payload.Append(results) ||
+        (size_t)len(payload) > kControlMaxResponseBytes) {
+        return false;
+    }
+    u32 packetSize = (u32)len(payload);
+    u8 packetHeader[4] = {(u8)packetSize, (u8)(packetSize >> 8), (u8)(packetSize >> 16), (u8)(packetSize >> 24)};
     str::Builder packet;
-    AppendU32(packet, (u32)len(payload));
-    packet.Append(ToStr(payload));
-    return WriteExact(h, ToStr(packet));
+    if (!packet.Append(Str((char*)packetHeader, dimof(packetHeader))) || !packet.Append(ToStr(payload))) {
+        return false;
+    }
+    return WriteExact(h, ToStr(packet), deadline);
 }
 
 static void ProcessControlConnection(HANDLE h) {
@@ -1681,16 +1931,44 @@ static void ProcessControlConnection(HANDLE h) {
         if (!req) {
             return;
         }
-        // WaitRenderIdle polls on this thread so the UI thread stays free to
-        // paint (and thereby request the tiles we are waiting for)
-        if ((ControlCmd)req->cmd == ControlCmd::WaitRenderIdle) {
-            RunWaitRenderIdle(req);
+        if (req->parseError) {
+            AppendError(req, Str(req->parseError));
         } else {
-            uitask::Post(MkFunc0<ControlRequest>(ExecuteControlRequest, req), "SumatraControl");
-            WaitForSingleObject(req->done, INFINITE);
+            u64 responseDeadline = GetTickCount64() + kControlResponseTimeoutMs;
+            bool safeToDelete = false;
+            // WaitRenderIdle polls on this thread so the UI thread stays free to
+            // paint (and thereby request the tiles we are waiting for)
+            bool runOnControlThread = (ControlCmd)req->cmd == ControlCmd::TestAIChat ||
+                                      (ControlCmd)req->cmd == ControlCmd::TestSelectionTranslate;
+            if ((ControlCmd)req->cmd == ControlCmd::WaitRenderIdle) {
+                safeToDelete = RunWaitRenderIdle(req);
+            } else if (runOnControlThread) {
+                AtomicIntInc(&req->refs);
+                ExecuteControlRequest(req);
+                safeToDelete = true;
+            } else {
+                AtomicIntInc(&req->refs);
+                if (!uitask::Post(MkFunc0<ControlRequest>(ExecuteControlRequest, req), "SumatraControl")) {
+                    ReleaseControlRequest(req);
+                    safeToDelete = true;
+                } else {
+                    DWORD wait = WaitForSingleObject(req->done, ControlTimeRemaining(responseDeadline));
+                    safeToDelete = wait == WAIT_OBJECT_0 || WaitForSingleObject(req->done, 0) == WAIT_OBJECT_0;
+                }
+            }
+            if (!safeToDelete) {
+                ReleaseControlRequest(req);
+                return;
+            }
+            bool ok = WriteControlResponse(h, req, GetTickCount64() + kControlResponseTimeoutMs);
+            ReleaseControlRequest(req);
+            if (!ok) {
+                return;
+            }
+            continue;
         }
-        bool ok = WriteControlResponse(h, req);
-        DeleteControlRequest(req);
+        bool ok = WriteControlResponse(h, req, GetTickCount64() + kControlErrorWriteTimeoutMs);
+        ReleaseControlRequest(req);
         if (!ok) {
             return;
         }
@@ -1709,19 +1987,51 @@ struct ControlThreadArg {
     Str pipeName;
 };
 
+static bool ConnectControlPipe(HANDLE pipe) {
+    OVERLAPPED ov{};
+    ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!ov.hEvent) {
+        return false;
+    }
+    BOOL connected = ConnectNamedPipe(pipe, &ov);
+    if (connected) {
+        CloseHandle(ov.hEvent);
+        return true;
+    }
+    DWORD err = GetLastError();
+    if (err == ERROR_PIPE_CONNECTED) {
+        CloseHandle(ov.hEvent);
+        return true;
+    }
+    if (err != ERROR_IO_PENDING) {
+        CloseHandle(ov.hEvent);
+        return false;
+    }
+    DWORD wait = WaitForSingleObject(ov.hEvent, INFINITE);
+    DWORD transferred = 0;
+    BOOL ok = wait == WAIT_OBJECT_0 && GetOverlappedResult(pipe, &ov, &transferred, FALSE);
+    if (!ok) {
+        CancelControlIo(pipe, ov);
+    }
+    CloseHandle(ov.hEvent);
+    return ok != FALSE;
+}
+
 static void SumatraControlThread(ControlThreadArg* arg) {
     WStr pipeNameW = FullPipeNameOwned(arg->pipeName);
     str::FreePtr(&arg->pipeName);
     delete arg;
 
     for (;;) {
-        HANDLE pipe = CreateNamedPipeW(pipeNameW.s, PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                                       1, 64 * 1024, 64 * 1024, 0, nullptr);
+        HANDLE pipe =
+            CreateNamedPipeW(pipeNameW.s, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 64 * 1024,
+                             64 * 1024, 0, nullptr);
         if (pipe == INVALID_HANDLE_VALUE) {
             logf("CreateNamedPipeW failed for control pipe, err=%u\n", (unsigned)GetLastError());
             return;
         }
-        BOOL connected = ConnectNamedPipe(pipe, nullptr) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
+        bool connected = ConnectControlPipe(pipe);
         if (connected) {
             ProcessControlConnection(pipe);
         }

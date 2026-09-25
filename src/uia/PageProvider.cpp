@@ -3,6 +3,7 @@
 
 #include "base/Base.h"
 #include "base/Win.h"
+#include "Translations.h"
 
 #include <uiautomationcore.h>
 
@@ -186,7 +187,7 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationPageProvider::GetPropertyValue(PROP
 
     if (propertyId == UIA_NamePropertyId) {
         pRetVal->vt = VT_BSTR;
-        TempStr s = fmt("Page %d", pageNum);
+        TempStr s = fmt(_TRA("Page %d").s, pageNum);
         pRetVal->bstrVal = SysAllocString(CWStrTemp(s));
         return S_OK;
     } else if (propertyId == UIA_IsValuePatternAvailablePropertyId) {

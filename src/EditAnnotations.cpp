@@ -1700,8 +1700,7 @@ void EditAnnotationsWindow::ListBoxSelectionChanged() {
     SetSelectedAnnotation(tab, annot);
 }
 
-static UINT_PTR gMainWindowRerenderTimer = 0;
-static MainWindow* gMainWindowForRender = nullptr;
+static constexpr UINT_PTR kMainWindowRerenderTimerID = 0x45414E54;
 
 static void ScheduleMainWindowRerender(EditAnnotationsWindow* ew) {
     if (!ew || !ew->tab) {
@@ -1711,17 +1710,26 @@ static void ScheduleMainWindowRerender(EditAnnotationsWindow* ew) {
     if (!win || !win->hwndCanvas) {
         return;
     }
-    if (gMainWindowRerenderTimer != 0) {
-        KillTimer(win->hwndCanvas, gMainWindowRerenderTimer);
-        gMainWindowRerenderTimer = 0;
+    if (win->mainWindowRerenderTimer != 0) {
+        KillTimer(win->hwndCanvas, win->mainWindowRerenderTimer);
+        win->mainWindowRerenderTimer = 0;
     }
-    gMainWindowForRender = win;
-    gMainWindowRerenderTimer = SetTimer(win->hwndCanvas, 1, 1000, [](HWND, UINT, UINT_PTR, DWORD) {
-        if (IsMainWindowValidAndNotClosing(gMainWindowForRender)) {
-            MainWindowRerender(gMainWindowForRender);
-        }
-        gMainWindowRerenderTimer = 0;
-    });
+    win->mainWindowRerenderTimer =
+        SetTimer(win->hwndCanvas, kMainWindowRerenderTimerID, 1000, [](HWND hwnd, UINT, UINT_PTR timerId, DWORD) {
+            MainWindow* win = FindMainWindowByHwnd(hwnd);
+            if (!win || win->hwndCanvas != hwnd) {
+                KillTimer(hwnd, timerId);
+                return;
+            }
+            if (win->mainWindowRerenderTimer == timerId) {
+                win->mainWindowRerenderTimer = 0;
+            }
+            if (IsMainWindowValidAndNotClosing(win)) {
+                MainWindowRerender(win);
+            } else {
+                KillTimer(hwnd, timerId);
+            }
+        });
 }
 
 // EN_CHANGE: do not call pdf_update_annot per keystroke.

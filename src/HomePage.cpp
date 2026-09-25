@@ -100,106 +100,14 @@ static TipHookInstaller gTipHookInstaller;
 #endif
 #define ABOUT_LINE_SEP_SIZE 1
 
-static Str sumatraTips = StrL(R"tips(You can [customize scrollbar](CmdChangeScrollbar).
-You can [customize keyboard shortcuts](Help/Customize-keyboard-shortcuts).
-You can [customize toolbar](Help/Customize-toolbar).
-Press (Key/CmdCommandPalette) to open [command palette](CmdCommandPalette).
-To open file from history open [command palette](CmdCommandPalette) with (Key/CmdCommandPalette) and type `#`.
-You can [extract text from PDF file](Help/Tool-x-extract-text-from-pdf).
-You can [toggle menu bar](CmdToggleMenuBar) with (Key/CmdToggleMenuBar).
-You can [toggle toolbar](CmdToggleToolbar) with (Key/CmdToggleToolbar).
-You can [edit PDF annotations](Help/Editing-annotations).
-You can preview where a citation, figure or footnote link points by hovering it — [Toggle Hover Preview](CmdToggleHoverPreview) or set CitationHoverDelay in [advanced settings](CmdAdvancedSettings).
-)tips");
-
-static Str sumatraPromos = StrL(R"promos(Try [Edna](https://edna.arslexis.io): a note taking web app for power users.
-Try [MarkLexis](https://marklexis.arslexis.io): a bookmarking web application.
-)promos");
-
-static Str promoFromServer;
-
 static void FreeHomeFileIcons();
-
-// the tip markup, one line each; the selected one is parsed by the tip band
-static StrVec gTipLines;
-static StrVec gPromoLines;
-static bool gTipsParsed = false;
-static bool gSelectedIsPromo = false;
-static int gSelectedTipIdx = -1;
-
-static void CollectTipsFromString(Str src, Str prefix, StrVec* out) {
-    StrVec lines;
-    Split(&lines, src, "\n");
-    for (int i = 0; i < len(lines); i++) {
-        Str line = lines[i];
-        if (str::IsEmptyOrWhiteSpace(line)) {
-            continue;
-        }
-        if (prefix) {
-            out->Append(str::JoinTemp(prefix, line));
-        } else {
-            out->Append(line);
-        }
-    }
-}
-
-// the markup of the tip currently on show, {} when there is none
-static Str SelectedTipLine() {
-    if (!gGlobalPrefs->showTips || gSelectedTipIdx < 0) {
-        return {};
-    }
-    StrVec& v = gSelectedIsPromo ? gPromoLines : gTipLines;
-    if (gSelectedTipIdx >= len(v)) {
-        return {};
-    }
-    return v[gSelectedTipIdx];
-}
-
-static void PickRandomTipOrPromo() {
-    bool pickPromo = (len(gPromoLines) > 0) && (rand() % 100 < 30);
-    if (pickPromo) {
-        gSelectedIsPromo = true;
-        gSelectedTipIdx = rand() % len(gPromoLines);
-    } else if (len(gTipLines) > 0) {
-        gSelectedIsPromo = false;
-        gSelectedTipIdx = rand() % len(gTipLines);
-    }
-}
-
-static void EnsureTipsParsed() {
-    if (gTipsParsed) {
-        return;
-    }
-    CollectTipsFromString(sumatraTips, "Tip: ", &gTipLines);
-    CollectTipsFromString(sumatraPromos, {}, &gPromoLines);
-    gTipsParsed = true;
-    PickRandomTipOrPromo();
-}
 
 static void ClearHomeLayoutCache();
 
+// shutdown entry: drop home page caches (file icons, layout cache)
 void FreeHomePageTips() {
-    if (gTipsParsed) {
-        gTipLines.Reset();
-        gPromoLines.Reset();
-        gTipsParsed = false;
-    }
-    str::Free(promoFromServer);
     FreeHomeFileIcons();
     ClearHomeLayoutCache();
-}
-
-static void PickAnotherRandomTip() {
-    bool prevIsPromo = gSelectedIsPromo;
-    int prev = gSelectedTipIdx;
-    // keep picking until we get a different one
-    int maxIter = 100;
-    while (maxIter-- > 0) {
-        PickRandomTipOrPromo();
-        if (gSelectedIsPromo != prevIsPromo || gSelectedTipIdx != prev) {
-            return;
-        }
-    }
 }
 
 constexpr Color kAboutBorderCol = kColBlack;
@@ -292,11 +200,6 @@ static void OpenAboutUrl(VirtMouseEvent* ev) {
     if (len(link->target) > 0) {
         SumatraLaunchBrowser(link->target);
     }
-}
-
-void SetPromoString(Str s) {
-    if (!s) return;
-    str::ReplaceWithCopy(&promoFromServer, s);
 }
 
 static TempStr GetAppVersionTemp() {
@@ -985,11 +888,6 @@ struct HomePageLayout {
     Vec<u8> highlighted;
     Rect rcSearchBorder; // border rect drawn around the edit control
 
-    // tip layout
-    Rect rcTip;     // background rect for tip area
-    Rect rcTipText; // where the markup goes inside the band
-    bool hasTip = false;
-
     ~HomePageLayout();
 };
 
@@ -1082,22 +980,6 @@ struct HomeEntriesCtrl : VirtCtrl {
     void UpdateCloseBtnVisibility();
 };
 
-// the tip band at the bottom. The markup is its VirtRichText child, which draws
-// itself and runs its own links; clicking the band anywhere else picks another
-// tip
-struct HomeTipCtrl : VirtCtrl {
-    // for link commands inside the tip markup (like VirtRichText)
-    HWND hwndForCmds = nullptr;
-    // onClick (VirtCtrl): band click outside a link picks another tip
-    VirtRichText* rich = nullptr; // owned, as our only child
-    Str richFor;                  // owned, the markup `rich` was parsed from
-
-    ~HomeTipCtrl() override;
-    void SetTipLine(Str line, PlatformFont* font);
-    void Sync(const Rect& rcTip, const Rect& rcText);
-    void Paint(VirtPaintCtx&) override;
-};
-
 // paints the border and background around the home search edit (the edit
 // itself is a real HWND on top). Decoration only, never a click target
 struct HomeSearchBorderCtrl : VirtCtrl {
@@ -1108,7 +990,6 @@ struct HomeSearchBorderCtrl : VirtCtrl {
 static Kind kindHomeChromeCtrl = "homeChromeCtrl";
 
 struct HomeChromeCtrl : VirtCtrl {
-    HomeTipCtrl* tip = nullptr;
     HomeSearchBorderCtrl* searchBorder = nullptr;
     HomeEntriesCtrl* entries = nullptr;
     VirtText* hdr = nullptr;
@@ -1123,7 +1004,7 @@ static HomeChromeCtrl* EnsureHomeChrome(MainWindow* win);
 static HomeEntriesCtrl* HomeEntries(MainWindow* win);
 static void HomePageSyncChrome(HomePageLayout& l);
 static Rect HomeSelectionOutlineRect(const ThumbnailLayout& t);
-static Rect HomeOutlinePaintClip(const Rect& thumbsArea, const Rect& searchBorder, const Rect& tip, bool hasTip);
+static Rect HomeOutlinePaintClip(const Rect& thumbsArea, const Rect& searchBorder);
 
 static int HomePageIconSize() {
     int sz = DpiScale(gGlobalPrefs->toolbarSize);
@@ -1310,10 +1191,6 @@ void HomePageFocusSearch(MainWindow* win) {
     HwndSetFocus(win->homeSearch->hwnd);
 }
 
-void PickAnotherRandomPromotion() {
-    PickAnotherRandomTip();
-}
-
 // --- scroll-friendly layout cache: full LayoutHomePage only when content/size/
 // filter changes; pure scrollY changes just offset stored thumb rects ---
 struct HomePageLayoutCache {
@@ -1324,10 +1201,7 @@ struct HomePageLayoutCache {
     int nFiles = 0;
     bool listView = false;
     bool sortByFreq = false;
-    bool showTips = false;
     bool isRtl = false;
-    int tipIdx = -1;
-    bool tipIsPromo = false;
     Str filterText; // owned
 
     Rect rcThumbsArea;
@@ -1336,13 +1210,10 @@ struct HomePageLayoutCache {
     Rect rcIconListView;
     Rect rcIconThumbnailView;
     Rect rcLogo;
-    Rect rcTip;
     Rect rcFreqRead;
     Rect rcOpenDoc;
     int totalContentDy = 0;
     int thumbsVisibleDy = 0;
-    Rect rcTipText;
-    bool hasTip = false;
     Vec<ThumbnailLayout> thumbs;
     StrVec filterWords;
 };
@@ -1355,7 +1226,6 @@ static void ClearHomeLayoutCache() {
     gHomeLayoutCache.filterText = {};
     gHomeLayoutCache.thumbs.Reset();
     gHomeLayoutCache.filterWords.Reset();
-    gHomeLayoutCache.hasTip = false;
     gHomeLayoutCache.nFiles = 0;
     gHomeLayoutCache.scrollY = 0;
 }
@@ -1410,13 +1280,7 @@ static bool HomeLayoutCacheMatches(const Rect& rc, Str filterText) {
     if (c.sortByFreq != (gGlobalPrefs && gGlobalPrefs->homePageSortByFrequentlyRead)) {
         return false;
     }
-    if (c.showTips != (gGlobalPrefs && gGlobalPrefs->showTips)) {
-        return false;
-    }
     if (c.isRtl != IsUIRtl()) {
-        return false;
-    }
-    if (c.tipIdx != gSelectedTipIdx || c.tipIsPromo != gSelectedIsPromo) {
         return false;
     }
     if (!str::Eq(c.filterText, filterText)) {
@@ -1478,10 +1342,7 @@ static void SaveHomeLayoutCache(const HomePageLayout& l, Str filterText, int scr
     c.nFiles = len(l.thumbnails);
     c.listView = HomePageIsListView();
     c.sortByFreq = gGlobalPrefs && gGlobalPrefs->homePageSortByFrequentlyRead;
-    c.showTips = gGlobalPrefs && gGlobalPrefs->showTips;
     c.isRtl = IsUIRtl();
-    c.tipIdx = gSelectedTipIdx;
-    c.tipIsPromo = gSelectedIsPromo;
     str::ReplaceWithCopy(&c.filterText, filterText);
     c.rcThumbsArea = l.rcThumbsArea;
     c.rcSearchBorder = l.rcSearchBorder;
@@ -1489,13 +1350,10 @@ static void SaveHomeLayoutCache(const HomePageLayout& l, Str filterText, int scr
     c.rcIconListView = l.rcIconListView;
     c.rcIconThumbnailView = l.rcIconThumbnailView;
     c.rcLogo = l.rcLogo;
-    c.rcTip = l.rcTip;
     c.rcFreqRead = l.freqRead ? l.freqRead->lastBounds : Rect{};
     c.rcOpenDoc = l.openDoc ? l.openDoc->lastBounds : Rect{};
     c.totalContentDy = l.totalContentDy;
     c.thumbsVisibleDy = l.thumbsVisibleDy;
-    c.rcTipText = l.rcTipText;
-    c.hasTip = l.hasTip;
     c.thumbs = l.thumbnails;
     c.filterWords = l.filterWords;
 }
@@ -1527,11 +1385,8 @@ static void ApplyHomeLayoutCache(HomePageLayout& l, int scrollY) {
     l.rcIconListView = c.rcIconListView;
     l.rcIconThumbnailView = c.rcIconThumbnailView;
     l.rcLogo = c.rcLogo;
-    l.rcTip = c.rcTip;
     l.totalContentDy = c.totalContentDy;
     l.thumbsVisibleDy = c.thumbsVisibleDy;
-    l.rcTipText = c.rcTipText;
-    l.hasTip = c.hasTip;
     l.thumbnails = c.thumbs;
     l.filterWords = c.filterWords;
 
@@ -1579,8 +1434,6 @@ static void SyncHomeLayoutCacheFileSizes(const HomePageLayout& l) {
 }
 
 static void LayoutHomePage(HomePageLayout& l) {
-    EnsureTipsParsed();
-
     Vec<FileState*> allFileStates;
     if (gGlobalPrefs->homePageSortByFrequentlyRead) {
         FileHistoryGetFrequencyOrder(allFileStates);
@@ -1721,21 +1574,10 @@ static void LayoutHomePage(HomePageLayout& l) {
 
     int headerBottomY = hdrY + rowDy + searchThumbsGap;
 
-    // --- Step 2: calculate tip area at the bottom (before thumbnails) ---
-    int tipHeight = 0;
-    PlatformFont* fontTip = HomePageFont(16);
-    HomeTipCtrl* tipCtrl = EnsureHomeChrome(l.win)->tip;
-    tipCtrl->SetTipLine(SelectedTipLine(), fontTip);
-    VirtRichText* tip = tipCtrl->rich;
-    if (tip) {
-        int tipPadding = DpiScale(8);
-        tipHeight = tip->MinIntrinsicHeight(thumbsContentWidth) + (2 * tipPadding);
-    }
-
-    // --- Step 3: middle area for thumbnails/list ---
+    // --- middle area for thumbnails/list ---
     // content starts directly after headerBottomY (which includes kSearchThumbnailsGapY)
     int thumbsTopY = headerBottomY;
-    int thumbsBottomY = rc.dy - tipHeight - kThumbsMiddleMargin;
+    int thumbsBottomY = rc.dy - kThumbsMiddleMargin;
     int thumbsVisibleDy = std::max(0, thumbsBottomY - thumbsTopY);
 
     l.rcThumbsArea = {0, thumbsTopY, rc.dx, thumbsVisibleDy};
@@ -1861,22 +1703,6 @@ static void LayoutHomePage(HomePageLayout& l) {
                 thumb.rcText = rcText;
             }
         }
-    }
-
-    // layout tip at the bottom
-    if (tip) {
-        Rect rcClient = HwndClientRect(win->hwndCanvas);
-        int tipPadding = DpiScale(8);
-
-        int tipY = rcClient.dy - tipHeight;
-        // background spans full window width
-        l.rcTip = {0, tipY, rcClient.dx, tipHeight};
-        l.hasTip = true;
-
-        // text area aligned with thumbnails
-        int tipStartX = thumbsStartX;
-        int tipStartY = tipY + tipPadding;
-        l.rcTipText = {tipStartX, tipStartY, thumbsContentWidth, tip->MinIntrinsicHeight(thumbsContentWidth)};
     }
 }
 
@@ -2144,8 +1970,8 @@ static void DrawHomeHelpButton(Gfx* gfx, Rect r) {
 }
 
 // Slack so the first/last row's rounded outline isn't cut by rcThumbsArea.
-// The search field and tip band stay outside this clip (issue #5978).
-static Rect HomeOutlinePaintClip(const Rect& thumbsArea, const Rect& searchBorder, const Rect& tip, bool hasTip) {
+// The search field stays outside this clip (issue #5978).
+static Rect HomeOutlinePaintClip(const Rect& thumbsArea, const Rect& searchBorder) {
     if (thumbsArea.IsEmpty()) {
         return {};
     }
@@ -2155,9 +1981,6 @@ static Rect HomeOutlinePaintClip(const Rect& thumbsArea, const Rect& searchBorde
         int d = searchBorder.Bottom() - clip.y;
         clip.y += d;
         clip.dy -= d;
-    }
-    if (hasTip && !tip.IsEmpty() && clip.y + clip.dy > tip.y) {
-        clip.dy = tip.y - clip.y;
     }
     if (clip.dx <= 0 || clip.dy <= 0) {
         return {};
@@ -2206,7 +2029,7 @@ TempStr HomeSelectionResultTemp(int* exitCodeOut) {
     bool showSel = !HomePageIsListView() && !searchFocus && sel >= 0 && sel < len(c.thumbs);
     if (showSel) {
         outlineFull = HomeSelectionOutlineRect(c.thumbs[sel]);
-        outline = outlineFull.Intersect(HomeOutlinePaintClip(c.rcThumbsArea, c.rcSearchBorder, c.rcTip, c.hasTip));
+        outline = outlineFull.Intersect(HomeOutlinePaintClip(c.rcThumbsArea, c.rcSearchBorder));
     }
     return finish(0, fmt("OK sel=%d entries=%d searchFocus=%d searchBox=%d search=%s outline=%s outlineFull=%s path=%s",
                          sel, len(c.thumbs), searchFocus, searchBox, RectCsvTemp(search), RectCsvTemp(outline),
@@ -2294,49 +2117,6 @@ void HomeSearchBorderCtrl::Paint(VirtPaintCtx& ctx) {
     ctx.gfx->DrawRect(ctx.bounds, AccentColor(bgCol, 40));
 }
 
-//--- tip links
-
-HomeTipCtrl::~HomeTipCtrl() {
-    str::Free(richFor);
-}
-
-// re-parses when the markup changes; the parse is what the band draws
-void HomeTipCtrl::SetTipLine(Str line, PlatformFont* font) {
-    if (rich && str::Eq(richFor, line)) {
-        rich->font = font;
-        rich->hwndForCmds = hwndForCmds;
-        return;
-    }
-    if (rich) {
-        RemoveChild(rich, true);
-        rich = nullptr;
-    }
-    str::ReplaceWithCopy(&richFor, line);
-    if (!line) {
-        return;
-    }
-    rich = ParseTip(line);
-    rich->font = font;
-    rich->hwndForCmds = hwndForCmds;
-    AddChild(rich);
-}
-
-// the band's background; the markup (VirtRichText child) paints over it
-void HomeTipCtrl::Paint(VirtPaintCtx& ctx) {
-    ctx.gfx->FillRect(ctx.bounds, ThemeControlBackgroundColor());
-}
-
-// rcTip is the whole band (its background), rcText where the markup goes
-void HomeTipCtrl::Sync(const Rect& rcTip, const Rect& rcText) {
-    if (!rich || rcTip.IsEmpty()) {
-        visibility = Visibility::Collapse;
-        return;
-    }
-    visibility = Visibility::Visible;
-    SetBounds(rcTip);
-    rich->SetBounds(rcText);
-}
-
 //--- file entries
 
 static Rect HomeEntryRect(const ThumbnailLayout& t);
@@ -2409,11 +2189,6 @@ static void HomeHelpClicked(MainWindow* win, VirtMouseEvent*) {
     HwndSendCommand(win->hwndFrame, CmdToggleKeyboardHelp);
 }
 
-static void HomeTipBandClicked(MainWindow* win, VirtMouseEvent*) {
-    PickAnotherRandomPromotion();
-    win->RedrawAll(true);
-}
-
 HomeListIconCtrl::HomeListIconCtrl() {
     cursor = CursorId::Hand;
     onGetTooltip = MkMethod1<HomeListIconCtrl, VirtTooltipEvent*, &HomeListIconCtrl::OnGetTooltip>(this);
@@ -2450,7 +2225,7 @@ void HomeEntryCtrl::Paint(VirtPaintCtx& ctx) {
     // no selection chrome while typing in the search box
     bool isSelected = (idx == win->homePageSelIdx) && !HomeSearchHasFocus(win);
     // ctx.clip is the entries band (vwfClipChildren on the parent): an entry
-    // scrolled partially out must not paint over the header / tip band
+    // scrolled partially out must not paint over the header
     gfx->PushClip(ctx.clip);
     if (HomePageIsListView()) {
         DrawHomeListRow(gfx, *t, *entries->filterWords, *entries->highlighted, fontText, backgroundColor, isRtl,
@@ -2575,12 +2350,6 @@ static HomeChromeCtrl* EnsureHomeChrome(MainWindow* win) {
 
     // first, so that the rest of the chrome (notably the help button, which can
     // overlap the thumbnails) hit-tests and paints on top of the entries
-    // below everything else: the tip band sits at the bottom of the page
-    chrome->tip = new HomeTipCtrl();
-    chrome->tip->hwndForCmds = win->hwndFrame;
-    chrome->tip->onClick = MkFunc1(HomeTipBandClicked, win);
-    chrome->AddChild(chrome->tip);
-
     chrome->searchBorder = new HomeSearchBorderCtrl();
     chrome->AddChild(chrome->searchBorder);
 
@@ -2693,8 +2462,6 @@ static void HomePageSyncChrome(HomePageLayout& l) {
     root->needsLayout = false;
     chrome->SetBounds(l.rc);
 
-    chrome->tip->Sync(l.rcTip, l.rcTipText);
-
     chrome->searchBorder->visibility = l.rcSearchBorder.IsEmpty() ? Visibility::Collapse : Visibility::Visible;
     chrome->searchBorder->SetBounds(l.rcSearchBorder);
 
@@ -2761,12 +2528,11 @@ static void HomePageSyncChrome(HomePageLayout& l) {
     od->text->SetBounds(l.openDoc->lastBounds);
 
     // "?" help button in the bottom-right corner, opening the keyboard
-    // shortcuts sheet; sits above the tip band when a tip is showing
+    // shortcuts sheet
     {
         int diam = DpiScale(30);
         int margin = DpiScale(16);
-        int bottom = l.hasTip ? l.rcTip.y : l.rc.dy;
-        Rect btn{l.rc.dx - margin - diam, bottom - margin - diam, diam, diam};
+        Rect btn{l.rc.dx - margin - diam, l.rc.dy - margin - diam, diam, diam};
         chrome->helpBtn->SetBounds(btn);
     }
 }
@@ -2784,21 +2550,21 @@ static void DrawHomePageLayout(HomePageLayout& l) {
     }
 
     // the chrome tree paints everything else: search border, file entries
-    // (thumbnails / list rows), tip band, header, view buttons, "Open a
-    // document..." and the help button (which has to land on top of the tip
-    // band, so the chrome keeps it as the last child)
+    // (thumbnails / list rows), header, view buttons, "Open a
+    // document..." and the help button (which has to land on top, so the
+    // chrome keeps it as the last child)
     win->homeRoot->Paint(gfx, l.rc);
 
     // thumbnails selection outline: after the entries so it sits on top of the
-    // thumbnail, clipped so it cannot paint over the search field or the tip
-    // band (issue #5978). A little slack above/below the thumbs band keeps the
+    // thumbnail, clipped so it cannot paint over the search field
+    // (issue #5978). A little slack above/below the thumbs band keeps the
     // first row's top curve from being cut off.
     int selIdx = win->homePageSelIdx;
     bool showSel = !HomePageIsListView() && !HomeSearchHasFocus(win) && selIdx >= 0 && selIdx < nThumbs;
     if (showSel) {
         ThumbnailLayout& t = l.thumbnails[selIdx];
         if (IsHomeThumbOnScreen(t.rcPage.Union(t.rcText), l.rcThumbsArea)) {
-            Rect clip = HomeOutlinePaintClip(l.rcThumbsArea, l.rcSearchBorder, l.rcTip, l.hasTip);
+            Rect clip = HomeOutlinePaintClip(l.rcThumbsArea, l.rcSearchBorder);
             if (!clip.IsEmpty()) {
                 gfx->PushClip(clip);
                 DrawHomeSelectionOutline(gfx, HomeSelectionOutlineRect(t), 10);

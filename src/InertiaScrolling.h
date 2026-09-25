@@ -42,6 +42,7 @@ struct InertiaScrollState {
     double velocityY = 0;
     double friction = 0.92; // multiplied each tick (0.90–0.95 typical)
     double threshold = 0.5; // stop when |v| < threshold
+    i64 lastTickUs = 0;
     bool active = false;
     MainWindow* win = nullptr;
 

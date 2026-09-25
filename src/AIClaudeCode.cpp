@@ -163,6 +163,9 @@ static void CollectClaudeSessions(Str dir, Vec<AIChatSessionInfo>& sessions) {
 
 // Load conversation history from a session's JSONL file
 static void LoadClaudeSessionHistory(MainWindow* win, Str sessionId, Str dir) {
+    if (!AIChatSessionIdIsValid(sessionId)) {
+        return;
+    }
     TempStr userProfile = GetSpecialFolderTemp(CSIDL_PROFILE);
     if (!userProfile) {
         return;
@@ -219,7 +222,7 @@ static void LoadClaudeSessionHistory(MainWindow* win, Str sessionId, Str dir) {
         }
         TempStr fp = AIChatJsonStrTemp(line, "file_path");
         str::Builder desc;
-        desc.Append(fmt("Tool: %s", toolName));
+        desc.Append(fmt(_TRA("Tool: %s").s, toolName));
         if (fp) {
             desc.Append(fmt(" (%s)", fp));
         }
@@ -245,7 +248,7 @@ struct ClaudeCodeProvider : AIChatProvider {
         optionItems = "Low\0Medium\0High\0Max\0";
         optionCount = 4;
         optionDefault = 1;
-        checkboxLabel = "Skip Permissions";
+        checkboxLabel = _TRA("Skip Permissions");
         generatesSessionId = true;
         // claude emits result before the process exits; don't wait for EOF
         terminateOnFinish = true;
@@ -303,14 +306,15 @@ struct ClaudeCodeProvider : AIChatProvider {
                 "%s -p --verbose --model %s --effort %s --output-format stream-json %s --session-id %s "
                 "--name %s --append-system-prompt %s %s",
                 QuoteCmdLineArgTemp(args.exePath), QuoteCmdLineArgTemp(args.model), efforts[args.option], permsFlag,
-                args.sessionId, QuoteCmdLineArgTemp(sessionName), QuoteCmdLineArgTemp(sysPrompt),
+                QuoteCmdLineArgTemp(args.sessionId), QuoteCmdLineArgTemp(sessionName), QuoteCmdLineArgTemp(sysPrompt),
                 QuoteCmdLineArgTemp(args.escapedInput));
         }
         return fmt(
             "%s -p --verbose --model %s --effort %s --output-format stream-json %s --resume %s "
             "--append-system-prompt %s %s",
             QuoteCmdLineArgTemp(args.exePath), QuoteCmdLineArgTemp(args.model), efforts[args.option], permsFlag,
-            args.sessionId, QuoteCmdLineArgTemp(sysPrompt), QuoteCmdLineArgTemp(args.escapedInput));
+            QuoteCmdLineArgTemp(args.sessionId), QuoteCmdLineArgTemp(sysPrompt),
+            QuoteCmdLineArgTemp(args.escapedInput));
     }
 
     void ParseStreamLine(Str line, AIChatStreamCtx* ctx) override {
@@ -336,7 +340,7 @@ struct ClaudeCodeProvider : AIChatProvider {
             TempStr cmd = AIChatJsonStrTemp(line, "command");
             TempStr pat = AIChatJsonStrTemp(line, "pattern");
             str::Builder desc;
-            desc.Append(fmt("Tool: %s", toolName));
+            desc.Append(fmt(_TRA("Tool: %s").s, toolName));
             if (fp) {
                 desc.Append(fmt(" (%s)", fp));
             } else if (cmd) {
@@ -356,7 +360,7 @@ struct ClaudeCodeProvider : AIChatProvider {
                 TempStr fp = AIChatJsonStrTemp(line, "filePath");
                 if (fp) {
                     str::Builder desc;
-                    desc.Append(fmt("Result: %s", fp));
+                    desc.Append(fmt(_TRA("Result: %s").s, fp));
                     AIChatPostUpdate(ctx, AIChatUpdateType::Tool, ToStr(desc));
                 }
             }

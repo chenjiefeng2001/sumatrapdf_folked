@@ -51,6 +51,39 @@ AnimationManager::~AnimationManager() {
     head = nullptr;
 }
 
+// Register a property so Tick() advances it. Owners call this once right
+// after creating the AnimProp; without it Tick() never sees the prop and a
+// started animation stalls forever (e.g. the page fade-in overlay in
+// DrawDocument stays fully opaque and the page never becomes visible).
+void AnimationManager::Add(AnimProp* prop) {
+    if (!prop) {
+        return;
+    }
+    for (AnimProp* p = head; p; p = p->next) {
+        if (p == prop) {
+            return; // already registered
+        }
+    }
+    prop->next = head;
+    head = prop;
+}
+
+// Unlink a property (call before destroying it while the manager outlives it).
+void AnimationManager::Remove(AnimProp* prop) {
+    if (!prop) {
+        return;
+    }
+    AnimProp** link = &head;
+    while (*link) {
+        if (*link == prop) {
+            *link = prop->next;
+            prop->next = nullptr;
+            return;
+        }
+        link = &(*link)->next;
+    }
+}
+
 int AnimationManager::Tick() {
     hasActive = false;
     int count = 0;

@@ -124,6 +124,7 @@ void PointerVelocityTracker::Init() {
     velocityY = 0;
     lastPosX = 0;
     lastPosY = 0;
+    hasSample = false;
     QueryPerformanceCounter(&lastTime);
 }
 
@@ -140,11 +141,12 @@ void PointerVelocityTracker::AddSample(double x, double y, LARGE_INTEGER now) {
         return;
     }
 
-    if (lastTime.QuadPart == 0) {
+    if (!hasSample) {
         // First sample — just store position
         lastPosX = x;
         lastPosY = y;
         lastTime = now;
+        hasSample = true;
         return;
     }
 

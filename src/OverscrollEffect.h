@@ -30,6 +30,9 @@ struct OverscrollState {
     // Timer driving the spring-back animation (kOverscrollTimerID)
     static constexpr UINT_PTR kOverscrollTimerID = 13;
 
+    i64 lastTickUs = 0;
+    ~OverscrollState();
+
     bool HasOverscroll() const { return offsetY != 0; }
 
     // Apply an additional overscroll delta. Returns true if there was a

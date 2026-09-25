@@ -848,7 +848,7 @@ static void OnEutlUpdateDone(EutlUpdateJob* job) {
 static void EutlUpdateThread(EutlUpdateJob* job) {
     Str err;
     job->ok = EutlUpdate(&err);
-    TempStr msg = job->ok ? EutlCacheInfoTemp() : (err ? str::DupTemp(err) : StrL("update failed"));
+    TempStr msg = job->ok ? EutlCacheInfoTemp() : (err ? str::DupTemp(err) : _TRA("update failed"));
     job->msg = str::Dup(msg);
     str::Free(err);
     auto fn = MkFunc0<EutlUpdateJob>(OnEutlUpdateDone, job);

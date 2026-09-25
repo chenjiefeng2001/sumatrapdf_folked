@@ -1161,7 +1161,9 @@ static void CountProgress(CountThreadData* d, ProgressUpdateData* data) {
     pd->epoch = d->epoch;
     pd->nFound = d->nFoundSoFar;
     pd->pageNo = data->current;
-    uitask::Post(MkFunc0<CountProgressTaskData>(CountProgressTask, pd), "TaskFindCountProgress");
+    if (!uitask::Post(MkFunc0<CountProgressTaskData>(CountProgressTask, pd), "TaskFindCountProgress")) {
+        delete pd;
+    }
 }
 
 // streaming partial results to the floating results list while the scan runs:
@@ -1308,7 +1310,9 @@ static void CountThread(CountThreadData* d) {
                     nSent = n;
                     nSentMatches = nMatches;
                     lastSendMs = GetTickCount();
-                    uitask::Post(MkFunc0<CountPartialTaskData>(CountPartialTask, pd), "TaskFindCountPartial");
+                    if (!uitask::Post(MkFunc0<CountPartialTaskData>(CountPartialTask, pd), "TaskFindCountPartial")) {
+                        delete pd;
+                    }
                 }
             }
             m = ts.FindNext();
@@ -3004,6 +3008,9 @@ static bool HandleRequestCmds(HWND /*hwnd*/, Str cmd, str::Builder& rsp) {
 LRESULT OnDDERequest(HWND hwnd, WPARAM wp, LPARAM lp) {
     // window that is sending us the message
     HWND hwndClient = (HWND)wp;
+    if (!IsWindow(hwndClient)) {
+        return 0;
+    }
 
     UINT fmt = LOWORD(lp);
     switch (fmt) {
@@ -3026,6 +3033,9 @@ LRESULT OnDDERequest(HWND hwnd, WPARAM wp, LPARAM lp) {
     if (!didHandle) {
         str.Reset(StrL("error: unknown command"));
     }
+    if (len(str) > 1024 * 1024) {
+        str.Reset(StrL("error: response too large"));
+    }
 
     void* data;
     int cbData;
@@ -3041,12 +3051,18 @@ LRESULT OnDDERequest(HWND hwnd, WPARAM wp, LPARAM lp) {
         ReportIf(true);
         return 0;
     }
+    if (!data || cbData <= 0) {
+        return 0;
+    }
 
     // the payload goes at DDEDATA.Value, i.e. offsetof(DDEDATA, Value) -- NOT
     // sizeof(DDEDATA), whose trailing Value[1] + padding would push it too far
     // and the client would read zeros
     int cbDdeData = (int)offsetof(DDEDATA, Value);
     u8* res = (u8*)AllocZero(GetTempArena(), cbDdeData + cbData);
+    if (!res) {
+        return 0;
+    }
     DDEDATA* ddeData = (DDEDATA*)res;
     ddeData->fResponse = 1; // this data answers a WM_DDE_REQUEST (not an advise)
     ddeData->fRelease = 1;  // tell client to free HGLOBAL
@@ -3054,10 +3070,17 @@ LRESULT OnDDERequest(HWND hwnd, WPARAM wp, LPARAM lp) {
     memcpy(res + cbDdeData, data, cbData);
 
     HGLOBAL h = MemToHGLOBAL(res, cbDdeData + cbData, GMEM_MOVEABLE | GMEM_DDESHARE);
+    if (!h) {
+        return 0;
+    }
     // must use PackDDElParam, not MAKELPARAM: on 64-bit MAKELPARAM would
     // truncate the HGLOBAL to 16 bits and the DDE client would dereference a
     // garbage handle (crash in user32's WM_DDE_DATA handling)
     LPARAM lpres = PackDDElParam(WM_DDE_DATA, (UINT_PTR)h, a);
+    if (!lpres) {
+        GlobalFree(h);
+        return 0;
+    }
     if (!PostMessageW(hwndClient, WM_DDE_DATA, (WPARAM)hwnd, lpres)) {
         // the client went away: we still own the data and the packed lParam
         GlobalFree(h);
@@ -3069,14 +3092,21 @@ LRESULT OnDDERequest(HWND hwnd, WPARAM wp, LPARAM lp) {
 LRESULT OnDDExecute(HWND hwnd, WPARAM wp, LPARAM lp) {
     HWND hwndClient = (HWND)wp;
     HGLOBAL hCommand = (HGLOBAL)lp;
+    if (!IsWindow(hwndClient) || !hCommand) {
+        return 0;
+    }
     bool isUnicode = IsWindowUnicode(hwndClient);
 
     TempStr cmd = HGLOBALToStrTemp(hCommand, isUnicode);
-    bool didHandle = HandleExecuteCmds(hwnd, cmd);
+    bool didHandle = cmd && HandleExecuteCmds(hwnd, cmd);
     DDEACK ack{};
     ack.fAck = didHandle ? 1 : 0;
-    LPARAM lpres = PackDDElParam(WM_DDE_ACK, *(WORD*)&ack, (UINT_PTR)hCommand);
-    PostMessageW(hwndClient, WM_DDE_ACK, (WPARAM)hwnd, lpres);
+    WORD ackBits = 0;
+    memcpy(&ackBits, &ack, sizeof(ackBits));
+    LPARAM lpres = PackDDElParam(WM_DDE_ACK, ackBits, (UINT_PTR)hCommand);
+    if (lpres) {
+        PostMessageW(hwndClient, WM_DDE_ACK, (WPARAM)hwnd, lpres);
+    }
     return 0;
 }
 
@@ -3108,6 +3138,12 @@ struct OpenManyCopyDataAsync {
     StrVec paths;
     HWND hwnd;
     u32 newWindow;
+
+    ~OpenManyCopyDataAsync() {
+        for (Str path : paths) {
+            str::Free(path);
+        }
+    }
 };
 
 static void OpenManyCopyDataAsyncRun(OpenManyCopyDataAsync* d) {
@@ -3188,10 +3224,42 @@ static void OpenCopyDataAsyncRun(OpenCopyDataAsync* d) {
     delete d;
 }
 
+static bool ReadCopyDataString(const u8*& cursor, size_t& bytesLeft, Str* value) {
+    if (!cursor || !value || bytesLeft == 0) {
+        return false;
+    }
+    const u8* end = (const u8*)memchr(cursor, 0, bytesLeft);
+    if (!end) {
+        return false;
+    }
+    size_t n = (size_t)(end - cursor);
+    if (n == 0 || n > INT_MAX) {
+        return false;
+    }
+    *value = Str((const char*)cursor, (int)n);
+    size_t consumed = n + 1;
+    cursor += consumed;
+    bytesLeft -= consumed;
+    return true;
+}
+
 LRESULT OnCopyData(HWND hwnd, WPARAM wp, LPARAM lp) {
+    constexpr size_t kMaxCopyDataBytes = 16ll * 1024 * 1024;
+    constexpr size_t kMaxCopyDataDdeBytes = 1024 * 1024;
+    constexpr u32 kMaxOpenManyPaths = 4096;
     COPYDATASTRUCT* cds = (COPYDATASTRUCT*)lp;
-    if (!cds || wp) {
+    size_t cbData = cds ? (size_t)cds->cbData : 0;
+    if (!cds || wp || cbData > kMaxCopyDataBytes || (cbData > 0 && !cds->lpData)) {
         return FALSE;
+    }
+
+    if (cds->dwData == kCopyDataQuickLook) {
+        const u8* cursor = (const u8*)cds->lpData;
+        size_t bytesLeft = cbData;
+        Str quickLookPath;
+        if (!ReadCopyDataString(cursor, bytesLeft, &quickLookPath) || bytesLeft != 0) {
+            return FALSE;
+        }
     }
 
     if (HandleExplorerQuickLookCopyData(cds)) {
@@ -3203,14 +3271,15 @@ LRESULT OnCopyData(HWND hwnd, WPARAM wp, LPARAM lp) {
         // sibling SumatraPDF that Explorer just spawned is blocked in
         // SendMessageW. Copy the path out, post an async task, return
         // immediately so the sender unblocks and exits.
-        if (cds->cbData < sizeof(SumatraOpenCopyData) + 1) {
+        if (cbData <= sizeof(SumatraOpenCopyData) || ((uintptr_t)cds->lpData % alignof(SumatraOpenCopyData)) != 0) {
             return FALSE;
         }
-        const auto* data = (const SumatraOpenCopyData*)cds->lpData;
-        size_t pathMax = cds->cbData - sizeof(SumatraOpenCopyData);
-        Str pathZ = Str((char*)(const u8*)(data + 1), (int)pathMax);
-        // require null-terminator within bounds
-        if (strnlen_s(pathZ.s, pathMax) >= pathMax) {
+        SumatraOpenCopyData header{};
+        memcpy(&header, cds->lpData, sizeof(header));
+        const u8* cursor = (const u8*)cds->lpData + sizeof(header);
+        size_t bytesLeft = cbData - sizeof(header);
+        Str path;
+        if (!ReadCopyDataString(cursor, bytesLeft, &path) || bytesLeft != 0) {
             return FALSE;
         }
         // During startup (cmdline load, often blocked on a password dialog) the
@@ -3218,48 +3287,54 @@ LRESULT OnCopyData(HWND hwnd, WPARAM wp, LPARAM lp) {
         // them so they load after the current LoadDocument finishes, instead of
         // racing a second async load of the same path (fixes #4576).
         if (gIsStartup) {
-            TempStr path = path::NormalizeTemp(pathZ);
-            if (IsDocumentOpenOrLoading(path)) {
-                logf("OnCopyData/Open: gIsStartup, already open/loading '%s'\n", path);
+            TempStr normalized = path::NormalizeTemp(path);
+            if (IsDocumentOpenOrLoading(normalized)) {
+                logf("OnCopyData/Open: gIsStartup, already open/loading '%s'\n", normalized);
                 return TRUE;
             }
             for (Str queued : gDdeOpenOnStartup) {
-                if (path::IsSame(queued, path)) {
-                    logf("OnCopyData/Open: gIsStartup, already queued '%s'\n", path);
+                if (path::IsSame(queued, normalized)) {
+                    logf("OnCopyData/Open: gIsStartup, already queued '%s'\n", normalized);
                     return TRUE;
                 }
             }
-            logf("OnCopyData/Open: gIsStartup, queueing '%s'\n", path);
-            gDdeOpenOnStartup.Append(path);
+            logf("OnCopyData/Open: gIsStartup, queueing '%s'\n", normalized);
+            gDdeOpenOnStartup.Append(normalized);
             return TRUE;
         }
         auto* d = new OpenCopyDataAsync;
-        d->path = str::Dup(pathZ);
-        d->newWindow = data->newWindow;
+        d->path = str::Dup(path);
+        if (!d->path) {
+            delete d;
+            return FALSE;
+        }
+        d->newWindow = header.newWindow;
         auto fn = MkFunc0<OpenCopyDataAsync>(OpenCopyDataAsyncRun, d);
         uitask::Post(fn, "OnCopyData/Open");
         return TRUE;
     }
 
     if (cds->dwData == kCopyDataOpenMany) {
-        if (cds->cbData < sizeof(SumatraOpenManyCopyData) + 1) {
+        if (cbData <= sizeof(SumatraOpenManyCopyData) ||
+            ((uintptr_t)cds->lpData % alignof(SumatraOpenManyCopyData)) != 0) {
             return FALSE;
         }
-        const auto* data = (const SumatraOpenManyCopyData*)cds->lpData;
-        if (data->pathCount == 0) {
+        SumatraOpenManyCopyData header{};
+        memcpy(&header, cds->lpData, sizeof(header));
+        if (header.pathCount == 0 || header.pathCount > kMaxOpenManyPaths) {
             return FALSE;
         }
-        const char* s = (const char*)(data + 1);
-        size_t bytesLeft = cds->cbData - sizeof(*data);
+        const u8* cursor = (const u8*)cds->lpData + sizeof(header);
+        size_t bytesLeft = cbData - sizeof(header);
         StrVec paths;
-        for (u32 i = 0; i < data->pathCount; i++) {
-            size_t pathLen = strnlen_s(s, bytesLeft);
-            if (pathLen >= bytesLeft) {
+        for (u32 i = 0; i < header.pathCount; i++) {
+            Str path;
+            if (!ReadCopyDataString(cursor, bytesLeft, &path) || !paths.Append(path)) {
                 return FALSE;
             }
-            paths.Append(Str(s, (int)pathLen));
-            s += pathLen + 1;
-            bytesLeft -= pathLen + 1;
+        }
+        if (bytesLeft != 0) {
+            return FALSE;
         }
         if (gIsStartup) {
             for (Str path : paths) {
@@ -3271,22 +3346,43 @@ LRESULT OnCopyData(HWND hwnd, WPARAM wp, LPARAM lp) {
             return TRUE;
         }
         auto* d = new OpenManyCopyDataAsync;
-        d->paths = paths;
+        for (Str path : paths) {
+            Str ownedPath = str::Dup(path);
+            if (!ownedPath || !d->paths.Append(ownedPath)) {
+                str::Free(ownedPath);
+                delete d;
+                return FALSE;
+            }
+        }
         d->hwnd = hwnd;
-        d->newWindow = data->newWindow;
+        d->newWindow = header.newWindow;
         auto fn = MkFunc0<OpenManyCopyDataAsync>(OpenManyCopyDataAsyncRun, d);
         uitask::Post(fn, "OnCopyData/OpenMany");
         return TRUE;
     }
 
     if (cds->dwData == kCopyDataDdeW) {
-        int cmdCch = (int)(cds->cbData / sizeof(WCHAR));
-        if (cmdCch == 0 || ((wchar_t*)cds->lpData)[cmdCch - 1] != 0) {
+        if (cbData < sizeof(WCHAR) || cbData > kMaxCopyDataDdeBytes || (cbData % sizeof(WCHAR)) != 0 ||
+            ((uintptr_t)cds->lpData % alignof(WCHAR)) != 0) {
             return FALSE;
         }
-        WStr cmdW((const wchar_t*)cds->lpData, cmdCch - 1);
+        size_t cmdCch = cbData / sizeof(WCHAR);
+        const u8* bytes = (const u8*)cds->lpData;
+        for (size_t i = 0; i + 1 < cmdCch; i++) {
+            if (bytes[i * sizeof(WCHAR)] == 0 && bytes[i * sizeof(WCHAR) + 1] == 0) {
+                return FALSE;
+            }
+        }
+        const u8* last = bytes + (cmdCch - 1) * sizeof(WCHAR);
+        if (last[0] != 0 || last[1] != 0) {
+            return FALSE;
+        }
+        WStr cmdW((const WCHAR*)cds->lpData, (int)(cmdCch - 1));
         // Legacy DDE grammar — callers expect synchronous handling.
         TempStr cmd = ToUtf8Temp(cmdW);
+        if (!cmd) {
+            return FALSE;
+        }
         bool didHandle = HandleExecuteCmds(hwnd, cmd);
         return didHandle ? TRUE : FALSE;
     }

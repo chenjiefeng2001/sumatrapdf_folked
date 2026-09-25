@@ -106,6 +106,7 @@ struct PointerVelocityTracker {
     double lastPosX = 0;  // last pointer position (sub-pixel)
     double lastPosY = 0;
     LARGE_INTEGER lastTime{}; // timestamp of last sample
+    bool hasSample = false;
 
     // Initialize with current timestamp
     void Init();

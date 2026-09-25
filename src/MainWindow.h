@@ -4,6 +4,7 @@
 struct DoubleBuffer;
 struct Edit;
 struct WebviewWnd;
+struct AIChatWebResources;
 struct LinkHandler;
 struct StressTest;
 class SumatraUIAutomationProvider;
@@ -280,6 +281,7 @@ struct MainWindow {
     VirtButton* aiChatStopBtn = nullptr;
     Edit* aiChatInput = nullptr;
     WebviewWnd* aiChatWebView = nullptr;
+    AIChatWebResources* aiChatWebResources = nullptr;
     bool aiChatWebViewReady = false;
     VirtSplitter* aiChatSplitter = nullptr;
     // VBox(label, session combo, webview slot, input row, options row);
@@ -533,6 +535,7 @@ struct MainWindow {
 
     int wheelAccumDelta = 0;
     UINT_PTR delayedRepaintTimer = 0;
+    UINT_PTR mainWindowRerenderTimer = 0;
 
     ThreadHandle printThread = nullptr;
     bool printCanceled = false;
@@ -676,16 +679,9 @@ struct MainWindow {
     // animation ends, so the panes stay visible while they slide away.
     struct AnimProp* sidebarAnim = nullptr;
     float sidebarAnimDx = 0;
+    float sidebarAnimTargetDx = 0;
     bool sidebarAnimTargetToc = false;
     bool sidebarAnimTargetFav = false;
-
-    // Phase 3: page fade-in animation after page navigation. pageFade goes
-    // 0 -> 1 over ~200ms; the canvas overlays its background at (1 - pageFade)
-    // opacity each frame so the freshly shown page fades in. lastPaintPageNo
-    // detects a page change and (re)starts the transition.
-    struct AnimProp* pageFadeAnim = nullptr;
-    float pageFade = 1.0f;
-    int lastPaintPageNo = 0;
 
     // Damage-tracking for incremental repaint (Phase 5)
     RECT dirtyRect{};

@@ -123,8 +123,17 @@ static UINT_PTR createAnnotFromSelection[] = {
 
 static UINT_PTR removeIfNoInternetPerms[] = {
     CmdCheckUpdate,
+    CmdTranslateSelection,
     CmdTranslateSelectionWithGoogle,
     CmdTranslateSelectionWithDeepL,
+    CmdTranslateSelectionWithGrokBuild,
+    CmdTranslateSelectionWithClaudeCode,
+    CmdTranslateSelectionWithOpenAICodex,
+    CmdTranslateSelectionWithAntiGravity,
+    CmdAIChatWithClaudeCode,
+    CmdAIChatWithGrokBuild,
+    CmdAIChatWithOpenAICodex,
+    CmdAIChatWithAntiGravity,
     CmdSearchSelectionWithGoogle,
     CmdSearchSelectionWithBing,
     CmdSearchSelectionWithWikipedia,
@@ -162,6 +171,10 @@ static UINT_PTR removeIfNoCopyPerms[] = {
     CmdTranslateSelection,
     CmdTranslateSelectionWithGoogle,
     CmdTranslateSelectionWithDeepL,
+    CmdTranslateSelectionWithGrokBuild,
+    CmdTranslateSelectionWithClaudeCode,
+    CmdTranslateSelectionWithOpenAICodex,
+    CmdTranslateSelectionWithAntiGravity,
     CmdSearchSelectionWithGoogle,
     CmdSearchSelectionWithBing,
     CmdSearchSelectionWithWikipedia,
@@ -207,6 +220,14 @@ static UINT_PTR removeIfNoDiskAccessPerm[] = {
     CmdSaveEmbeddedFile,
     CmdShowLog,
     CmdShowGeneratedHTML,
+    CmdTranslateSelectionWithGrokBuild,
+    CmdTranslateSelectionWithClaudeCode,
+    CmdTranslateSelectionWithOpenAICodex,
+    CmdTranslateSelectionWithAntiGravity,
+    CmdAIChatWithClaudeCode,
+    CmdAIChatWithGrokBuild,
+    CmdAIChatWithOpenAICodex,
+    CmdAIChatWithAntiGravity,
     0,
 };
 
@@ -476,16 +497,16 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
             return CommandVisibility::Hide;
         }
     }
-    if (cmdId == CmdTranslateSelectionWithGrokBuild && !IsGrokBuildInstalled()) {
+    if (cmdId == CmdTranslateSelectionWithGrokBuild && (!IsAIChatAvailable() || !IsGrokBuildInstalled())) {
         return CommandVisibility::Hide;
     }
-    if (cmdId == CmdTranslateSelectionWithClaudeCode && !IsClaudeCodeInstalled()) {
+    if (cmdId == CmdTranslateSelectionWithClaudeCode && (!IsAIChatAvailable() || !IsClaudeCodeInstalled())) {
         return CommandVisibility::Hide;
     }
-    if (cmdId == CmdTranslateSelectionWithOpenAICodex && !IsCodexBuildInstalled()) {
+    if (cmdId == CmdTranslateSelectionWithOpenAICodex && (!IsAIChatAvailable() || !IsCodexBuildInstalled())) {
         return CommandVisibility::Hide;
     }
-    if (cmdId == CmdTranslateSelectionWithAntiGravity && !IsAntiGravityInstalled()) {
+    if (cmdId == CmdTranslateSelectionWithAntiGravity && (!IsAIChatAvailable() || !IsAntiGravityInstalled())) {
         return CommandVisibility::Hide;
     }
 

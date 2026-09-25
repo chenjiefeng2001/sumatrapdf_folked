@@ -16,6 +16,7 @@ struct AIChatTabState {
     Str sessionId;
     str::Builder chatLog;
     HANDLE process = nullptr;
+    HANDLE readerDone = nullptr;
 };
 
 /* Data related to a single document loaded into a tab/window */

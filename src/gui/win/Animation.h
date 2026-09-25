@@ -26,10 +26,10 @@ struct AnimProp {
     float to = 0;
     float current = 0;
     Easing easing = Easing::EaseOutQuad;
-    int durationMs = 200;           // animation duration
-    int elapsedMs = 0;              // time since start
+    int durationMs = 200; // animation duration
+    int elapsedMs = 0;    // time since start
     bool active = false;
-    AnimProp* next = nullptr;       // linked list (internal)
+    AnimProp* next = nullptr; // linked list (internal)
 
     // Start or restart the animation.
     void Animate(float* val, float toVal, int durMs = 200, Easing ease = Easing::EaseOutQuad);
@@ -46,6 +46,9 @@ struct AnimationManager {
 
     explicit AnimationManager(HWND hwnd) : hwnd(hwnd) {}
     ~AnimationManager();
+
+    void Add(AnimProp* prop);
+    void Remove(AnimProp* prop);
 
     // Tick all active animations (call from WM_TIMER). Returns the number of
     // still-active animations after the tick.

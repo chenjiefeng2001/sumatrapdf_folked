@@ -40,12 +40,12 @@ static TempStr FindAntiGravityExecutableTemp() {
     }
     TempStr res = AIChatFindExecutableTemp(candidates, WStr(L"antigravity.exe"), WStr(L"antigravity"));
     if (res) {
-        logf("FindAntiGravityExecutableTemp: found %s\n", res);
+        logf("FindAntiGravityExecutableTemp: found\n");
         return res;
     }
     res = AIChatFindExecutableTemp(candidates, WStr(L"agy.exe"), WStr(L"agy"));
     if (res) {
-        logf("FindAntiGravityExecutableTemp: found agy %s\n", res);
+        logf("FindAntiGravityExecutableTemp: found agy\n");
     } else {
         logf("FindAntiGravityExecutableTemp: not found\n");
     }
@@ -192,6 +192,9 @@ static void CollectAntiGravitySessions(Str dir, Vec<AIChatSessionInfo>& sessions
 }
 
 static void LoadAntiGravitySessionHistory(MainWindow* win, Str sessionId, Str dir) {
+    if (!AIChatSessionIdIsValid(sessionId)) {
+        return;
+    }
     TempStr userProfile = GetSpecialFolderTemp(CSIDL_PROFILE);
     if (!userProfile) {
         return;
@@ -250,7 +253,7 @@ static void LoadAntiGravitySessionHistory(MainWindow* win, Str sessionId, Str di
         }
         TempStr fp = AIChatJsonStrTemp(line, "file_path");
         str::Builder desc;
-        desc.Append(fmt("Tool: %s", toolName));
+        desc.Append(fmt(_TRA("Tool: %s").s, toolName));
         if (fp) {
             desc.Append(fmt(" (%s)", fp));
         }
@@ -276,7 +279,7 @@ struct AntiGravityProvider : AIChatProvider {
         optionItems = "Low\0Medium\0High\0Max\0";
         optionCount = 4;
         optionDefault = 1;
-        checkboxLabel = "Auto Approve";
+        checkboxLabel = _TRA("Auto Approve");
         generatesSessionId = true;
         terminateOnFinish = true;
     }
@@ -337,18 +340,17 @@ struct AntiGravityProvider : AIChatProvider {
         // Otherwise --output-format stream-json is dropped and agy prints plain
         // text the stream parser can't read (response comes back empty).
         TempStr conversationArg = str::DupTemp("");
-        if (len(args.sessionId) > 0 && !str::Eq(args.sessionId, StrL("pending"))) {
-            conversationArg = fmt("--conversation %s", args.sessionId);
+        if (len(args.sessionId) > 0) {
+            conversationArg = fmt("--conversation %s", QuoteCmdLineArgTemp(args.sessionId));
         }
         TempStr res = fmt("%s --model %s --effort %s --output-format stream-json %s %s -p %s",
                           QuoteCmdLineArgTemp(args.exePath), QuoteCmdLineArgTemp(args.model), efforts[effortIdx],
                           autoApproveFlag, conversationArg, QuoteCmdLineArgTemp(prompt));
-        logf("AntiGravity BuildCmdLineTemp: %s\n", res);
         return res;
     }
 
     void ParseStreamLine(Str line, AIChatStreamCtx* ctx) override {
-        AIChatLog(&gAntiGravityLogger, "<<< stream", line);
+        AIChatLogMeta(&gAntiGravityLogger, "<<< stream", "bytes", len(line));
         TempStr eventName = AIChatJsonStrTemp(line, "event");
         if (!eventName) {
             return;
@@ -356,7 +358,7 @@ struct AntiGravityProvider : AIChatProvider {
         if (str::Eq(eventName, StrL("init"))) {
             TempStr convId = AIChatJsonStrTemp(line, "conversation_id");
             if (len(convId) > 0) {
-                AIChatPostUpdate(ctx, AIChatUpdateType::SessionId, convId);
+                AIChatStreamSetSessionId(ctx, convId);
             }
             return;
         }
@@ -370,7 +372,7 @@ struct AntiGravityProvider : AIChatProvider {
                 TempStr toolName = AIChatJsonStrTemp(line, "tool_name");
                 if (toolName) {
                     str::Builder desc;
-                    desc.Append(fmt("Tool: %s", toolName));
+                    desc.Append(fmt(_TRA("Tool: %s").s, toolName));
                     AIChatPostUpdate(ctx, AIChatUpdateType::Tool, ToStr(desc));
                 }
             }

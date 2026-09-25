@@ -5,6 +5,7 @@
 #include "base/Crypto.h"
 #include "base/File.h"
 #include "base/Http.h"
+#include "Translations.h"
 
 #include "EutlTrust.h"
 
@@ -158,12 +159,12 @@ bool EutlCacheExists() {
 TempStr EutlCacheInfoTemp() {
     TempStr stamp = EutlStampPathTemp();
     if (!stamp || !file::Exists(stamp)) {
-        return StrL("EU trusted list not downloaded");
+        return _TRA("EU trusted list not downloaded");
     }
     Str s = file::ReadFile(stamp);
     TempStr out = str::DupTemp(s);
     str::Free(s);
-    return out ? out : StrL("EU trusted list present");
+    return out ? out : _TRA("EU trusted list present");
 }
 
 bool EutlUpdate(Str* errOut) {
@@ -210,17 +211,17 @@ bool EutlUpdate(Str* errOut) {
     TempStr stampPath = EutlStampPathTemp();
     if (!cachePath || !dir::CreateForFile(cachePath)) {
         if (errOut) {
-            *errOut = str::Dup(StrL("could not write the EUTL cache"));
+            *errOut = str::Dup(_TRA("could not write the EUTL cache"));
         }
         return false;
     }
     if (!file::WriteFile(cachePath, ToStr(cache))) {
         if (errOut) {
-            *errOut = str::Dup(StrL("could not write the EUTL cache"));
+            *errOut = str::Dup(_TRA("could not write the EUTL cache"));
         }
         return false;
     }
-    TempStr info = fmt("Updated, %d certificates from %d national lists", len(fps), fetched);
+    TempStr info = fmt(_TRA("Updated, %d certificates from %d national lists").s, len(fps), fetched);
     file::WriteFile(stampPath, info);
     logf("EutlUpdate: %s\n", info);
     return true;

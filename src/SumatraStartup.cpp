@@ -29,6 +29,7 @@
 #include "gui/UIModels.h"
 #include "gui/Layout.h"
 #include "gui/win/WinGui.h"
+#include "gui/win/Renderer.h"
 
 #include "Settings.h"
 #include "DisplayMode.h"
@@ -1471,7 +1472,7 @@ Learn more at https://www.sumatrapdfreader.org/docs/Corrupted-installation
 
 static Str kInstallerHelpTmpl() {
     return StrL(R"(${appName} installer options:
-[-s] [-d <path>] [-with-filter] [-with-preview] [-x]
+[-s] [-d <path>] [-with-filter] [-with-preview] [-with-ai] [-x]
 
 -s
     installs ${appName} silently (without user interaction)
@@ -1481,6 +1482,8 @@ static Str kInstallerHelpTmpl() {
     install search filter
 -with-preview
     install shell preview
+-with-ai
+    enable AI chat support
 -x
     extracts the files, doesn't install
 -log
@@ -2583,6 +2586,11 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
     }
 #endif
 
+    // Unified control-drawing backend (Direct2D when available, GDI fallback).
+    // ThumbnailPanel and other gRenderer users need this; without it they
+    // silently use the legacy GDI path.
+    CreateRenderer();
+
     // Enable WM_POINTER high-precision input on Windows 8+ (precision touchpads,
     // touch, pen). Falls back silently to legacy WM_MOUSEWHEEL on older systems.
     EnablePointerInput();
@@ -2983,7 +2991,9 @@ ContinueOpenWindow:
         uitask::Post(MkFunc0(MaybeShowDefaultAppNotification, win), "MaybeShowDefaultAppNotification");
     }
 
-    StartSumatraControl(flags.controlPipeName);
+    if (flags.controlPipeName && (gIsDebugBuild || gIsAsanBuild)) {
+        StartSumatraControl(flags.controlPipeName);
+    }
 
     // on by default in debug builds; release builds can opt in by calling
     // StartUiHangDetector() themselves
@@ -3080,16 +3090,21 @@ Exit:
     // and before gRenderCache goes away (the waiting threads use it)
     WaitForPendingControllerDeletes();
 
+    FreeAcceleratorTables();
+    FileWatcherWaitForShutdown();
+
+    delete gRenderCache;
+    gRenderCache = nullptr;
+#ifdef _MSC_VER
+    delete gGpuBackend;
+    gGpuBackend = nullptr;
+#endif
+    delete gRenderer;
+    gRenderer = nullptr;
+
     PlatformFontDestroy();
     uitask::Destroy();
     trans::Destroy();
-
-    FreeAcceleratorTables();
-
-    FileWatcherWaitForShutdown();
-    delete gGpuBackend;
-    gGpuBackend = nullptr;
-    delete gRenderCache;
     SaveCallstackLogs();
     dbghelp::FreeCallstackLogs();
 

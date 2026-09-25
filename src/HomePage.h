@@ -18,12 +18,10 @@ void DrawAboutPage(MainWindow* win, Gfx* gfx);
 bool HomePageIsListView();
 void SetHomePageListView(bool listView);
 
-void SetPromoString(Str s);
 void FreeHomePageTips();
 void HomePageInvalidateLayoutCache();
 
 void DrawHomePage(MainWindow* win, Gfx* gfx);
-void PickAnotherRandomPromotion();
 void HomePageOnVScroll(MainWindow* win, WPARAM wp);
 void HomePageOnMouseWheel(MainWindow* win, int delta);
 void HomePageFocusSearch(MainWindow* win);

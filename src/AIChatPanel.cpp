@@ -40,18 +40,33 @@
 // timer ids on hwndAiChatBox
 constexpr UINT_PTR kTimerAutoSelectSession = 42;
 constexpr UINT_PTR kTimerWebViewSize = 43;
+constexpr UINT_PTR kTimerWebViewRetry = 44;
 
 // The chat page and its marked.min.js are both served to WebView2 from the
 // provider's virtual host (https://<provider>/). NavigateToString/SetHtml does
 // not reliably load in the current WebView2 runtime (the page stays blank),
 // whereas Navigate() to a resource-served URL does - the same mechanism the
 // in-app manual and CHM viewers use. marked.min.js comes from IDR_EMBEDDED_PAK.
-struct AIChatWebResources {
-    u8* marked = nullptr; // owned (malloc); from GetEmbeddedFileData
-    int markedLen = 0;
-    Str html; // owned; the chat page HTML
+struct AIChatWebViewContext {
+    MainWindow* win = nullptr;
+    WebviewWnd* webView = nullptr;
 };
-static AIChatWebResources gAIChatWebResources;
+
+static void EnsureWebViewReady(MainWindow* win);
+
+struct AIChatWebResources {
+    u8* marked = nullptr;
+    int markedLen = 0;
+    Str html;
+    int webViewRetryCount = 0;
+    Vec<AIChatWebViewContext*> webViewContexts;
+
+    ~AIChatWebResources() {
+        for (AIChatWebViewContext* context : webViewContexts) {
+            delete context;
+        }
+    }
+};
 
 // path is host-relative, without a leading slash (e.g. "index.html")
 static bool AIChatPathIs(Str path, Str name) {
@@ -117,8 +132,129 @@ static AIChatTabState* GetTabState(WindowTab* tab, int providerId) {
     return &tab->aiChat[providerId];
 }
 
-static Str kAIChatPendingSessionId() {
-    return StrL("pending");
+struct AIChatRequestRoute {
+    u64 token = 0;
+    HWND hwndFrame = nullptr;
+    int providerId = 0;
+    HANDLE process = nullptr;
+};
+
+static Mutex gAIChatRequestMutex;
+static Vec<AIChatRequestRoute> gAIChatRequestRoutes;
+static AtomicInt gAIChatPendingUpdateBytes = 0;
+static AtomicInt gAIChatPendingUpdateCount = 0;
+static constexpr int kAIChatMaxPendingUpdateBytes = 32 * 1024 * 1024;
+static constexpr int kAIChatMaxPendingUpdateCount = 4096;
+static u64 gNextAIChatRequestToken = 1;
+
+static u64 RegisterAIChatRequest(MainWindow* win, int providerId, HANDLE process) {
+    if (!win || !process) {
+        return 0;
+    }
+    ScopedMutex lk(&gAIChatRequestMutex);
+    u64 token = gNextAIChatRequestToken++;
+    if (gNextAIChatRequestToken == 0) {
+        gNextAIChatRequestToken = 1;
+    }
+    AIChatRequestRoute route;
+    route.token = token;
+    route.hwndFrame = win->hwndFrame;
+    route.providerId = providerId;
+    route.process = process;
+    if (!gAIChatRequestRoutes.Append(route)) {
+        return 0;
+    }
+    return token;
+}
+
+static void UnregisterAIChatRequest(u64 token) {
+    if (!token) {
+        return;
+    }
+    ScopedMutex lk(&gAIChatRequestMutex);
+    for (int i = 0; i < len(gAIChatRequestRoutes); i++) {
+        if (gAIChatRequestRoutes[i].token == token) {
+            gAIChatRequestRoutes.RemoveAtFast(i);
+            return;
+        }
+    }
+}
+
+static void UnregisterAIChatRequestsForTab(MainWindow* win, WindowTab* tab, int providerId) {
+    if (!win || !tab) {
+        return;
+    }
+    AIChatTabState* st = GetTabState(tab, providerId);
+    HANDLE process = st ? st->process : nullptr;
+    if (!process) {
+        return;
+    }
+    ScopedMutex lk(&gAIChatRequestMutex);
+    for (int i = 0; i < len(gAIChatRequestRoutes);) {
+        AIChatRequestRoute& route = gAIChatRequestRoutes[i];
+        if (route.hwndFrame == win->hwndFrame && route.providerId == providerId && route.process == process) {
+            gAIChatRequestRoutes.RemoveAtFast(i);
+        } else {
+            i++;
+        }
+    }
+}
+
+void UnregisterAIChatRequestsForTab(WindowTab* tab) {
+    if (!tab) {
+        return;
+    }
+    ScopedMutex lk(&gAIChatRequestMutex);
+    for (int i = 0; i < len(gAIChatRequestRoutes);) {
+        bool belongsToTab = false;
+        for (int providerId = 0; providerId < kAIChatProviderCount; providerId++) {
+            AIChatTabState* st = GetTabState(tab, providerId);
+            if (st && st->process == gAIChatRequestRoutes[i].process &&
+                gAIChatRequestRoutes[i].hwndFrame == (tab->win ? tab->win->hwndFrame : nullptr) &&
+                gAIChatRequestRoutes[i].providerId == providerId) {
+                belongsToTab = true;
+                break;
+            }
+        }
+        if (belongsToTab) {
+            gAIChatRequestRoutes.RemoveAtFast(i);
+        } else {
+            i++;
+        }
+    }
+}
+
+static void UnregisterAIChatRequestsForMainWindow(MainWindow* win) {
+    if (!win) {
+        return;
+    }
+    ScopedMutex lk(&gAIChatRequestMutex);
+    for (int i = 0; i < len(gAIChatRequestRoutes);) {
+        if (gAIChatRequestRoutes[i].hwndFrame == win->hwndFrame) {
+            gAIChatRequestRoutes.RemoveAtFast(i);
+        } else {
+            i++;
+        }
+    }
+}
+
+static bool AIChatWebViewUrlAllowed(MainWindow* win, Str url) {
+    AIChatProvider* p = CurrentProvider(win);
+    if (!p || !p->virtualHost || !url) {
+        return false;
+    }
+    if (str::StartsWithI(url, p->virtualHost)) {
+        return true;
+    }
+    if (str::StartsWith(url, StrL("//"))) {
+        return false;
+    }
+    for (int i = 0; i < len(url); i++) {
+        if (url.s[i] == ':' || url.s[i] == '\\') {
+            return false;
+        }
+    }
+    return true;
 }
 
 static Str BgColorForProvider(AIChatProvider* p) {
@@ -132,6 +268,8 @@ static Str BgColorForProvider(AIChatProvider* p) {
 // --- WebView helpers ---
 
 // Execute JS on the WebView AND record it in the current tab's chat log
+static constexpr int kAIChatMaxChatLogBytes = 4 * 1024 * 1024;
+
 static void WebViewEval(MainWindow* win, Str js, bool record = true) {
     if (win->aiChatWebView && win->aiChatWebViewReady) {
         win->aiChatWebView->Eval(js);
@@ -139,7 +277,14 @@ static void WebViewEval(MainWindow* win, Str js, bool record = true) {
     if (record) {
         AIChatTabState* st = GetTabState(win->CurrentTab(), win->aiChatProvider);
         if (st) {
-            st->chatLog.Append(js);
+            int extra = len(js) + 1;
+            if (len(st->chatLog) + extra > kAIChatMaxChatLogBytes) {
+                st->chatLog.Reset();
+            }
+            int toAppend = std::min(len(js), kAIChatMaxChatLogBytes - 1);
+            if (toAppend > 0) {
+                st->chatLog.Append(Str(js.s, toAppend));
+            }
             st->chatLog.AppendChar('\n');
         }
     }
@@ -163,7 +308,7 @@ static void WebViewAddTool(MainWindow* win, Str text) {
 static void WebViewAddError(MainWindow* win, Str text) {
     AIChatProvider* p = CurrentProvider(win);
     if (p) {
-        AIChatLog(p->logger, "error", text);
+        AIChatLogMeta(p->logger, "error", "bytes", text ? len(text) : 0);
     }
     TempStr js = fmt("addError('%s')", AIChatJsEscapeTemp(text));
     WebViewEval(win, js);
@@ -177,10 +322,25 @@ static void WebViewClearChat(MainWindow* win) {
     WebViewEval(win, "clearChat()", false); // don't record clear
 }
 
+static bool AIChatNavigationStarting(void* ctx, Str url, bool newWindow) {
+    auto* context = (AIChatWebViewContext*)ctx;
+    MainWindow* win = context ? context->win : nullptr;
+    if (!win || !IsMainWindowValid(win) || win->aiChatWebView != context->webView) {
+        return false;
+    }
+    if (newWindow || !AIChatWebViewUrlAllowed(win, url)) {
+        if (!newWindow && IsMainWindowValidAndNotClosing(win)) {
+            win->aiChatWebViewReady = false;
+        }
+        return false;
+    }
+    return true;
+}
+
 static void WebViewShowUnsupportedFileType(MainWindow* win) {
     WebViewClearChat(win);
     AIChatProvider* p = CurrentProvider(win);
-    TempStr msg = fmt("%s is only available for PDF and image files.", p ? p->name : StrL("AI chat"));
+    TempStr msg = fmt(_TRA("%s is only available for PDF and image files.").s, p ? p->name : StrL("AI chat"));
     TempStr js = fmt("addError('%s')", AIChatJsEscapeTemp(msg));
     WebViewEval(win, js, false);
 }
@@ -339,7 +499,7 @@ static void OnSessionComboChange(MainWindow* win) {
 
     if (sel == 0) {
         // "New Session" — clear current session
-        AIChatLog(p->logger, "session", "new");
+        AIChatLogMeta(p->logger, "session", "action", 1);
         str::ReplaceWithCopy(&st->sessionId, Str{});
         st->chatLog.Reset();
         WebViewClearChat(win);
@@ -353,7 +513,11 @@ static void OnSessionComboChange(MainWindow* win) {
 
     int sessionIdx = sel - 1;
     if (sessionIdx >= 0 && sessionIdx < len(sessions)) {
-        AIChatLog(p->logger, "session", sessions[sessionIdx].sessionId);
+        AIChatLogMeta(p->logger, "session", "action", 2);
+        if (!AIChatSessionIdIsValid(sessions[sessionIdx].sessionId)) {
+            AIChatFreeSessions(sessions);
+            return;
+        }
         str::ReplaceWithCopy(&st->sessionId, sessions[sessionIdx].sessionId);
         st->chatLog.Reset();
         WebViewClearChat(win);
@@ -379,9 +543,11 @@ static void AutoSelectRecentSession(MainWindow* win) {
 
     if (len(sessions) > 0) {
         // sessions are sorted by timestamp desc, so [0] is most recent
-        str::ReplaceWithCopy(&st->sessionId, sessions[0].sessionId);
-        WebViewClearChat(win);
-        p->LoadSessionHistory(win, st->sessionId, dir);
+        if (AIChatSessionIdIsValid(sessions[0].sessionId)) {
+            str::ReplaceWithCopy(&st->sessionId, sessions[0].sessionId);
+            WebViewClearChat(win);
+            p->LoadSessionHistory(win, st->sessionId, dir);
+        }
     }
 
     AIChatFreeSessions(sessions);
@@ -499,9 +665,10 @@ static void StopAIChat(MainWindow* win) {
     WindowTab* tab = win->CurrentTab();
     AIChatTabState* st = GetTabState(tab, win->aiChatProvider);
     if (p && st && st->process) {
-        AIChatLog(p->logger, "stop", st->sessionId ? st->sessionId : StrL("(no session)"));
+        AIChatLogMeta(p->logger, "stop", "active", 1);
+        UnregisterAIChatRequestsForTab(win, tab, win->aiChatProvider);
         AIChatCloseProcess(&st->process, true);
-        WebViewAddError(win, "Stopped by user.");
+        WebViewAddError(win, _TRA("Stopped by user."));
         SetAIChatWorking(win, false);
     }
 }
@@ -511,36 +678,43 @@ static void StopAIChat(MainWindow* win) {
 struct AIChatUpdateData {
     HWND hwndFrame = nullptr;
     int providerId = 0;
+    u64 requestToken = 0;
     Str text;
-    Str sessionId; // to identify which tab this belongs to
+    Str sessionId;
     AIChatUpdateType updateType = AIChatUpdateType::Text;
 };
 
 static void FreeAIChatUpdateData(AIChatUpdateData* data) {
+    int bytes = (int)sizeof(*data) + len(data->text) + len(data->sessionId);
+    AtomicIntAdd(&gAIChatPendingUpdateBytes, -bytes);
+    AtomicIntDec(&gAIChatPendingUpdateCount);
     str::Free(data->text);
     str::Free(data->sessionId);
     delete data;
 }
 
-// the tab an update belongs to; prefer tabs with a running process
-static WindowTab* FindAIChatUpdateTab(MainWindow* win, int pid, Str sessionId) {
-    for (WindowTab* t : win->Tabs()) {
-        AIChatTabState* st = GetTabState(t, pid);
-        if (!st || !st->process) {
+static WindowTab* FindAIChatUpdateTab(MainWindow* win, int providerId, u64 requestToken) {
+    if (!win || !requestToken) {
+        return nullptr;
+    }
+    ScopedMutex lk(&gAIChatRequestMutex);
+    for (int i = 0; i < len(gAIChatRequestRoutes);) {
+        AIChatRequestRoute& route = gAIChatRequestRoutes[i];
+        if (route.token != requestToken) {
+            i++;
             continue;
         }
-        if (sessionId && st->sessionId && str::Eq(st->sessionId, sessionId)) {
-            return t;
+        if (AIChatFindMainWindowByFrame(route.hwndFrame) != win || route.providerId != providerId) {
+            gAIChatRequestRoutes.RemoveAtFast(i);
+            continue;
         }
-        if (sessionId && str::Eq(sessionId, kAIChatPendingSessionId()) && !st->sessionId) {
-            return t;
+        for (WindowTab* tab : win->Tabs()) {
+            AIChatTabState* st = GetTabState(tab, providerId);
+            if (st && st->process == route.process) {
+                return tab;
+            }
         }
-    }
-    for (WindowTab* t : win->Tabs()) {
-        AIChatTabState* st = GetTabState(t, pid);
-        if (st && st->sessionId && sessionId && str::Eq(st->sessionId, sessionId)) {
-            return t;
-        }
+        gAIChatRequestRoutes.RemoveAtFast(i);
     }
     return nullptr;
 }
@@ -550,9 +724,13 @@ static void OnAIChatFinished(MainWindow* win, AIChatProvider* p, AIChatTabState*
         if (WaitForSingleObject(st->process, 0) == WAIT_OBJECT_0) {
             DWORD exitCode = 0;
             GetExitCodeProcess(st->process, &exitCode);
-            AIChatLog(p->logger, "exit", fmt("%lu", exitCode));
+            AIChatLogMeta(p->logger, "exit", "code", (i64)exitCode);
         }
         AIChatCloseProcess(&st->process, p->terminateOnFinish);
+    }
+    if (st && st->readerDone) {
+        CloseHandle(st->readerDone);
+        st->readerDone = nullptr;
     }
     if (isActiveTab) {
         WebViewFlushBlock(win);
@@ -568,7 +746,7 @@ static void ApplyAIChatUpdate(MainWindow* win, AIChatProvider* p, AIChatUpdateDa
     switch (data->updateType) {
         case AIChatUpdateType::Text:
             if (data->text) {
-                AIChatLog(p->logger, "<<< text", data->text);
+                AIChatLogMeta(p->logger, "<<< text", "bytes", len(data->text));
             }
             if (isActiveTab) {
                 WebViewAppendText(win, data->text);
@@ -576,7 +754,7 @@ static void ApplyAIChatUpdate(MainWindow* win, AIChatProvider* p, AIChatUpdateDa
             break;
         case AIChatUpdateType::Tool:
             if (data->text) {
-                AIChatLog(p->logger, "<<< tool", data->text);
+                AIChatLogMeta(p->logger, "<<< tool", "bytes", len(data->text));
             }
             if (isActiveTab) {
                 WebViewAddTool(win, data->text);
@@ -586,7 +764,7 @@ static void ApplyAIChatUpdate(MainWindow* win, AIChatProvider* p, AIChatUpdateDa
             if (isActiveTab) {
                 WebViewAddError(win, data->text);
             } else if (data->text) {
-                AIChatLog(p->logger, "error", data->text);
+                AIChatLogMeta(p->logger, "error", "bytes", len(data->text));
             }
             break;
         case AIChatUpdateType::Flush:
@@ -596,7 +774,7 @@ static void ApplyAIChatUpdate(MainWindow* win, AIChatProvider* p, AIChatUpdateDa
             break;
         case AIChatUpdateType::SessionId:
             if (data->text) {
-                AIChatLog(p->logger, "<<< session", data->text);
+                AIChatLogMeta(p->logger, "<<< session", "bytes", len(data->text));
             }
             if (st && data->text) {
                 str::ReplaceWithCopy(&st->sessionId, data->text);
@@ -613,48 +791,102 @@ static void OnAIChatUpdate(AIChatUpdateData* data) {
     int pid = data->providerId;
     AIChatProvider* p = GetAIChatProvider(pid);
     if (!IsMainWindowValidAndNotClosing(win) || !win->hwndAiChatBox || !p) {
+        UnregisterAIChatRequest(data->requestToken);
         FreeAIChatUpdateData(data);
         return;
     }
-    WindowTab* tab = FindAIChatUpdateTab(win, pid, data->sessionId);
-    bool isActiveTab = tab && tab == win->CurrentTab() && win->aiChatProvider == pid;
+    WindowTab* tab = FindAIChatUpdateTab(win, pid, data->requestToken);
+    if (!tab) {
+        UnregisterAIChatRequest(data->requestToken);
+        FreeAIChatUpdateData(data);
+        return;
+    }
+    bool isActiveTab = tab == win->CurrentTab() && win->aiChatProvider == pid;
     ApplyAIChatUpdate(win, p, data, GetTabState(tab, pid), isActiveTab);
+    if (data->updateType == AIChatUpdateType::Finished) {
+        UnregisterAIChatRequest(data->requestToken);
+    }
     FreeAIChatUpdateData(data);
 }
 
-// post an update to be applied on the UI thread (implemented in AIChatPanel.cpp)
-// When set (only during a headless RunAIChatSync), provider updates are
-// collected here instead of being posted to a webview: there's no window, and
-// the message loop isn't pumping while the test blocks on the pipe.
-struct AIChatCaptureSink {
-    str::Builder text;
-    str::Builder err;
-    bool finished = false;
-};
-static AIChatCaptureSink* gAIChatCapture = nullptr;
+static constexpr int kAIChatMaxCapturedBytes = 8 * 1024 * 1024;
 
-void AIChatPostUpdate(AIChatStreamCtx* ctx, AIChatUpdateType type, Str text) {
-    if (gAIChatCapture) {
-        if (type == AIChatUpdateType::Text) {
-            gAIChatCapture->text.Append(text ? text : Str(""));
-        } else if (type == AIChatUpdateType::Error) {
-            gAIChatCapture->err.Append(text ? text : Str(""));
-        } else if (type == AIChatUpdateType::Finished) {
-            gAIChatCapture->finished = true;
+static void AIChatCaptureAppend(AIChatCaptureSink* sink, str::Builder& out, Str text) {
+    if (!sink || !text || len(out) >= kAIChatMaxCapturedBytes) {
+        if (sink && text && len(out) >= kAIChatMaxCapturedBytes) {
+            sink->truncated = true;
         }
         return;
     }
+    int available = kAIChatMaxCapturedBytes - len(out);
+    int toAppend = std::min(available, len(text));
+    out.Append(Str(text.s, toAppend));
+    if (toAppend < len(text)) {
+        sink->truncated = true;
+    }
+}
+
+bool AIChatSessionIdIsValid(Str sessionId) {
+    if (!sessionId || len(sessionId) == 0 || len(sessionId) > 128 || str::Eq(sessionId, StrL(".")) ||
+        str::Eq(sessionId, StrL(".."))) {
+        return false;
+    }
+    for (int i = 0; i < len(sessionId); i++) {
+        u8 c = (u8)sessionId.s[i];
+        bool alphaNumeric = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+        if (!alphaNumeric && c != '-' && c != '_' && c != '.') {
+            return false;
+        }
+    }
+    return true;
+}
+
+void AIChatPostUpdate(AIChatStreamCtx* ctx, AIChatUpdateType type, Str text) {
+    if (!ctx) {
+        return;
+    }
+    if (ctx->capture) {
+        if (type == AIChatUpdateType::Text) {
+            AIChatCaptureAppend(ctx->capture, ctx->capture->text, text);
+        } else if (type == AIChatUpdateType::Error) {
+            AIChatCaptureAppend(ctx->capture, ctx->capture->err, text);
+        } else if (type == AIChatUpdateType::Finished) {
+            ctx->capture->finished = true;
+        }
+        return;
+    }
+    int bytes = (int)sizeof(AIChatUpdateData) + len(text) + len(ctx->sessionId);
+    bool terminal = type == AIChatUpdateType::Finished;
+    int byteLimit = kAIChatMaxPendingUpdateBytes - (terminal ? 0 : 64 * 1024);
+    int countLimit = kAIChatMaxPendingUpdateCount - (terminal ? 0 : 8);
+    int pendingBytes = AtomicIntGet(&gAIChatPendingUpdateBytes);
+    int pendingCount = AtomicIntGet(&gAIChatPendingUpdateCount);
+    if (bytes > byteLimit || pendingBytes > byteLimit - bytes || pendingCount >= countLimit) {
+        AIChatProvider* provider = GetAIChatProvider(ctx->providerId);
+        if (provider) {
+            AIChatLogMeta(provider->logger, "drop", "bytes", bytes);
+        }
+        return;
+    }
+    AtomicIntAdd(&gAIChatPendingUpdateBytes, bytes);
+    AtomicIntInc(&gAIChatPendingUpdateCount);
     auto* data = new AIChatUpdateData();
     data->hwndFrame = ctx->hwndFrame;
     data->providerId = ctx->providerId;
+    data->requestToken = ctx->requestToken;
     data->sessionId = ctx->sessionId ? str::Dup(ctx->sessionId) : Str{};
     data->text = text ? str::Dup(text) : Str{};
     data->updateType = type;
-    uitask::Post(MkFunc0(OnAIChatUpdate, data));
+    if (!uitask::Post(MkFunc0(OnAIChatUpdate, data))) {
+        FreeAIChatUpdateData(data);
+    }
 }
 
 // record a session id the provider assigned mid-stream
 void AIChatStreamSetSessionId(AIChatStreamCtx* ctx, Str sessionId) {
+    if (!ctx || !AIChatSessionIdIsValid(sessionId)) {
+        return;
+    }
     AIChatPostUpdate(ctx, AIChatUpdateType::SessionId, sessionId);
     str::ReplaceWithCopy(&ctx->sessionId, sessionId);
 }
@@ -663,10 +895,17 @@ void AIChatStreamSetSessionId(AIChatStreamCtx* ctx, Str sessionId) {
 
 struct AIChatReadThreadCtx {
     HANDLE hReadPipe = nullptr;
+    HANDLE process = nullptr;
+    HANDLE doneEvent = nullptr;
     AIChatStreamCtx stream;
 };
 
+static constexpr ULONGLONG kAIChatReadTimeoutMs = 5 * 60 * 1000;
+
 static void AIChatReadThread(AIChatReadThreadCtx* ctx) {
+    if (!ctx) {
+        return;
+    }
     HANDLE hPipe = ctx->hReadPipe;
     AIChatProvider* p = GetAIChatProvider(ctx->stream.providerId);
 
@@ -674,22 +913,69 @@ static void AIChatReadThread(AIChatReadThreadCtx* ctx) {
     char lineScratch[4096]{};
     str::Builder lineBuf(Str(lineScratch, sizeofi(lineScratch)));
     constexpr int kMaxProviderLineSize = 1024 * 1024;
+    constexpr u64 kMaxProviderOutputBytes = 16 * 1024 * 1024;
     bool lineTooLong = false;
+    bool outputLimitReached = false;
+    u64 totalBytes = 0;
     char buf[4096];
     DWORD bytesRead;
 
-    while (ReadFile(hPipe, buf, sizeof(buf) - 1, &bytesRead, nullptr) && bytesRead > 0) {
+    const ULONGLONG deadline = GetTickCount64() + kAIChatReadTimeoutMs;
+    for (;;) {
+        DWORD available = 0;
+        if (!PeekNamedPipe(hPipe, nullptr, 0, nullptr, &available, nullptr)) {
+            DWORD err = GetLastError();
+            if (err == ERROR_BROKEN_PIPE || WaitForSingleObject(ctx->process, 0) != WAIT_TIMEOUT) {
+                break;
+            }
+            if (GetTickCount64() >= deadline) {
+                AIChatPostUpdate(&ctx->stream, AIChatUpdateType::Error, _TRA("Provider timed out"));
+                AIChatCloseProcess(&ctx->process, true);
+                break;
+            }
+            Sleep(10);
+            continue;
+        } else if (available > 0) {
+            DWORD toRead = std::min<DWORD>(available, sizeof(buf) - 1);
+            if (!ReadFile(hPipe, buf, toRead, &bytesRead, nullptr) || bytesRead == 0) {
+                break;
+            }
+        } else {
+            if (WaitForSingleObject(ctx->process, 0) != WAIT_TIMEOUT) {
+                break;
+            }
+            if (GetTickCount64() >= deadline) {
+                AIChatPostUpdate(&ctx->stream, AIChatUpdateType::Error, _TRA("Provider timed out"));
+                AIChatCloseProcess(&ctx->process, true);
+                break;
+            }
+            Sleep(10);
+            continue;
+        }
+
+        if (totalBytes + bytesRead > kMaxProviderOutputBytes) {
+            outputLimitReached = true;
+            AIChatPostUpdate(&ctx->stream, AIChatUpdateType::Error, StrL("Provider output exceeded limit"));
+            if (p) {
+                AIChatLogMeta(p->logger, "<<< output", "bytes", (i64)kMaxProviderOutputBytes);
+            }
+            AIChatCloseProcess(&ctx->process, true);
+            break;
+        }
+        totalBytes += bytesRead;
         buf[bytesRead] = 0;
         for (DWORD i = 0; i < bytesRead; i++) {
             if (buf[i] == '\n') {
                 if (lineTooLong) {
-                    AIChatPostUpdate(&ctx->stream, AIChatUpdateType::Error, StrL("Provider output line was too long"));
+                    AIChatPostUpdate(&ctx->stream, AIChatUpdateType::Error, _TRA("Provider output line was too long"));
                 } else {
                     Str line = ToStr(lineBuf);
-                    if (line) {
-                        AIChatLog(p->logger, "<<<", line);
+                    if (line && p) {
+                        AIChatLogMeta(p->logger, "<<<", "bytes", len(line));
                     }
-                    p->ParseStreamLine(line, &ctx->stream);
+                    if (p) {
+                        p->ParseStreamLine(line, &ctx->stream);
+                    }
                 }
                 lineBuf.Reset();
                 lineTooLong = false;
@@ -704,13 +990,24 @@ static void AIChatReadThread(AIChatReadThreadCtx* ctx) {
         }
     }
 
-    Str rem = lineTooLong ? Str{} : ToStr(lineBuf);
-    if (rem) {
-        AIChatLog(p->logger, "<<<", rem);
+    if (!outputLimitReached) {
+        Str rem = lineTooLong ? Str{} : ToStr(lineBuf);
+        if (rem && p) {
+            AIChatLogMeta(p->logger, "<<<", "bytes", len(rem));
+        }
     }
-    AIChatLog(p->logger, "eof", "(stdout closed)");
+    if (p) {
+        AIChatLogMeta(p->logger, "eof", "closed", 1);
+    }
 
-    CloseHandle(hPipe);
+    if (hPipe) {
+        CloseHandle(hPipe);
+    }
+    AIChatCloseProcess(&ctx->process, false);
+    if (ctx->doneEvent) {
+        SetEvent(ctx->doneEvent);
+        CloseHandle(ctx->doneEvent);
+    }
     AIChatPostUpdate(&ctx->stream, AIChatUpdateType::Finished, {});
     str::Free(ctx->stream.sessionId);
     delete ctx;
@@ -722,11 +1019,49 @@ static void StartAIChatReadThread(AIChatReadThreadCtx* ctx) {
 
 // --- Headless chat runner (for -dbg-control tests) ---
 
-static void AIChatReadAllPipe(HANDLE hPipe, str::Builder& out) {
+enum class AIChatPipeReadResult {
+    Ok,
+    TimedOut,
+    OutputLimit,
+    Failed,
+};
+
+static constexpr ULONGLONG kAIChatHeadlessTimeoutMs = 5 * 60 * 1000;
+static constexpr u64 kAIChatMaxHeadlessOutputBytes = 8 * 1024 * 1024;
+
+static AIChatPipeReadResult AIChatReadAllPipe(HANDLE hPipe, HANDLE hProcess, str::Builder& out, ULONGLONG startedAt) {
+    if (!hPipe || !hProcess) {
+        return AIChatPipeReadResult::Failed;
+    }
     char buf[4096];
-    DWORD n = 0;
-    while (ReadFile(hPipe, buf, sizeof(buf), &n, nullptr) && n > 0) {
-        out.Append(Str(buf, (int)n));
+    for (;;) {
+        if (GetTickCount64() - startedAt >= kAIChatHeadlessTimeoutMs) {
+            return AIChatPipeReadResult::TimedOut;
+        }
+        DWORD available = 0;
+        if (PeekNamedPipe(hPipe, nullptr, 0, nullptr, &available, nullptr)) {
+            if (available > 0) {
+                DWORD toRead = std::min<DWORD>(available, dimof(buf));
+                DWORD n = 0;
+                if (!ReadFile(hPipe, buf, toRead, &n, nullptr) || n == 0) {
+                    return AIChatPipeReadResult::Failed;
+                }
+                if ((u64)len(out) + n > kAIChatMaxHeadlessOutputBytes) {
+                    return AIChatPipeReadResult::OutputLimit;
+                }
+                out.Append(Str(buf, (int)n));
+                continue;
+            }
+            if (WaitForSingleObject(hProcess, 0) != WAIT_TIMEOUT) {
+                return AIChatPipeReadResult::Ok;
+            }
+        } else {
+            DWORD err = GetLastError();
+            if (err == ERROR_BROKEN_PIPE || WaitForSingleObject(hProcess, 0) != WAIT_TIMEOUT) {
+                return AIChatPipeReadResult::Ok;
+            }
+        }
+        Sleep(10);
     }
 }
 
@@ -735,9 +1070,13 @@ static void AIChatReadAllPipe(HANDLE hPipe, str::Builder& out) {
 // provider parser while capturing the emitted text/errors. Same provider code
 // the panel uses, so it exercises the real path.
 static bool RunAIChatSync(AIChatBackend backend, Str filePath, Str message, Str& outText, Str& outErr) {
+    if (!IsAIChatAvailable() || !HasPermission(Perm::InternetAccess) || !CanAccessDisk()) {
+        outErr = str::Dup(StrL("AI chat is unavailable"));
+        return false;
+    }
     AIChatProvider* p = GetAIChatProvider((int)backend);
     if (!p) {
-        outErr = str::Dup("unknown backend");
+        outErr = str::Dup(StrL("unknown backend"));
         return false;
     }
     TempStr exePath = p->FindExecutableTemp();
@@ -770,39 +1109,57 @@ static bool RunAIChatSync(AIChatBackend backend, Str filePath, Str message, Str&
     args.flag = p->GetFlag();
     args.isNewSession = true;
     TempStr cmdLine = p->BuildCmdLineTemp(args);
+    if (!cmdLine) {
+        outErr = str::Dup(StrL("failed to build provider command"));
+        return false;
+    }
 
-    AIChatLog(p->logger, ">>> test-user", message);
-    AIChatLog(p->logger, ">>> test-file", filePath);
-    AIChatLog(p->logger, ">>> test-cwd", dir);
-    AIChatLog(p->logger, ">>> cmd", cmdLine);
-
+    ULONGLONG startedAt = GetTickCount64();
+    AIChatLogMeta(p->logger, "headless", "provider", (i64)backend);
     AIChatProcessLaunchResult launch;
     if (!AIChatLaunchProcessWithStdoutPipe(cmdLine, dir, &launch)) {
         outErr = str::Dup(fmt("failed to launch %s", p->exeName));
-        AIChatLog(p->logger, "<<< error", outErr);
+        AIChatLogMeta(p->logger, "<<< error", "bytes", len(outErr));
         return false;
     }
 
     str::Builder raw(4096);
-    AIChatReadAllPipe(launch.hReadPipe, raw);
-    CloseHandle(launch.hReadPipe);
-    launch.hReadPipe = nullptr;
-    DWORD waitRes = WaitForSingleObject(launch.hProcess, 5 * 60 * 1000);
-    if (waitRes == WAIT_TIMEOUT) {
-        TerminateProcess(launch.hProcess, 1);
-        AIChatCloseProcess(&launch.hProcess, false);
-        outErr = str::Dup("chat timed out");
-        AIChatLog(p->logger, "<<< error", outErr);
+    AIChatPipeReadResult readResult = AIChatReadAllPipe(launch.hReadPipe, launch.hProcess, raw, startedAt);
+    if (launch.hReadPipe) {
+        CloseHandle(launch.hReadPipe);
+        launch.hReadPipe = nullptr;
+    }
+    if (readResult != AIChatPipeReadResult::Ok) {
+        Str reason = readResult == AIChatPipeReadResult::TimedOut      ? StrL("chat timed out")
+                     : readResult == AIChatPipeReadResult::OutputLimit ? StrL("chat output exceeded limit")
+                                                                       : StrL("failed to read provider output");
+        outErr = str::Dup(reason);
+        AIChatCloseProcess(&launch.hProcess, true);
+        AIChatLogMeta(p->logger, "<<< error", "bytes", len(outErr));
         return false;
     }
-    AIChatCloseProcess(&launch.hProcess, false);
+
+    ULONGLONG elapsed = GetTickCount64() - startedAt;
+    DWORD waitMs = 0;
+    if (elapsed < kAIChatHeadlessTimeoutMs) {
+        ULONGLONG remaining = kAIChatHeadlessTimeoutMs - elapsed;
+        waitMs = remaining > 0xffffffffu ? 0xffffffffu : (DWORD)remaining;
+    }
+    DWORD waitRes = WaitForSingleObject(launch.hProcess, waitMs);
+    if (waitRes == WAIT_TIMEOUT || waitRes == WAIT_FAILED) {
+        outErr = str::Dup(StrL("chat timed out"));
+        AIChatCloseProcess(&launch.hProcess, true);
+        AIChatLogMeta(p->logger, "<<< error", "bytes", len(outErr));
+        return false;
+    }
+    AIChatCloseProcess(&launch.hProcess, true);
 
     // parse the collected output through the real provider parser, capturing the
     // text it emits instead of posting to a (nonexistent) webview
     AIChatCaptureSink sink;
-    gAIChatCapture = &sink;
     AIChatStreamCtx ctx;
     ctx.providerId = (int)backend;
+    ctx.capture = &sink;
     Str out = ToStr(raw);
     int off = 0;
     while (off < out.len) {
@@ -812,16 +1169,20 @@ static bool RunAIChatSync(AIChatBackend backend, Str filePath, Str message, Str&
         }
         if (off > start) {
             TempStr line = str::DupTemp(Str(out.s + start, off - start));
-            AIChatLog(p->logger, "<<<", line);
+            AIChatLogMeta(p->logger, "<<<", "bytes", len(line));
             p->ParseStreamLine(line, &ctx);
         }
         while (off < out.len && (out.s[off] == '\n' || out.s[off] == '\r')) {
             off++;
         }
     }
-    gAIChatCapture = nullptr;
+    ctx.capture = nullptr;
     str::Free(ctx.sessionId);
 
+    if (sink.truncated) {
+        outErr = str::Dup(StrL("chat response exceeded limit"));
+        return false;
+    }
     Str err = ToStr(sink.err);
     if (len(err) > 0) {
         outErr = str::Dup(err);
@@ -830,7 +1191,7 @@ static bool RunAIChatSync(AIChatBackend backend, Str filePath, Str message, Str&
     Str txt = ToStr(sink.text);
     str::TrimWSInPlace(txt, str::TrimOpt::Both);
     if (len(txt) == 0) {
-        outErr = str::Dup("response contained no text");
+        outErr = str::Dup(StrL("response contained no text"));
         return false;
     }
     outText = str::Dup(txt);
@@ -892,6 +1253,10 @@ static void SendAIChatMessage(MainWindow* win) {
     if (!p || !win->aiChatInput) {
         return;
     }
+    if (!HasPermission(Perm::InternetAccess) || !CanAccessDisk()) {
+        logf("SendAIChatMessage: blocked by policy\n");
+        return;
+    }
     if (!IsAIChatSupportedForTab(win->CurrentTab())) {
         return;
     }
@@ -906,8 +1271,15 @@ static void SendAIChatMessage(MainWindow* win) {
     if (!tab || !tab->filePath || !st) {
         return;
     }
+    if (st->sessionId && !AIChatSessionIdIsValid(st->sessionId)) {
+        str::ReplaceWithCopy(&st->sessionId, Str{});
+    }
     if (st->process) {
         return; // this tab already has a running request
+    }
+    if (st->readerDone) {
+        CloseHandle(st->readerDone);
+        st->readerDone = nullptr;
     }
 
     TempWStr inputW = HwndGetTextWTemp(hwndInput);
@@ -938,17 +1310,15 @@ static void SendAIChatMessage(MainWindow* win) {
 
     TempStr exePath = p->FindExecutableTemp();
     if (!exePath) {
-        AIChatLog(p->logger, "error", fmt("Cannot find %s executable", p->exeName));
-        WebViewAddError(win, fmt("Cannot find %s. Is %s installed?", p->exeName, p->name));
+        AIChatLogMeta(p->logger, "error", "bytes", len(_TRA("Cannot find executable")));
+        WebViewAddError(win, fmt(_TRA("Cannot find %s. Is %s installed?").s, p->exeName, p->name));
         SetAIChatWorking(win, false);
         return;
     }
 
-    AIChatLog(p->logger, ">>> user", input);
-    AIChatLog(p->logger, ">>> session",
-              fmt("%s (%s)", st->sessionId ? st->sessionId : kAIChatPendingSessionId(),
-                  Str(isNewSession ? "new" : "resume")));
-    AIChatLog(p->logger, ">>> cwd", dir);
+    AIChatLogMeta(p->logger, ">>> user", "bytes", len(input));
+    AIChatLogMeta(p->logger, ">>> session", "new", isNewSession ? 1 : 0);
+    AIChatLogMeta(p->logger, ">>> cwd", "bytes", 0);
 
     AIChatCmdArgs args;
     args.exePath = exePath;
@@ -964,25 +1334,87 @@ static void SendAIChatMessage(MainWindow* win) {
     args.isNewSession = isNewSession;
     TempStr cmdLine = p->BuildCmdLineTemp(args);
 
-    AIChatLog(p->logger, ">>> cmd", cmdLine);
+    AIChatLogMeta(p->logger, ">>> cmd", "bytes", len(cmdLine));
 
     AIChatProcessLaunchResult launch;
     if (!AIChatLaunchProcessWithStdoutPipe(cmdLine, dir, &launch)) {
-        AIChatLog(p->logger, "error", fmt("Failed to launch %s process", p->exeName));
-        WebViewAddError(win, fmt("Failed to launch %s. Is it installed and in PATH?", p->exeName));
+        AIChatLogMeta(p->logger, "error", "bytes", 0);
+        WebViewAddError(win, fmt(_TRA("Failed to launch %s. Is it installed and in PATH?").s, p->exeName));
         SetAIChatWorking(win, false);
         return;
     }
 
     st->process = launch.hProcess;
-    AIChatLog(p->logger, ">>> start", fmt("pid %lu", launch.processId));
+    u64 requestToken = RegisterAIChatRequest(win, win->aiChatProvider, st->process);
+    if (!requestToken) {
+        if (launch.hReadPipe) {
+            CloseHandle(launch.hReadPipe);
+        }
+        AIChatCloseProcess(&st->process, true);
+        WebViewAddError(win, _TRA("Failed to register AI request."));
+        SetAIChatWorking(win, false);
+        return;
+    }
+    AIChatLogMeta(p->logger, ">>> start", "pid", (i64)launch.processId);
 
+    HANDLE processCopy = nullptr;
+    if (!DuplicateHandle(GetCurrentProcess(), launch.hProcess, GetCurrentProcess(), &processCopy, 0, FALSE,
+                         DUPLICATE_SAME_ACCESS)) {
+        if (launch.hReadPipe) {
+            CloseHandle(launch.hReadPipe);
+        }
+        UnregisterAIChatRequest(requestToken);
+        AIChatCloseProcess(&st->process, true);
+        WebViewAddError(win, _TRA("Failed to start AI request."));
+        SetAIChatWorking(win, false);
+        return;
+    }
+    HANDLE readerDone = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    HANDLE readerDoneCopy = nullptr;
+    if (!readerDone || !DuplicateHandle(GetCurrentProcess(), readerDone, GetCurrentProcess(), &readerDoneCopy, 0, FALSE,
+                                        DUPLICATE_SAME_ACCESS)) {
+        if (readerDone) {
+            CloseHandle(readerDone);
+        }
+        if (launch.hReadPipe) {
+            CloseHandle(launch.hReadPipe);
+        }
+        AIChatCloseProcess(&processCopy, true);
+        UnregisterAIChatRequest(requestToken);
+        AIChatCloseProcess(&st->process, true);
+        WebViewAddError(win, _TRA("Failed to start AI request."));
+        SetAIChatWorking(win, false);
+        return;
+    }
+    st->readerDone = readerDone;
     auto* ctx = new AIChatReadThreadCtx();
     ctx->hReadPipe = launch.hReadPipe;
+    ctx->process = processCopy;
+    ctx->doneEvent = readerDoneCopy;
     ctx->stream.hwndFrame = win->hwndFrame;
     ctx->stream.providerId = win->aiChatProvider;
-    ctx->stream.sessionId = str::Dup(st->sessionId ? st->sessionId : kAIChatPendingSessionId());
-    RunAsync(MkFunc0(StartAIChatReadThread, ctx), "AIChatReadThread");
+    ctx->stream.requestToken = requestToken;
+    ctx->stream.sessionId = st->sessionId ? str::Dup(st->sessionId) : Str{};
+    ThreadHandle thread = StartThread(MkFunc0(StartAIChatReadThread, ctx), "AIChatReadThread");
+    if (!thread) {
+        if (ctx->hReadPipe) {
+            CloseHandle(ctx->hReadPipe);
+        }
+        if (ctx->doneEvent) {
+            CloseHandle(ctx->doneEvent);
+        }
+        AIChatCloseProcess(&ctx->process, true);
+        str::Free(ctx->stream.sessionId);
+        delete ctx;
+        CloseHandle(st->readerDone);
+        st->readerDone = nullptr;
+        UnregisterAIChatRequest(requestToken);
+        AIChatCloseProcess(&st->process, true);
+        WebViewAddError(win, _TRA("Failed to start AI request."));
+        SetAIChatWorking(win, false);
+        return;
+    }
+    SafeCloseThreadHandle(&thread);
 }
 
 // --- WndProcs ---
@@ -1042,6 +1474,9 @@ static LRESULT CALLBACK WndProcAIChatBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM 
                 if (win->aiChatWebView) {
                     win->aiChatWebView->UpdateWebviewSize();
                 }
+            } else if (wp == kTimerWebViewRetry) {
+                KillTimer(hwnd, kTimerWebViewRetry);
+                EnsureWebViewReady(win);
             }
             break;
     }
@@ -1092,9 +1527,35 @@ void RelayoutAIChatPanel(MainWindow* win) {
 // --- Lazy WebView2 init ---
 
 static void DeleteAIChatWebView(MainWindow* win) {
-    delete win->aiChatWebView;
+    WebviewWnd* webView = win->aiChatWebView;
+    if (win->aiChatWebResources) {
+        for (AIChatWebViewContext* context : win->aiChatWebResources->webViewContexts) {
+            if (context->webView == webView) {
+                context->webView = nullptr;
+            }
+        }
+    }
+    delete webView;
     win->aiChatWebView = nullptr;
     win->aiChatWebViewReady = false;
+}
+
+struct DeleteAIChatWebViewData {
+    MainWindow* win = nullptr;
+    WebviewWnd* expected = nullptr;
+    bool retry = false;
+};
+
+static void DeleteAIChatWebViewAsync(DeleteAIChatWebViewData* data) {
+    bool deleted = false;
+    if (data && IsMainWindowValid(data->win) && data->win->aiChatWebView == data->expected) {
+        DeleteAIChatWebView(data->win);
+        deleted = true;
+    }
+    if (deleted && data->retry && data->win->hwndAiChatBox) {
+        SetTimer(data->win->hwndAiChatBox, kTimerWebViewRetry, 500, nullptr);
+    }
+    delete data;
 }
 
 // WebView2 loads the chat HTML asynchronously, so appendText()/marked and the
@@ -1102,24 +1563,54 @@ static void DeleteAIChatWebView(MainWindow* win) {
 // app evals before then is lost (it only lands in st->chatLog). This fires when
 // the page is actually loaded, so we (re)render the current tab's chat into it -
 // replacing the old "wait 600ms and hope" timer.
-static void OnAIChatWebViewNavigated(void* ctx, Str, bool) {
-    MainWindow* win = (MainWindow*)ctx;
-    if (!IsMainWindowValidAndNotClosing(win) || !win->hwndAiChatBox) {
+static void OnAIChatWebViewNavigated(void* ctx, Str url, bool success) {
+    auto* context = (AIChatWebViewContext*)ctx;
+    MainWindow* win = context ? context->win : nullptr;
+    WebviewWnd* webView = context ? context->webView : nullptr;
+    if (!IsMainWindowValidAndNotClosing(win) || !win->hwndAiChatBox || !webView || win->aiChatWebView != webView) {
         return;
     }
-    if (win->aiChatWebView) {
+    if (!AIChatWebViewUrlAllowed(win, url)) {
+        win->aiChatWebViewReady = false;
+        AIChatProvider* p = CurrentProvider(win);
+        if (p) {
+            webView->Navigate(fmt("%sindex.html", p->virtualHost));
+        }
+        return;
+    }
+    if (!success) {
+        win->aiChatWebViewReady = false;
+        auto* data = new DeleteAIChatWebViewData();
+        data->win = win;
+        data->expected = webView;
+        bool retry = false;
+        if (win->aiChatWebResources && win->aiChatWebResources->webViewRetryCount < 3) {
+            win->aiChatWebResources->webViewRetryCount++;
+            retry = true;
+        }
+        data->retry = retry;
+        if (!uitask::Post(MkFunc0(DeleteAIChatWebViewAsync, data), "DeleteAIChatWebView")) {
+            delete data;
+        }
+        return;
+    }
+    if (win->aiChatWebResources) {
+        win->aiChatWebResources->webViewRetryCount = 0;
+    }
+    win->aiChatWebViewReady = true;
+    if (webView) {
         // the webview is created lazily, often before the panel has its final
         // size, leaving its window (and so the WebView2 controller) at 0x0. Now
         // that the page has loaded and the panel is laid out, re-run the layout
         // to move/size the webview into its slot and make its controller visible.
-        win->aiChatWebView->SetControllerVisible(true);
+        webView->SetControllerVisible(true);
         RelayoutAIChatPanel(win);
     }
     OnAIChatTabChanged(win);
 }
 
 static void EnsureWebViewReady(MainWindow* win) {
-    if (win->aiChatWebViewReady) {
+    if (win->aiChatWebViewReady || win->aiChatWebView) {
         return;
     }
     if (!HasWebView()) {
@@ -1130,12 +1621,10 @@ static void EnsureWebViewReady(MainWindow* win) {
         return;
     }
     auto* webView = new WebviewWnd();
-    webView->events.ctx = win;
-    webView->events.navigationCompleted = OnAIChatWebViewNavigated;
     TempStr localAppData = GetSpecialFolderTemp(CSIDL_LOCAL_APPDATA);
     // use unique data dir per process to avoid locking conflicts
-    webView->dataDir =
-        str::Dup(fmt("%s\\SumatraPDF\\%s_%d", localAppData, p->webViewDataDirPrefix, (int)GetCurrentProcessId()));
+    webView->dataDir = str::Dup(fmt("%s\\SumatraPDF\\%s_%d_%llx", localAppData, p->webViewDataDirPrefix,
+                                    (int)GetCurrentProcessId(), (unsigned long long)(uintptr_t)win->hwndFrame));
     int markedLen = 0;
     u8* markedData = GetEmbeddedFileData(StrL("marked.min.js"), &markedLen);
     if (!markedData || markedLen <= 0) {
@@ -1145,12 +1634,15 @@ static void EnsureWebViewReady(MainWindow* win) {
     }
     wstr::Free(webView->resourceUriPrefix);
     webView->resourceUriPrefix = wstr::Dup(p->virtualHostW);
-    // serve both the chat page and marked.min.js from the virtual host
-    free(gAIChatWebResources.marked);
-    gAIChatWebResources.marked = markedData;
-    gAIChatWebResources.markedLen = markedLen;
-    str::ReplaceWithCopy(&gAIChatWebResources.html, AIChatFormatChatHtmlTemp(p->virtualHost, BgColorForProvider(p)));
-    webView->resourceProvider.ctx = &gAIChatWebResources;
+    if (!win->aiChatWebResources) {
+        win->aiChatWebResources = new AIChatWebResources();
+    }
+    AIChatWebResources* resources = win->aiChatWebResources;
+    free(resources->marked);
+    resources->marked = markedData;
+    resources->markedLen = markedLen;
+    str::ReplaceWithCopy(&resources->html, AIChatFormatChatHtmlTemp(p->virtualHost, BgColorForProvider(p)));
+    webView->resourceProvider.ctx = resources;
     webView->resourceProvider.getResource = AIChatGetResource;
 
     Rect rc = HwndClientRect(win->hwndAiChatBox);
@@ -1160,14 +1652,20 @@ static void EnsureWebViewReady(MainWindow* win) {
     webView->Create(wvArgs);
 
     if (webView->hwnd) {
+        auto* context = new AIChatWebViewContext();
+        context->win = win;
+        context->webView = webView;
+        resources->webViewContexts.Append(context);
+        webView->events.ctx = context;
+        webView->events.navigationStarting = AIChatNavigationStarting;
+        webView->events.navigationCompleted = OnAIChatWebViewNavigated;
+        win->aiChatWebView = webView;
         TempStr url = fmt("%sindex.html", p->virtualHost);
         webView->Navigate(url);
-        // make the webview visible, like the manual browser does; without this
+        // make the webview visible, like the manual browser does; without it
         // the embedded controller stays hidden (isVisible defaults to false) and
         // the loaded page never paints
         webView->SetIsVisible(true);
-        win->aiChatWebView = webView;
-        win->aiChatWebViewReady = true;
         RelayoutAIChatPanel(win);
     } else {
         delete webView;
@@ -1188,6 +1686,12 @@ static void SetPanelProvider(MainWindow* win, int providerId) {
         return;
     }
     win->aiChatProvider = providerId;
+    if (win->hwndAiChatBox) {
+        KillTimer(win->hwndAiChatBox, kTimerWebViewRetry);
+    }
+    if (win->aiChatWebResources) {
+        win->aiChatWebResources->webViewRetryCount = 0;
+    }
     if (win->aiChatCheckbox) {
         HwndSetText(win->aiChatCheckbox->hwnd, p->checkboxLabel);
     }
@@ -1408,8 +1912,12 @@ void OnAIChatToggle(MainWindow* win, int providerId) {
         logf("OnAIChatToggle: IsAIChatAvailable() returned false (HasWebView=false)\n");
         return;
     }
+    if (!HasPermission(Perm::InternetAccess) || !CanAccessDisk()) {
+        logf("OnAIChatToggle: blocked by policy\n");
+        return;
+    }
     if (!p->IsInstalled()) {
-        logf("OnAIChatToggle: provider %s is not installed (exePath=%s)\n", p->name, p->FindExecutableTemp());
+        logf("OnAIChatToggle: provider %s is not installed\n", p->name);
         AIChatNotInstalledDialogArgs args;
         args.windowTitle = p->TitleTemp();
         args.mainInstruction = p->NotInstalledInstructionTemp();
@@ -1431,7 +1939,7 @@ void OnAIChatToggle(MainWindow* win, int providerId) {
         AIChatSetTabPanelOpen(tab, AIChatBackend::None);
     } else {
         if (!IsAIChatSupportedForTab(tab)) {
-            logf("OnAIChatToggle: IsAIChatSupportedForTab returned false for tab (filePath=%s)\n", tab->filePath);
+            logf("OnAIChatToggle: IsAIChatSupportedForTab returned false for tab\n");
             return;
         }
         logf("OnAIChatToggle: opening panel for backend %d\n", (int)p->backend);
@@ -1510,7 +2018,7 @@ static bool AIChatTabHasRunningProcess(WindowTab* tab) {
         return false;
     }
     for (const AIChatTabState& chat : tab->aiChat) {
-        if (chat.process) {
+        if (chat.process || (chat.readerDone && WaitForSingleObject(chat.readerDone, 0) != WAIT_OBJECT_0)) {
             return true;
         }
     }
@@ -1521,6 +2029,7 @@ void ShutdownAIChatForMainWindow(MainWindow* win) {
     if (!win) {
         return;
     }
+    UnregisterAIChatRequestsForMainWindow(win);
     for (WindowTab* tab : win->Tabs()) {
         if (!tab) {
             continue;
@@ -1530,6 +2039,17 @@ void ShutdownAIChatForMainWindow(MainWindow* win) {
         }
     }
     AIChatWaitForTabProcessesToFinish(win, AIChatTabHasRunningProcess);
+    for (WindowTab* tab : win->Tabs()) {
+        if (!tab) {
+            continue;
+        }
+        for (AIChatTabState& chat : tab->aiChat) {
+            if (chat.readerDone) {
+                CloseHandle(chat.readerDone);
+                chat.readerDone = nullptr;
+            }
+        }
+    }
 }
 
 void DestroyAIChatPanel(MainWindow* win) {
@@ -1538,6 +2058,7 @@ void DestroyAIChatPanel(MainWindow* win) {
     if (win->hwndAiChatBox) {
         KillTimer(win->hwndAiChatBox, kTimerAutoSelectSession);
         KillTimer(win->hwndAiChatBox, kTimerWebViewSize);
+        KillTimer(win->hwndAiChatBox, kTimerWebViewRetry);
         if (win->aiChatBoxSubclassId) {
             RemoveWindowSubclass(win->hwndAiChatBox, WndProcAIChatBox, win->aiChatBoxSubclassId);
             win->aiChatBoxSubclassId = 0;
@@ -1547,11 +2068,16 @@ void DestroyAIChatPanel(MainWindow* win) {
     // save webview dataDir before deleting so we can clean up
     Str webViewDataDir;
     WebviewWnd* webView = win->aiChatWebView;
-    win->aiChatWebView = nullptr;
     if (webView) {
         webViewDataDir = str::Dup(webView->dataDir);
     }
-    delete webView;
+    DeleteAIChatWebView(win);
+    if (win->aiChatWebResources) {
+        free(win->aiChatWebResources->marked);
+        str::Free(win->aiChatWebResources->html);
+        delete win->aiChatWebResources;
+        win->aiChatWebResources = nullptr;
+    }
 
     // deleting the layout deletes the controls in it
     delete win->aiChatLayout;

@@ -155,7 +155,10 @@ bool HandleExplorerQuickLookCopyData(COPYDATASTRUCT* cds) {
     }
     auto* d = new QuickLookCopyDataAsync;
     d->path = str::Dup(pathZ);
-    uitask::Post(MkFunc0<QuickLookCopyDataAsync>(QuickLookCopyDataAsyncRun, d), "QuickLookCopyData");
+    if (!uitask::Post(MkFunc0<QuickLookCopyDataAsync>(QuickLookCopyDataAsyncRun, d), "QuickLookCopyData")) {
+        str::Free(d->path);
+        delete d;
+    }
     return true;
 }
 

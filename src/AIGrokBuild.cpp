@@ -41,11 +41,12 @@ TempStr GrokBuildExecutablePathTemp() {
 
 static Mutex gGrokBuildLogMutex;
 static AIChatLogger gGrokBuildLogger = {&gGrokBuildLogMutex, "grok-build-log.txt", "grok-build"};
+static Mutex gGrokModelsMutex;
 static bool gTriedGrokModels = false;
 static StrVec gGrokModels;
 
-static void GrokBuildLog(Str direction, Str text) {
-    AIChatLog(&gGrokBuildLogger, direction, text);
+static void GrokBuildLog(Str direction, int textBytes) {
+    AIChatLogMeta(&gGrokBuildLogger, direction, "bytes", textBytes);
 }
 
 static bool ParseGrokModelsOutput(Str output, StrVec& models) {
@@ -77,35 +78,44 @@ static bool ParseGrokModelsOutput(Str output, StrVec& models) {
 // `grok models` reports the catalog available to the current Grok login.
 // Cache it for this app session; old CLIs and all other failures use the built-in model.
 static bool QueryGrokModels(Str exePath, StrVec& models) {
+    constexpr ULONGLONG kModelQueryTimeoutMs = 3000;
+    constexpr int kMaxModelOutputBytes = 1024 * 1024;
+    ULONGLONG startedAt = GetTickCount64();
     TempStr cmdLine = fmt("%s models", QuoteCmdLineArgTemp(exePath));
     AIChatProcessLaunchResult launch;
     if (!AIChatLaunchProcessWithStdoutPipe(cmdLine, {}, &launch)) {
         return false;
     }
 
-    str::Builder output;
-    ULONGLONG deadline = GetTickCount64() + 3000;
-    while (GetTickCount64() < deadline && output.len < 1024 * 1024) {
+    str::Builder output(4096);
+    while (GetTickCount64() - startedAt < kModelQueryTimeoutMs && len(output) < kMaxModelOutputBytes) {
         DWORD available = 0;
         if (!PeekNamedPipe(launch.hReadPipe, nullptr, 0, nullptr, &available, nullptr)) {
             break;
         }
         if (available > 0) {
             char buf[4096];
-            DWORD nRead = 0;
             DWORD toRead = std::min<DWORD>(available, dimof(buf));
-            if (!ReadFile(launch.hReadPipe, buf, toRead, &nRead, nullptr) || nRead == 0) {
+            DWORD remaining = (DWORD)(kMaxModelOutputBytes - len(output));
+            if (toRead > remaining) {
+                toRead = remaining;
+            }
+            DWORD nRead = 0;
+            if (toRead == 0 || !ReadFile(launch.hReadPipe, buf, toRead, &nRead, nullptr) || nRead == 0) {
                 break;
             }
             output.Append(Str(buf, (int)nRead));
             continue;
         }
-        if (WaitForSingleObject(launch.hProcess, 10) != WAIT_TIMEOUT) {
+        if (WaitForSingleObject(launch.hProcess, 0) != WAIT_TIMEOUT) {
             break;
         }
         Sleep(10);
     }
-    CloseHandle(launch.hReadPipe);
+    if (launch.hReadPipe) {
+        CloseHandle(launch.hReadPipe);
+        launch.hReadPipe = nullptr;
+    }
     AIChatCloseProcess(&launch.hProcess, true);
     return ParseGrokModelsOutput(ToStr(output), models);
 }
@@ -279,7 +289,7 @@ static void AppendGrokHistoryTools(MainWindow* win, Str line) {
         }
         if (len(nameBuf) > 0) {
             str::Builder desc;
-            desc.Append(fmt("Tool: %s", ToStr(nameBuf)));
+            desc.Append(fmt(_TRA("Tool: %s").s, ToStr(nameBuf)));
             AIChatHistoryAddTool(win, ToStr(desc));
         }
         if (j + 1 >= rest.len) {
@@ -291,6 +301,9 @@ static void AppendGrokHistoryTools(MainWindow* win, Str line) {
 
 // Load conversation history from Grok's chat_history.jsonl
 static void LoadGrokSessionHistory(MainWindow* win, Str sessionId, Str dir) {
+    if (!AIChatSessionIdIsValid(sessionId)) {
+        return;
+    }
     TempStr projectDir = GrokSessionsProjectDirTemp(dir);
     if (!projectDir) {
         return;
@@ -345,7 +358,7 @@ struct GrokBuildProvider : AIChatProvider {
         optionItems = "Low\0Medium\0High\0XHigh\0Max\0";
         optionCount = 5;
         optionDefault = 1;
-        checkboxLabel = "Always Approve";
+        checkboxLabel = _TRA("Always Approve");
     }
 
     TempStr TitleTemp() override { return str::DupTemp(_TRA("Grok chat")); }
@@ -357,12 +370,13 @@ struct GrokBuildProvider : AIChatProvider {
     TempStr FindExecutableTemp() override { return FindGrokExecutableTemp(); }
 
     void BuildModelsList(StrVec& models) override {
+        ScopedMutex lock(&gGrokModelsMutex);
         models.Reset();
         if (!gTriedGrokModels) {
             gTriedGrokModels = true;
             TempStr exePath = FindGrokExecutableTemp();
-            if (exePath && QueryGrokModels(exePath, gGrokModels)) {
-                defaultModel = gGrokModels[0];
+            if (exePath) {
+                QueryGrokModels(exePath, gGrokModels);
             }
         }
         if (len(gGrokModels) > 0) {
@@ -418,7 +432,7 @@ struct GrokBuildProvider : AIChatProvider {
         if (eventType && str::Eq(eventType, StrL("thought"))) {
             TempStr thought = AIChatJsonStrTemp(line, "data");
             if (len(thought) > 0) {
-                GrokBuildLog("<<< thought", thought);
+                GrokBuildLog("<<< thought", len(thought));
             }
         } else if (eventType && str::Eq(eventType, StrL("text"))) {
             TempStr text = AIChatJsonStrTemp(line, "data");
@@ -434,7 +448,7 @@ struct GrokBuildProvider : AIChatProvider {
                 AIChatPostUpdate(ctx, AIChatUpdateType::Error, err);
             }
         } else if (eventType && str::Eq(eventType, StrL("end"))) {
-            GrokBuildLog("<<< end", line);
+            GrokBuildLog("<<< end", len(line));
             TempStr newSessionId = AIChatJsonStrTemp(line, "sessionId");
             if (newSessionId) {
                 AIChatStreamSetSessionId(ctx, newSessionId);

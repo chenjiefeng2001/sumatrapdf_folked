@@ -239,7 +239,58 @@ static void SetFrameTitleForTab(WindowTab* tab, bool needRefresh);
 static void OnSidebarSplitterMove(VirtSplitter::MoveEvent* /*ev*/);
 static void OnFavSplitterMove(VirtSplitter::MoveEvent* /*ev*/);
 
+static thread_local EBookUI* gLoadThreadEBookUI = nullptr;
+
+static void DeleteEBookUIForLoad(EBookUI* value) {
+    if (!value) {
+        return;
+    }
+    str::Free(value->fontName);
+    str::Free(value->customCSS);
+    str::Free(value->windowBgCol.s);
+    str::Free(value->defaultDisplayMode);
+    delete value->margin;
+    delete value;
+}
+
+static EBookUI* CopyEBookUIForLoad(const EBookUI* value) {
+    if (!value) {
+        return nullptr;
+    }
+    auto* copy = new EBookUI();
+    *copy = *value;
+    copy->fontName = nullptr;
+    copy->customCSS = nullptr;
+    copy->windowBgCol.s = nullptr;
+    copy->defaultDisplayMode = nullptr;
+    copy->margin = nullptr;
+    str::ReplaceWithCopy(&copy->fontName, value->fontName);
+    str::ReplaceWithCopy(&copy->customCSS, value->customCSS);
+    str::ReplaceWithCopy(&copy->windowBgCol.s, value->windowBgCol.s);
+    str::ReplaceWithCopy(&copy->defaultDisplayMode, value->defaultDisplayMode);
+    if (value->margin) {
+        copy->margin = new Vec<float>(*value->margin);
+    }
+    return copy;
+}
+
+struct DocumentLoadSnapshot {
+    bool chmInFixedUI = false;
+    bool canRememberPwd = false;
+    StrVec defaultPasswords;
+    Str decryptionKey;
+    EBookUI* eBookUI = nullptr;
+
+    ~DocumentLoadSnapshot() {
+        str::Free(decryptionKey);
+        DeleteEBookUIForLoad(eBookUI);
+    }
+};
+
 EBookUI* GetEBookUI() {
+    if (!uitask::IsMainUIThread()) {
+        return gLoadThreadEBookUI;
+    }
     if (!gGlobalPrefs) return nullptr;
     return &gGlobalPrefs->eBookUI;
 }
@@ -249,6 +300,10 @@ EBookUI* GetEBookUI() {
 // Such loads copy the settings before leaving the UI thread and park the copy
 // here for the engine to pick up.
 static thread_local FileEBookUI* gLoadThreadFileEBookUI;
+
+static void SetLoadThreadEBookUI(EBookUI* v) {
+    gLoadThreadEBookUI = v;
+}
 
 static void SetLoadThreadFileEBookUI(FileEBookUI* v) {
     gLoadThreadFileEBookUI = v;
@@ -428,6 +483,9 @@ bool AnnotationsAreDisabled() {
 // lets the shell open a URI for any supported scheme in
 // the appropriate application (web browser, mail client, etc.)
 bool SumatraLaunchBrowser(Str url) {
+    if (!HasPermission(Perm::InternetAccess)) {
+        return false;
+    }
     if (gPluginMode) {
         // pass the URI back to the browser
         ReportIf(len(gWindows) == 0);
@@ -522,6 +580,12 @@ WindowTab* FindTabByController(DocController* ctrl) {
         }
     }
     return nullptr;
+}
+
+static void ClearMostRecentlyOpenedDoc(DocController* ctrl) {
+    if (gMostRecentlyOpenedDoc == ctrl) {
+        gMostRecentlyOpenedDoc = nullptr;
+    }
 }
 
 static WindowTab* FindTabByFileInWindow(Str file, MainWindow* win) {
@@ -679,14 +743,37 @@ MainWindow* FindMainWindowBySyncFile(Str path, bool focusTab) {
 
 static bool gShowPassword = false;
 
+static void CaptureDocumentLoadSnapshot(Str filePath, DocumentLoadSnapshot* snapshot) {
+    snapshot->defaultPasswords.Reset();
+    str::Free(snapshot->decryptionKey);
+    snapshot->decryptionKey = {};
+    DeleteEBookUIForLoad(snapshot->eBookUI);
+    snapshot->eBookUI = nullptr;
+    if (!gGlobalPrefs) {
+        return;
+    }
+    snapshot->chmInFixedUI = gGlobalPrefs->chmUI.useFixedPageUI;
+    snapshot->eBookUI = CopyEBookUIForLoad(&gGlobalPrefs->eBookUI);
+    snapshot->canRememberPwd = SettingsRememberOpenedFiles() && gGlobalPrefs->rememberStatePerDocument;
+    if (gGlobalPrefs->defaultPasswords) {
+        for (Str password : *gGlobalPrefs->defaultPasswords) {
+            snapshot->defaultPasswords.Append(password);
+        }
+    }
+    FileState* fileState = FileHistoryFindByPath(filePath);
+    if (fileState && fileState->decryptionKey) {
+        str::ReplaceWithCopy(&snapshot->decryptionKey, fileState->decryptionKey);
+    }
+}
+
 class HwndPasswordUI : public PasswordUI {
     HWND hwnd;
     int pwdIdx;
     bool triedCliPwd = false;
+    const DocumentLoadSnapshot* prefs;
 
   public:
-    explicit HwndPasswordUI(HWND hwnd) : hwnd(hwnd), pwdIdx(0) {}
-
+    HwndPasswordUI(HWND hwnd, const DocumentLoadSnapshot& prefs) : hwnd(hwnd), pwdIdx(0), prefs(&prefs) {}
     Str GetPassword(Str path, u8* fileDigest, u8 decryptionKeyOut[32], bool* saveKey) override;
 };
 
@@ -694,10 +781,9 @@ class HwndPasswordUI : public PasswordUI {
    dialog box or if the encryption key has been filled in instead.
    Caller needs to free() the result. */
 Str HwndPasswordUI::GetPassword(Str path, u8* fileDigest, u8 decryptionKeyOut[32], bool* saveKey) {
-    FileState* fileFromHistory = FileHistoryFindByPath(path);
-    if (fileFromHistory && fileFromHistory->decryptionKey && fileDigest && decryptionKeyOut) {
+    if (prefs->decryptionKey && fileDigest && decryptionKeyOut) {
         TempStr fingerprint = str::MemToHexTemp(Str((const char*)fileDigest, 16));
-        Str decryptionKey = fileFromHistory->decryptionKey;
+        Str decryptionKey = prefs->decryptionKey;
         *saveKey = str::TrimPrefix(decryptionKey, fingerprint);
         if (*saveKey && str::HexToMem(decryptionKey, Str((char*)decryptionKeyOut, 32))) {
             return {};
@@ -712,8 +798,8 @@ Str HwndPasswordUI::GetPassword(Str path, u8* fileDigest, u8 decryptionKeyOut[32
     }
 
     // try the list of default passwords before asking the user
-    if (pwdIdx < len(*gGlobalPrefs->defaultPasswords)) {
-        Str pwd = (*gGlobalPrefs->defaultPasswords)[pwdIdx++];
+    if (pwdIdx < len(prefs->defaultPasswords)) {
+        Str pwd = prefs->defaultPasswords[pwdIdx++];
         return str::Dup(pwd);
     }
 
@@ -745,8 +831,7 @@ Str HwndPasswordUI::GetPassword(Str path, u8* fileDigest, u8 decryptionKeyOut[32
     HwndToForeground(hwnd);
 
     // remembering the password requires saving per-document state
-    bool canRememberPwd = SettingsRememberOpenedFiles() && gGlobalPrefs->rememberStatePerDocument;
-    bool* rememberPwd = canRememberPwd ? saveKey : nullptr;
+    bool* rememberPwd = prefs->canRememberPwd ? saveKey : nullptr;
     return ShowGetPasswordDialog(hwnd, path, rememberPwd, &gShowPassword);
 }
 
@@ -1178,6 +1263,7 @@ struct CreateThumbnailFromFileData {
     // see LoadDocumentAsyncData: the thumbnail is rendered off the UI thread,
     // so the per-document ebook settings have to come along as a copy (#4600)
     FileEBookUI* fileEBookUI = nullptr;
+    DocumentLoadSnapshot prefs;
     ~CreateThumbnailFromFileData() {
         str::Free(filePath);
         FreePixmap(bmp);
@@ -1195,10 +1281,12 @@ static void CreateThumbnailFromFileFinish(CreateThumbnailFromFileData* d) {
 }
 
 static void CreateThumbnailFromFileThread(CreateThumbnailFromFileData* d) {
-    HwndPasswordUI pwdUI(nullptr);
+    HwndPasswordUI pwdUI(nullptr, d->prefs);
+    SetLoadThreadEBookUI(d->prefs.eBookUI);
     SetLoadThreadFileEBookUI(d->fileEBookUI);
     EngineBase* engine = CreateEngineFromFile(d->filePath, &pwdUI, true);
     SetLoadThreadFileEBookUI(nullptr);
+    SetLoadThreadEBookUI(nullptr);
     if (!engine) {
         delete d;
         return;
@@ -1226,6 +1314,7 @@ static void CreateThumbnailFromFileAsync(FileState* ds) {
     auto* d = new CreateThumbnailFromFileData();
     d->filePath = str::Dup(ds->filePath);
     d->fileEBookUI = CopyFileEBookUI(ds->eBookUI);
+    CaptureDocumentLoadSnapshot(d->filePath, &d->prefs);
     auto fn = MkFunc0<CreateThumbnailFromFileData>(CreateThumbnailFromFileThread, d);
     RunAsync(fn, "CreateThumbnailFromFile");
 }
@@ -1302,6 +1391,7 @@ void ControllerCallbackHandler::CleanUp(DisplayModel* dm) {
 static AtomicInt gPendingControllerDeletes;
 
 static void DeleteControllerFinish(DocController* ctrl) {
+    ClearMostRecentlyOpenedDoc(ctrl);
     DisplayModel* dm = ctrl->AsFixed();
     if (dm) {
         // ctrl->cb is the MainWindow's ControllerCallbackHandler and the window
@@ -1326,6 +1416,7 @@ void DeleteControllerAsync(DocController* ctrl) {
     if (!ctrl) {
         return;
     }
+    ClearMostRecentlyOpenedDoc(ctrl);
     DisplayModel* dm = ctrl->AsFixed();
     if (!dm) {
         // only DisplayModel is rendered by the render threads
@@ -1342,10 +1433,13 @@ void DeleteControllerAsync(DocController* ctrl) {
     }
     AtomicIntInc(&gPendingControllerDeletes);
     auto fn = MkFunc0<DocController>(WaitForRendersThenDelete, ctrl);
-    if (!StartThread(fn, "DeleteController")) {
+    ThreadHandle thread = StartThread(fn, "DeleteController");
+    if (!thread) {
         // couldn't spawn: fall back to deleting (and waiting) right here
         AtomicIntDec(&gPendingControllerDeletes);
         delete ctrl;
+    } else {
+        SafeCloseThreadHandle(&thread);
     }
 }
 
@@ -2422,6 +2516,7 @@ static void ReplaceDocumentInCurrentTab(LoadArgs* args, DocController* ctrl, Fil
         FileWatcherUnsubscribe(tab->watcher);
         tab->watcher = nullptr;
     }
+    ClearMostRecentlyOpenedDoc(prevCtrl);
     delete prevCtrl;
 
 #if defined(ENABLE_REDRAW_ON_RELOAD)
@@ -2657,13 +2752,15 @@ void ReloadDocument(MainWindow* win, bool autoRefresh, bool canAskForPassword) {
     // null hwnd, HwndPasswordUI still tries the remembered decryption key and
     // DefaultPasswords, then gives up quietly: the tab keeps the document it
     // has, and the user is asked if they reload it themselves.
-    HwndPasswordUI pwdUI(canAskForPassword ? win->hwndFrame : nullptr);
     Str path = tab->filePath;
     if (len(path) == 0) {
         logf("ReloadDocument: tab->filePath is empty, auto refresh: %d\n", (int)autoRefresh);
         return;
     }
     logf("ReloadDocument: %s, auto refresh: %d\n", path, (int)autoRefresh);
+    DocumentLoadSnapshot prefs;
+    CaptureDocumentLoadSnapshot(path, &prefs);
+    HwndPasswordUI pwdUI(canAskForPassword ? win->hwndFrame : nullptr, prefs);
 
     // Save display state before potentially destroying the old controller
     FileState* fs = NewFileState(path);
@@ -3677,6 +3774,7 @@ static void DeleteOrphanedController(MainWindow* win, DocController*& ctrl) {
     if (!ctrl) {
         return;
     }
+    ClearMostRecentlyOpenedDoc(ctrl);
     if (!IsMainWindowValid(win)) {
         ctrl->cb = nullptr;
     }
@@ -3877,6 +3975,7 @@ struct LoadDocumentAsyncData {
     // copy of the document's FileStates -> EBookUI block, taken on the UI
     // thread because the load thread can't walk the file history (#4600)
     FileEBookUI* fileEBookUI = nullptr;
+    DocumentLoadSnapshot prefs;
     LoadDocumentAsyncData() = default;
     ~LoadDocumentAsyncData() {
         delete args;
@@ -3951,8 +4050,17 @@ static void StartLoadDocumentThread(LoadDocumentAsyncData* data) {
     StartLoadingMessageTimer(args->targetTab);
     gLoadThreadsActive++;
     data->fileEBookUI = CopyFileEBookUIForPath(args->FilePath());
+    CaptureDocumentLoadSnapshot(args->FilePath(), &data->prefs);
     auto fn = MkFunc0<LoadDocumentAsyncData>(LoadDocumentAsync, data);
-    RunAsync(fn, "LoadDocumentThread");
+    HANDLE thread = StartThread(fn, "LoadDocumentThread");
+    if (!thread) {
+        gLoadThreadsActive--;
+        EndDocumentLoad(args->FilePath());
+        args->onFinished.Call(false);
+        delete data;
+        return;
+    }
+    SafeCloseThreadHandle(&thread);
 }
 
 // start a background load now if a thread slot is free, otherwise queue it
@@ -4139,6 +4247,7 @@ static void LoadDocumentAsync(LoadDocumentAsyncData* d) {
     auto* args = d->args;
     AtomicIntInc(&gDangerousThreadCount);
     // load threads are reused, so this has to be cleared before we return
+    SetLoadThreadEBookUI(d->prefs.eBookUI);
     SetLoadThreadFileEBookUI(d->fileEBookUI);
     float previousAspect = EngineMupdfSetEbookLayoutAspect(args->ebookLayoutAspect);
     defer {
@@ -4155,8 +4264,8 @@ static void LoadDocumentAsync(LoadDocumentAsyncData* d) {
         file::gFileCopyProgressCb = MkFunc1<CopyProgressState, file::CopyProgress*>(OnFileCopyProgress, &copyState);
     }
 
-    HwndPasswordUI pwdUI(args->hwndPwdParent);
-    bool chmInFixedUI = gGlobalPrefs->chmUI.useFixedPageUI;
+    HwndPasswordUI pwdUI(args->hwndPwdParent, d->prefs);
+    bool chmInFixedUI = d->prefs.chmInFixedUI;
     if (!engine) {
         engine = CreateEngineFromFile(path, &pwdUI, chmInFixedUI);
     }
@@ -4169,6 +4278,7 @@ static void LoadDocumentAsync(LoadDocumentAsyncData* d) {
 
     file::gFileCopyProgressCb = {};
     SetLoadThreadFileEBookUI(nullptr);
+    SetLoadThreadEBookUI(nullptr);
 
     auto fn = MkFunc0<LoadDocumentAsyncData>(LoadDocumentAsyncFinish, d);
     uitask::Post(fn, "TaskLoadDocumentAsyncFinish");
@@ -4366,11 +4476,13 @@ void StartLoadDocument(LoadArgs* argsIn) {
     // we could probably delay creating web control but that's more complicated
     {
         FileType kind = GuessFileTypeFromName(path);
-        bool isChm = !gGlobalPrefs->chmUI.useFixedPageUI && ChmModel::IsSupportedFileType(kind);
+        DocumentLoadSnapshot prefs;
+        CaptureDocumentLoadSnapshot(path, &prefs);
+        bool isChm = !prefs.chmInFixedUI && ChmModel::IsSupportedFileType(kind);
         bool isMd = ShouldUseBrowserView(kind);
         if (isChm || isMd) {
             // TODO: repeating the code below
-            HwndPasswordUI pwdUI(win->hwndFrame ? win->hwndFrame : nullptr);
+            HwndPasswordUI pwdUI(win->hwndFrame ? win->hwndFrame : nullptr, prefs);
             EngineBase* engine = args->engine;
             StartLoadingMessageTimer(args->targetTab);
             args->ctrl = CreateControllerForEngineOrFile(engine, path, &pwdUI, win);
@@ -4538,7 +4650,9 @@ MainWindow* LoadDocument(LoadArgs* args) {
 
     BeginDocumentLoad(path);
     auto timeStart = TimeGet();
-    HwndPasswordUI pwdUI(win->hwndFrame);
+    DocumentLoadSnapshot prefs;
+    CaptureDocumentLoadSnapshot(path, &prefs);
+    HwndPasswordUI pwdUI(win->hwndFrame, prefs);
     DocController* ctrl = nullptr;
     if (!args->lazyLoad) {
         ctrl = CreateControllerForEngineOrFile(args->engine, path, &pwdUI, win);
@@ -4866,18 +4980,21 @@ void UpdateDocumentColors() {
     bool preservePdfImages = pagesDark && GetPreservePdfImagesInDarkMode();
     int documentColorsFollowTheme = (int)GetDocumentColorsFollowTheme();
 
-    if ((text == gRenderCache->textColor) && (bg == gRenderCache->backgroundColor) &&
-        (link == gRenderCache->linkColor) && preservePdfImages == s_lastPreservePdfImages &&
-        documentColorsFollowTheme == s_lastDocumentColorsFollowTheme) {
-        return; // colors didn't change
-    }
-    s_lastPreservePdfImages = preservePdfImages;
-    s_lastDocumentColorsFollowTheme = documentColorsFollowTheme;
+    {
+        ScopedRecursiveMutex scope(&gRenderCache->requestAccess);
+        if ((text == gRenderCache->textColor) && (bg == gRenderCache->backgroundColor) &&
+            (link == gRenderCache->linkColor) && preservePdfImages == s_lastPreservePdfImages &&
+            documentColorsFollowTheme == s_lastDocumentColorsFollowTheme) {
+            return; // colors didn't change
+        }
+        s_lastPreservePdfImages = preservePdfImages;
+        s_lastDocumentColorsFollowTheme = documentColorsFollowTheme;
 
-    gRenderCache->textColor = text;
-    gRenderCache->backgroundColor = bg;
-    gRenderCache->linkColor = link;
-    gRenderCache->darkModeEpoch++;
+        gRenderCache->textColor = text;
+        gRenderCache->backgroundColor = bg;
+        gRenderCache->linkColor = link;
+        AtomicIntInc(&gRenderCache->darkModeEpoch);
+    }
 
     // also drop the engines' cached dark-mode analyses / processed images
     // and regenerate markdown previews (their colors are baked into the html)
@@ -5614,6 +5731,12 @@ bool CanCloseWindow(MainWindow* win) {
     return true;
 }
 
+static void RestoreWindowReady(MainWindow* win) {
+    if (win && !win->IsWindowReady()) {
+        win->SetLifecycleState(WindowLifecycleState::Ready);
+    }
+}
+
 /* Close the documents associated with window 'hwnd'.
    Closes the window unless this is the last window in which
    case it switches to empty window and disables the "File\Close"
@@ -5640,6 +5763,7 @@ void CloseWindow(MainWindow* win, bool quitIfLast, bool forceClose) {
     // when the parent window is destroyed (cf. WM_DESTROY)
     if (gPluginMode && !gWindows.Contains(win) && !forceClose) {
         win->isBeingClosed = false;
+        RestoreWindowReady(win);
         return;
     }
 
@@ -5657,16 +5781,18 @@ void CloseWindow(MainWindow* win, bool quitIfLast, bool forceClose) {
     }
 
     bool canCloseWindow = true;
-    for (auto& tab : win->Tabs()) {
-        bool canCloseTab = MaybeSaveAnnotations(tab);
-        if (!canCloseTab) {
-            canCloseWindow = false;
-        }
-        // MaybeSaveAnnotations() can show a dialog that pumps messages.
-        // During message pumping, the window might be destroyed by a
-        // reentrant CloseWindow() call (e.g., from WM_DESTROY).
-        if (!IsMainWindowValid(win)) {
-            return;
+    if (!forceClose) {
+        for (auto& tab : win->Tabs()) {
+            bool canCloseTab = MaybeSaveAnnotations(tab);
+            if (!canCloseTab) {
+                canCloseWindow = false;
+            }
+            // MaybeSaveAnnotations() can show a dialog that pumps messages.
+            // During message pumping, the window might be destroyed by a
+            // reentrant CloseWindow() call (e.g., from WM_DESTROY).
+            if (!IsMainWindowValid(win)) {
+                return;
+            }
         }
     }
 
@@ -5676,6 +5802,7 @@ void CloseWindow(MainWindow* win, bool quitIfLast, bool forceClose) {
     // if list not empty, only close the tabs not on the list
     if (!canCloseWindow) {
         win->isBeingClosed = false;
+        RestoreWindowReady(win);
         for (auto& tab : win->Tabs()) {
             if (tab->AsFixed()) {
                 tab->AsFixed()->pauseRendering = false;
@@ -5717,16 +5844,21 @@ void CloseWindow(MainWindow* win, bool quitIfLast, bool forceClose) {
     TabsOnCloseWindow(win);
 
     if (forceClose) {
+        if (!win->IsWindowReady()) {
+            win->SetLifecycleState(WindowLifecycleState::Destroying);
+        }
         // WM_DESTROY has already been sent, so don't destroy win->hwndFrame again
         DeleteMainWindow(win);
     } else if (lastWindow && !quitIfLast) {
         /* last window - don't delete it */
         CloseDocumentInCurrentTab(win, false, false);
         win->isBeingClosed = false;
+        RestoreWindowReady(win);
         HwndSetFocus(win->hwndFrame);
         ReportIf(!gWindows.Contains(win));
     } else {
         HWND hwnd = win->hwndFrame;
+        win->SetLifecycleState(WindowLifecycleState::Destroying);
         DeleteMainWindow(win);
         DestroyWindow(hwnd);
     }
@@ -7829,6 +7961,7 @@ void SetCurrentLanguageAndRefreshUI(Str langCode) {
         return;
     }
     SetCurrentLang(langCode);
+    HomePageInvalidateLayoutCache();
 
     for (MainWindow* win : gWindows) {
         RebuildMenuBarForWindow(win);
@@ -9190,8 +9323,11 @@ void SetSidebarVisibility(MainWindow* win, bool tocVisible, bool showFavorites, 
     // (visibility actually changes); startup/restore calls take the instant path.
     bool sidebarWasVisible = win->uiState.tocVisible || win->uiState.favVisible;
     bool wantVisible = tocVisible || showFavorites;
+    bool animationActive = win->sidebarAnim && win->sidebarAnim->active;
+    bool targetChanged =
+        animationActive && (tocVisible != win->sidebarAnimTargetToc || showFavorites != win->sidebarAnimTargetFav);
     if (relayout && win->animMgr && win->sidebarAnim && AnimationsEnabled() && win->CurrentTab() &&
-        (wantVisible != sidebarWasVisible)) {
+        (wantVisible != sidebarWasVisible || targetChanged)) {
         win->sidebarAnimTargetToc = tocVisible;
         win->sidebarAnimTargetFav = showFavorites;
         if (wantVisible) {
@@ -9204,11 +9340,24 @@ void SetSidebarVisibility(MainWindow* win, bool tocVisible, bool showFavorites, 
 
         // start the width transition. Reopening starts from 0; a repeated toggle
         // during an in-flight animation continues from the current animated value.
+        if (!animationActive) {
+            int naturalDx = win->sidebarDx;
+            if (naturalDx <= 0) {
+                naturalDx = HwndClientRect(win->hwndTocBox).dx;
+            }
+            if (naturalDx > 0) {
+                win->sidebarAnimTargetDx = (float)std::max(kSidebarMinDx, naturalDx);
+            }
+        }
+        if (win->sidebarAnimTargetDx <= 0) {
+            int naturalDx = HwndClientRect(win->hwndFrame).dx / 4;
+            win->sidebarAnimTargetDx = (float)std::max(kSidebarMinDx, naturalDx);
+        }
         float fromDx = win->sidebarAnim->active ? win->sidebarAnimDx : (float)HwndClientRect(win->hwndTocBox).dx;
         if (!sidebarWasVisible) {
             fromDx = 0;
         }
-        float targetDx = wantVisible ? (float)std::max(kSidebarMinDx, HwndClientRect(win->hwndTocBox).dx) : 0;
+        float targetDx = wantVisible ? win->sidebarAnimTargetDx : 0;
         win->sidebarAnimDx = fromDx;
         win->sidebarAnim->Animate(&win->sidebarAnimDx, targetDx, 180);
         // Pre-size the double buffer for the largest canvas during the slide
@@ -9216,8 +9365,8 @@ void SetSidebarVisibility(MainWindow* win, bool tocVisible, bool showFavorites, 
         // full-canvas bitmap on every animation tick.
         win->ReserveCanvasBuffer(
             Rect(Point(), Size(HwndClientRect(win->hwndFrame).dx, HwndClientRect(win->hwndCanvas).dy)));
-        // The animation timer is (re)started from Tick(); pump one tick now so a
-        // freshly started animation doesn't wait for a WM_TIMER that never fires.
+        // The animation timer is (re)started from Tick(); pump one tick now so
+        // the first frame paints without waiting for the first WM_TIMER.
         win->animMgr->Tick();
         // lay out immediately at the starting width so the canvas doesn't jump
         RelayoutFrame(win, false, (int)win->sidebarAnimDx);
@@ -9680,7 +9829,10 @@ static void ListPrintersThread(HWND* hwndPtr) {
     d->hwndParent = *hwndPtr;
     d->text = str::Dup(ToStr(out));
     delete hwndPtr;
-    uitask::Post(MkFunc0<ListPrintersResult>(ListPrintersShowResult, d));
+    if (!uitask::Post(MkFunc0<ListPrintersResult>(ListPrintersShowResult, d))) {
+        str::Free(d->text);
+        delete d;
+    }
 }
 
 static void ReopenLastClosedFile(MainWindow* win) {
@@ -14254,11 +14406,14 @@ LRESULT CALLBACK WndProcSumatraFrame(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
             if (!win) {
                 logf("WM_CLOSE to 0x%p, but didn't find MainWindow for it\n", hwnd);
             }
-            if (win) {
-                win->SetLifecycleState(WindowLifecycleState::Destroying);
+            bool canClose = win && CanCloseWindow(win);
+            if (!IsMainWindowValid(win)) {
+                return 0;
             }
-            if (CanCloseWindow(win)) {
+            if (canClose) {
                 CloseWindow(win, true, false);
+            } else {
+                RestoreWindowReady(win);
             }
             return 0;
         }
@@ -14273,6 +14428,9 @@ LRESULT CALLBACK WndProcSumatraFrame(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
             UnregisterScreenshotHotkey(hwnd);
             FreeMenuOwnerDrawInfoData(GetMenu(hwnd));
             if (win) {
+                if (!win->IsWindowReady()) {
+                    win->SetLifecycleState(WindowLifecycleState::Destroying);
+                }
                 CloseWindow(win, true, true);
             }
         } break;
@@ -14287,23 +14445,40 @@ LRESULT CALLBACK WndProcSumatraFrame(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
             return 0;
 
         case WM_DDE_INITIATE:
-            if (gPluginMode) {
+            if (gPluginMode || gPolicyRestrictions != Perm::All) {
                 break;
             }
             return OnDDEInitiate(hwnd, wp, lp);
         case WM_DDE_EXECUTE:
+            if (gPluginMode || gPolicyRestrictions != Perm::All) {
+                return 0;
+            }
             return OnDDExecute(hwnd, wp, lp);
         case WM_DDE_REQUEST:
+            if (gPluginMode || gPolicyRestrictions != Perm::All) {
+                return 0;
+            }
             return OnDDERequest(hwnd, wp, lp);
         case WM_DDE_TERMINATE:
+            if (gPluginMode || gPolicyRestrictions != Perm::All) {
+                return 0;
+            }
             return OnDDETerminate(hwnd, wp, lp);
 
         case WM_COPYDATA:
+            if (gPluginMode || gPolicyRestrictions != Perm::All) {
+                return 0;
+            }
             return OnCopyData(hwnd, wp, lp);
 
         case WM_TIMER:
             if (win && win->stressTest) {
                 OnStressTestTimer(win, (int)wp);
+            }
+            if (win && wp == AnimationManager::kAnimTimerID) {
+                // The animation timer is bound to the frame window (see
+                // AnimationManager) but handled by CanvasOnTimer.
+                CanvasOnTimer(win, hwnd, wp);
             }
             break;
 

@@ -94,7 +94,9 @@ MainWindow::MainWindow(HWND hwnd) {
     cbHandler = CreateControllerCallbackHandler(this);
     animMgr = new AnimationManager(hwndFrame);
     sidebarAnim = new AnimProp();
-    pageFadeAnim = new AnimProp();
+    // Tick() only advances registered props; an unregistered animation stalls
+    // with active=true forever (see AnimationManager::Add).
+    animMgr->Add(sidebarAnim);
     inertiaScroll = new InertiaScrollState();
     overscroll = new OverscrollState();
     pointerVelocity = new PointerVelocityTracker();
@@ -130,13 +132,17 @@ void CreateMovePatternLazy(MainWindow* win) {
 
 MainWindow::~MainWindow() {
     KillTimer(hwndCanvas, kSmoothScrollTimerID);
+    KillTimer(hwndCanvas, kInertiaScrollTimerID);
+    KillTimer(hwndCanvas, OverscrollState::kOverscrollTimerID);
+    if (mainWindowRerenderTimer) {
+        KillTimer(hwndCanvas, mainWindowRerenderTimer);
+    }
     if (scrollAnimHiResTimer) {
         timeEndPeriod(1);
         scrollAnimHiResTimer = false;
     }
     scrollAnimActive = false;
     RefHoverDestroy(refHover);
-    delete animMgr;
     delete thumbPanel;
     delete inertiaScroll;
     delete overscroll;
@@ -148,6 +154,7 @@ MainWindow::~MainWindow() {
     // ReportIf(ctrl); // TODO: seen in crash report
     ReportIf(linkOnLastButtonDown);
     str::Free(urlOnLastButtonDown);
+    HomePageDestroySearch(this);
     str::Free(homeSearchQuery);
 
     UnsubclassToc(this);
@@ -223,7 +230,6 @@ MainWindow::~MainWindow() {
     delete cbHandler;
 
     delete sidebarAnim;
-    delete pageFadeAnim;
     delete animMgr;
 
     delete frameRateWnd;

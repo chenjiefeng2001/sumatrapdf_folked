@@ -42,6 +42,7 @@ TempStr CodexBuildExecutablePathTemp() {
 
 static Mutex gCodexBuildLogMutex;
 static AIChatLogger gCodexBuildLogger = {&gCodexBuildLogMutex, "gpt-5.5-log.txt", "gpt-5.5"};
+static Mutex gCodexModelsMutex;
 static bool gTriedCodexModels = false;
 static StrVec gCodexModels;
 
@@ -75,99 +76,80 @@ static bool ParseCodexModelsResponse(Str output, StrVec& models) {
 // Ask the authenticated Codex CLI for the same model catalog used by its picker.
 // The app-server API is experimental, so every failure leaves the built-in list in use.
 static bool QueryCodexModels(Str exePath, StrVec& models) {
-    SECURITY_ATTRIBUTES sa = {sizeof(sa), nullptr, TRUE};
-    HANDLE hStdoutRead = nullptr;
-    HANDLE hStdoutWrite = nullptr;
-    HANDLE hStdinRead = nullptr;
-    HANDLE hStdinWrite = nullptr;
-    auto closeHandle = [](HANDLE& h) {
-        if (h) {
-            CloseHandle(h);
-            h = nullptr;
-        }
-    };
-    if (!CreatePipe(&hStdoutRead, &hStdoutWrite, &sa, 0) ||
-        !SetHandleInformation(hStdoutRead, HANDLE_FLAG_INHERIT, 0) || !CreatePipe(&hStdinRead, &hStdinWrite, &sa, 0) ||
-        !SetHandleInformation(hStdinWrite, HANDLE_FLAG_INHERIT, 0)) {
-        closeHandle(hStdinRead);
-        closeHandle(hStdinWrite);
-        closeHandle(hStdoutRead);
-        closeHandle(hStdoutWrite);
-        return false;
-    }
-
-    STARTUPINFOW si = {};
-    si.cb = sizeof(si);
-    si.hStdInput = hStdinRead;
-    si.hStdOutput = hStdoutWrite;
-    si.hStdError = hStdoutWrite;
-    si.dwFlags = STARTF_USESTDHANDLES;
-
-    PROCESS_INFORMATION pi = {};
+    constexpr ULONGLONG kModelQueryTimeoutMs = 3000;
+    constexpr int kMaxModelOutputBytes = 1024 * 1024;
+    ULONGLONG startedAt = GetTickCount64();
     TempStr cmdLine = fmt("%s app-server --stdio", QuoteCmdLineArgTemp(exePath));
-    if (!CreateProcessW(nullptr, CWStrTemp(cmdLine), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si,
-                        &pi)) {
-        closeHandle(hStdinRead);
-        closeHandle(hStdinWrite);
-        closeHandle(hStdoutRead);
-        closeHandle(hStdoutWrite);
+    AIChatProcessLaunchResult launch;
+    if (!AIChatLaunchProcessWithStdinPipe(cmdLine, {}, &launch)) {
         return false;
     }
-    CloseHandle(pi.hThread);
-    closeHandle(hStdinRead);
-    closeHandle(hStdoutWrite);
 
     Str request = StrL(
         "{\"method\":\"initialize\",\"id\":1,\"params\":{\"clientInfo\":{\"name\":\"SumatraPDF\",\"version\":\"3.7\"}}}"
         "\n"
         "{\"method\":\"model/list\",\"id\":2,\"params\":{\"limit\":100,\"includeHidden\":false}}\n");
     DWORD nWritten = 0;
-    bool wroteRequest =
-        WriteFile(hStdinWrite, request.s, (DWORD)request.len, &nWritten, nullptr) && nWritten == (DWORD)request.len;
+    bool wroteRequest = launch.hWritePipe &&
+                        WriteFile(launch.hWritePipe, request.s, (DWORD)request.len, &nWritten, nullptr) &&
+                        nWritten == (DWORD)request.len;
+    if (launch.hWritePipe) {
+        CloseHandle(launch.hWritePipe);
+        launch.hWritePipe = nullptr;
+    }
     if (!wroteRequest) {
-        closeHandle(hStdinWrite);
-        TerminateProcess(pi.hProcess, 0);
-        CloseHandle(pi.hProcess);
-        closeHandle(hStdoutRead);
+        if (launch.hReadPipe) {
+            CloseHandle(launch.hReadPipe);
+            launch.hReadPipe = nullptr;
+        }
+        AIChatCloseProcess(&launch.hProcess, true);
         return false;
     }
 
-    str::Builder output;
-    ULONGLONG deadline = GetTickCount64() + 3000;
-    while (GetTickCount64() < deadline && output.len < 1024 * 1024) {
-        DWORD available = 0;
-        if (!PeekNamedPipe(hStdoutRead, nullptr, 0, nullptr, &available, nullptr)) {
+    str::Builder output(4096);
+    bool parsed = false;
+    for (;;) {
+        if (GetTickCount64() - startedAt >= kModelQueryTimeoutMs || len(output) >= kMaxModelOutputBytes) {
             break;
+        }
+        DWORD available = 0;
+        if (!PeekNamedPipe(launch.hReadPipe, nullptr, 0, nullptr, &available, nullptr)) {
+            if (GetLastError() == ERROR_BROKEN_PIPE || WaitForSingleObject(launch.hProcess, 0) != WAIT_TIMEOUT) {
+                break;
+            }
+            Sleep(10);
+            continue;
         }
         if (available > 0) {
             char buf[4096];
-            DWORD nRead = 0;
             DWORD toRead = std::min<DWORD>(available, dimof(buf));
-            if (!ReadFile(hStdoutRead, buf, toRead, &nRead, nullptr) || nRead == 0) {
+            DWORD remaining = (DWORD)(kMaxModelOutputBytes - len(output));
+            if (toRead > remaining) {
+                toRead = remaining;
+            }
+            DWORD nRead = 0;
+            if (toRead == 0 || !ReadFile(launch.hReadPipe, buf, toRead, &nRead, nullptr) || nRead == 0) {
                 break;
             }
             output.Append(Str(buf, (int)nRead));
             if (ParseCodexModelsResponse(ToStr(output), models)) {
-                closeHandle(hStdinWrite);
-                TerminateProcess(pi.hProcess, 0);
-                CloseHandle(pi.hProcess);
-                closeHandle(hStdoutRead);
-                return true;
+                parsed = true;
+                break;
             }
             continue;
         }
-        if (WaitForSingleObject(pi.hProcess, 10) != WAIT_TIMEOUT) {
+        if (WaitForSingleObject(launch.hProcess, 0) != WAIT_TIMEOUT) {
             break;
         }
         Sleep(10);
     }
-    closeHandle(hStdinWrite);
-    if (WaitForSingleObject(pi.hProcess, 0) == WAIT_TIMEOUT) {
-        TerminateProcess(pi.hProcess, 0);
+
+    if (launch.hReadPipe) {
+        CloseHandle(launch.hReadPipe);
+        launch.hReadPipe = nullptr;
     }
-    CloseHandle(pi.hProcess);
-    closeHandle(hStdoutRead);
-    return false;
+    AIChatCloseProcess(&launch.hProcess, true);
+    return parsed || ParseCodexModelsResponse(ToStr(output), models);
 }
 
 // --- Session history ---
@@ -390,13 +372,16 @@ static void AppendCodexRolloutTools(MainWindow* win, Str line) {
     }
     if (len(name) > 0) {
         str::Builder desc;
-        desc.Append(fmt("Tool: %s", name));
+        desc.Append(fmt(_TRA("Tool: %s").s, name));
         AIChatHistoryAddTool(win, ToStr(desc));
     }
 }
 
 // Load conversation history from Codex rollout JSONL
 static void LoadCodexSessionHistory(MainWindow* win, Str sessionId, Str /*dir*/) {
+    if (!AIChatSessionIdIsValid(sessionId)) {
+        return;
+    }
     TempStr sessionPath = FindCodexRolloutPathTemp(sessionId);
     if (!sessionPath || !file::Exists(sessionPath)) {
         return;
@@ -448,7 +433,7 @@ struct CodexBuildProvider : AIChatProvider {
         optionItems = "Read-only\0Workspace write\0Full access\0";
         optionCount = 3;
         optionDefault = 1;
-        checkboxLabel = "Skip Sandbox";
+        checkboxLabel = _TRA("Skip Sandbox");
     }
 
     TempStr TitleTemp() override { return str::DupTemp(_TRA("Codex chat")); }
@@ -460,12 +445,13 @@ struct CodexBuildProvider : AIChatProvider {
     TempStr FindExecutableTemp() override { return FindCodexExecutableTemp(); }
 
     void BuildModelsList(StrVec& models) override {
+        ScopedMutex lock(&gCodexModelsMutex);
         models.Reset();
         if (!gTriedCodexModels) {
             gTriedCodexModels = true;
             TempStr exePath = FindCodexExecutableTemp();
-            if (exePath && QueryCodexModels(exePath, gCodexModels)) {
-                defaultModel = gCodexModels[0];
+            if (exePath) {
+                QueryCodexModels(exePath, gCodexModels);
             }
         }
         if (len(gCodexModels) > 0) {
@@ -520,10 +506,11 @@ struct CodexBuildProvider : AIChatProvider {
         }
         if (skipFlag) {
             return fmt("%s exec resume --json --skip-git-repo-check -m %s %s %s %s", QuoteCmdLineArgTemp(args.exePath),
-                       QuoteCmdLineArgTemp(args.model), skipFlag, args.sessionId, QuoteCmdLineArgTemp(prompt));
+                       QuoteCmdLineArgTemp(args.model), skipFlag, QuoteCmdLineArgTemp(args.sessionId),
+                       QuoteCmdLineArgTemp(prompt));
         }
         return fmt("%s exec resume --json --skip-git-repo-check -m %s %s %s", QuoteCmdLineArgTemp(args.exePath),
-                   QuoteCmdLineArgTemp(args.model), args.sessionId, QuoteCmdLineArgTemp(prompt));
+                   QuoteCmdLineArgTemp(args.model), QuoteCmdLineArgTemp(args.sessionId), QuoteCmdLineArgTemp(prompt));
     }
 
     void ParseStreamLine(Str line, AIChatStreamCtx* ctx) override {
@@ -549,7 +536,7 @@ struct CodexBuildProvider : AIChatProvider {
                 if (len(cmd) > 0) {
                     TempStr shortCmd = ShortenStringUtf8Temp(cmd, 80);
                     str::Builder desc;
-                    desc.Append(fmt("Tool: %s", shortCmd));
+                    desc.Append(fmt(_TRA("Tool: %s").s, shortCmd));
                     AIChatPostUpdate(ctx, AIChatUpdateType::Tool, ToStr(desc));
                     AIChatPostUpdate(ctx, AIChatUpdateType::Flush, {});
                 }

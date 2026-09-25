@@ -27,24 +27,24 @@ enum class Arg {
     Help3 = 8, ExitWhenDone = 9, ExitOnPrint = 10, Restrict = 11,
     Presentation = 12, FullScreen = 13, InvertColors = 14, InvertColors2 = 15,
     Console = 16, Install = 17, UnInstall = 18, WithFilter = 19,
-    WithSearch = 20, WithPreview = 21, Rand = 22, Regress = 23,
-    Extract = 24, Tester = 25, TestApp = 26, TestPlugin = 27,
-    TestPreview = 28, NewWindow = 29, Log = 30, LogToFile = 31,
-    CrashOnOpen = 32, ReuseInstance = 33, EscToExit = 34, ArgEnumPrinters = 35,
-    ListPrinters = 36, SleepMs = 37, PrintTo = 38, PrintSilent = 39,
-    PrintSettings = 40, InverseSearch = 41, ForwardSearch1 = 42, ForwardSearch2 = 43,
-    NamedDest = 44, NamedDest2 = 45, Page = 46, View = 47,
-    Zoom = 48, Scroll = 49, AppData = 50, Plugin = 51,
-    StressTest = 52, N = 53, Max = 54, MaxFiles = 55,
-    Render = 56, ExtractText = 57, Bench = 58, Dir = 59,
-    InstallDir = 60, Lang = 61, UpdateSelfTo = 62, ArgDeleteFile = 63,
-    BgCol = 64, BgCol2 = 65, FwdSearchOffset = 66, FwdSearchWidth = 67,
-    FwdSearchColor = 68, FwdSearchPermanent = 69, MangaMode = 70, Search = 71,
-    AllUsers = 72, AllUsers2 = 73, RunInstallNow = 74, Adobe = 75,
-    DDE = 76, Pwd = 77, EngineDump = 78, SetColorRange = 79,
-    UpgradeFrom = 80, ForTesting = 81, QuickLook = 82, QuickLookAgent = 83,
-    WindowPos = 84, DumpExif = 85, DumpChm = 86, Control = 87,
-    UnitTests = 88,
+    WithSearch = 20, WithPreview = 21, WithAI = 22, Rand = 23,
+    Regress = 24, Extract = 25, Tester = 26, TestApp = 27,
+    TestPlugin = 28, TestPreview = 29, NewWindow = 30, Log = 31,
+    LogToFile = 32, CrashOnOpen = 33, ReuseInstance = 34, EscToExit = 35,
+    ArgEnumPrinters = 36, ListPrinters = 37, SleepMs = 38, PrintTo = 39,
+    PrintSilent = 40, PrintSettings = 41, InverseSearch = 42, ForwardSearch1 = 43,
+    ForwardSearch2 = 44, NamedDest = 45, NamedDest2 = 46, Page = 47,
+    View = 48, Zoom = 49, Scroll = 50, AppData = 51,
+    Plugin = 52, StressTest = 53, N = 54, Max = 55,
+    MaxFiles = 56, Render = 57, ExtractText = 58, Bench = 59,
+    Dir = 60, InstallDir = 61, Lang = 62, UpdateSelfTo = 63,
+    ArgDeleteFile = 64, BgCol = 65, BgCol2 = 66, FwdSearchOffset = 67,
+    FwdSearchWidth = 68, FwdSearchColor = 69, FwdSearchPermanent = 70, MangaMode = 71,
+    Search = 72, AllUsers = 73, AllUsers2 = 74, RunInstallNow = 75,
+    Adobe = 76, DDE = 77, Pwd = 78, EngineDump = 79,
+    SetColorRange = 80, UpgradeFrom = 81, ForTesting = 82, QuickLook = 83,
+    QuickLookAgent = 84, WindowPos = 85, DumpExif = 86, DumpChm = 87,
+    Control = 88, UnitTests = 89,
 };
 
 static SeqStrings gArgNames =
@@ -53,24 +53,24 @@ static SeqStrings gArgNames =
     "help\0" "exit-when-done\0" "exit-on-print\0" "restrict\0"
     "presentation\0" "fullscreen\0" "invertcolors\0" "invert-colors\0"
     "console\0" "install\0" "uninstall\0" "with-filter\0"
-    "with-search\0" "with-preview\0" "rand\0" "regress\0"
-    "x\0" "tester\0" "testapp\0" "test-plugin\0"
-    "test-preview\0" "new-window\0" "log\0" "log-to-file\0"
-    "crash-on-open\0" "reuse-instance\0" "esc-to-exit\0" "enum-printers\0"
-    "list-printers\0" "sleep-ms\0" "print-to\0" "t\0"
-    "print-settings\0" "inverse-search\0" "forward-search\0" "fwdsearch\0"
-    "nameddest\0" "named-dest\0" "page\0" "view\0"
-    "zoom\0" "scroll\0" "appdata\0" "plugin\0"
-    "stress-test\0" "n\0" "max\0" "max-files\0"
-    "render\0" "extract-text\0" "bench\0" "d\0"
-    "install-dir\0" "lang\0" "update-self-to\0" "delete-file\0"
-    "bgcolor\0" "bg-color\0" "fwdsearch-offset\0" "fwdsearch-width\0"
-    "fwdsearch-color\0" "fwdsearch-permanent\0" "manga-mode\0" "search\0"
-    "all-users\0" "allusers\0" "run-install-now\0" "a\0"
-    "dde\0" "pwd\0" "engine-dump\0" "set-color-range\0"
-    "upgrade-from\0" "for-testing\0" "quicklook\0" "quicklook-agent\0"
-    "window-pos\0" "dump-exif\0" "dump-chm\0" "dbg-control\0"
-    "unit-tests\0";
+    "with-search\0" "with-preview\0" "with-ai\0" "rand\0"
+    "regress\0" "x\0" "tester\0" "testapp\0"
+    "test-plugin\0" "test-preview\0" "new-window\0" "log\0"
+    "log-to-file\0" "crash-on-open\0" "reuse-instance\0" "esc-to-exit\0"
+    "enum-printers\0" "list-printers\0" "sleep-ms\0" "print-to\0"
+    "t\0" "print-settings\0" "inverse-search\0" "forward-search\0"
+    "fwdsearch\0" "nameddest\0" "named-dest\0" "page\0"
+    "view\0" "zoom\0" "scroll\0" "appdata\0"
+    "plugin\0" "stress-test\0" "n\0" "max\0"
+    "max-files\0" "render\0" "extract-text\0" "bench\0"
+    "d\0" "install-dir\0" "lang\0" "update-self-to\0"
+    "delete-file\0" "bgcolor\0" "bg-color\0" "fwdsearch-offset\0"
+    "fwdsearch-width\0" "fwdsearch-color\0" "fwdsearch-permanent\0" "manga-mode\0"
+    "search\0" "all-users\0" "allusers\0" "run-install-now\0"
+    "a\0" "dde\0" "pwd\0" "engine-dump\0"
+    "set-color-range\0" "upgrade-from\0" "for-testing\0" "quicklook\0"
+    "quicklook-agent\0" "window-pos\0" "dump-exif\0" "dump-chm\0"
+    "dbg-control\0" "unit-tests\0";
 // clang-format on
 // @gen-end flags
 
@@ -490,6 +490,10 @@ void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
         }
         if (arg == Arg::WithPreview) {
             i.withPreview = true;
+            continue;
+        }
+        if (arg == Arg::WithAI) {
+            i.withAI = true;
             continue;
         }
         if (arg == Arg::Rand) {

@@ -26,3 +26,23 @@ jobs:
           BB_SECRET: ${{ secrets.BB_SECRET }}
           BB_ACCESS: ${{ secrets.BB_ACCESS }}
         run: bun .\cmd\build.ts -ci
+
+      - name: Upload 32-bit pre-release
+        uses: actions/upload-artifact@v6
+        with:
+          name: sumatrapdf-${{ github.run_number }}-32
+          path: |
+            out/rel32/SumatraPDF-*-32-install.exe
+            out/rel32/SumatraPDF-*-32.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload 64-bit pre-release
+        uses: actions/upload-artifact@v6
+        with:
+          name: sumatrapdf-${{ github.run_number }}-64
+          path: |
+            out/rel64/SumatraPDF-*-64-install.exe
+            out/rel64/SumatraPDF-*-64.exe
+          if-no-files-found: error
+          retention-days: 30

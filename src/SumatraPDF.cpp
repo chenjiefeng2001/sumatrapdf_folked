@@ -569,6 +569,7 @@ void SwitchToDisplayMode(MainWindow* win, DisplayMode displayMode, bool keepCont
         return;
     }
 
+    win->scrollAnimActive = false; // smooth-scroll timer must not chase the old view's target
     win->ctrl->SetDisplayMode(displayMode, keepContinuous);
     UpdateToolbarState(win);
 }

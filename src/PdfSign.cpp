@@ -30,6 +30,7 @@ extern "C" {
 #include "base/GuessFileType.h"
 #include "EngineAll.h"
 #include "EngineMupdf.h"
+#include "PdfJournal.h"
 
 // True when this widget is a signature field the document's author left for
 // someone to sign, i.e. a signature field with no signature in it yet. Its
@@ -223,6 +224,10 @@ bool EngineMupdfSignDocument(EngineBase* engine, const PdfSignArgs& args, Str* e
     static_assert(kPdfSignShowDate == PDF_SIGNATURE_SHOW_DATE);
     static_assert(kPdfSignShowTextName == PDF_SIGNATURE_SHOW_TEXT_NAME);
     static_assert(kPdfSignShowGraphicName == PDF_SIGNATURE_SHOW_GRAPHIC_NAME);
+
+    // signing is an undoable edit like any other (in practice nobody undoes it,
+    // but leaving it out of the journal would make the stack inconsistent)
+    PdfScopedOperation opScope(ctx, epdf, "Sign document");
 
     fz_try(ctx) {
         if (args.certThumbprint) {

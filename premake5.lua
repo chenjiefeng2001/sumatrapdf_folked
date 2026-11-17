@@ -1239,7 +1239,7 @@ workspace "SumatraPDF"
     language "C++"
     cppdialect "C++latest"
     mixed_dbg_rel_conf()
-    includedirs { "src" }
+    includedirs { "src", "ext/mupdf/include" }
     sumatrapdf_tool_files()
     links { "libsumatrapdf" }
     links { "shell32" }

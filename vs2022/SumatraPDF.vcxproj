@@ -1250,6 +1250,8 @@ cd ../out/rel64_prefast_asan &amp; if not exist InstallerData.dat ..\..\bin\Make
     <ClInclude Include="..\src\PdfCreator.h" />
     <ClInclude Include="..\src\PdfDarkMode.h" />
     <ClInclude Include="..\src\PdfDarkModeInternal.h" />
+    <ClInclude Include="..\src\PdfDocEvents.h" />
+    <ClInclude Include="..\src\PdfLayersDialog.h" />
     <ClInclude Include="..\src\PdfSync.h" />
     <ClInclude Include="..\src\PdfTools.h" />
     <ClInclude Include="..\src\PngOptimizer.h" />
@@ -1333,6 +1335,7 @@ cd ../out/rel64_prefast_asan &amp; if not exist InstallerData.dat ..\..\bin\Make
     <ClInclude Include="..\src\uia\PageProvider.h" />
     <ClInclude Include="..\src\uia\Provider.h" />
     <ClInclude Include="..\src\uia\StartPageProvider.h" />
+    <ClInclude Include="..\src\uia\StructureProvider.h" />
     <ClInclude Include="..\src\uia\TextRange.h" />
   </ItemGroup>
   <ItemGroup>
@@ -1497,6 +1500,8 @@ cd ../out/rel64_prefast_asan &amp; if not exist InstallerData.dat ..\..\bin\Make
     <ClCompile Include="..\src\PdfDarkModeOklab.cpp" />
     <ClCompile Include="..\src\PdfDarkModeProfile.cpp" />
     <ClCompile Include="..\src\PdfDarkModeScanProcess.cpp" />
+    <ClCompile Include="..\src\PdfDocEvents.cpp" />
+    <ClCompile Include="..\src\PdfLayersDialog.cpp" />
     <ClCompile Include="..\src\PdfSign.cpp" />
     <ClCompile Include="..\src\PdfSync.cpp" />
     <ClCompile Include="..\src\PdfTools.cpp" />
@@ -1959,6 +1964,7 @@ cd ../out/rel64_prefast_asan &amp; if not exist InstallerData.dat ..\..\bin\Make
     <ClCompile Include="..\src\uia\PageProvider.cpp" />
     <ClCompile Include="..\src\uia\Provider.cpp" />
     <ClCompile Include="..\src\uia\StartPageProvider.cpp" />
+    <ClCompile Include="..\src\uia\StructureProvider.cpp" />
     <ClCompile Include="..\src\uia\TextRange.cpp" />
   </ItemGroup>
   <ItemGroup>

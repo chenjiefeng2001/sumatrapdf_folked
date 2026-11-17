@@ -19,6 +19,7 @@
     <ClInclude Include="..\src\PdfCadDetect.h" />
     <ClInclude Include="..\src\PdfCadEnhanceDevice.h" />
     <ClInclude Include="..\src\PdfDarkMode.h" />
+    <ClInclude Include="..\src\PdfDocEvents.h" />
     <ClInclude Include="..\src\TextSearch.h" />
     <ClInclude Include="..\src\TextSelection.h" />
     <ClInclude Include="..\src\base\UtAssert.h">
@@ -47,6 +48,7 @@
     <ClCompile Include="..\src\PdfCadDetect.cpp" />
     <ClCompile Include="..\src\PdfCadEnhanceDevice.cpp" />
     <ClCompile Include="..\src\PdfDarkModeNoOp.cpp" />
+    <ClCompile Include="..\src\PdfDocEventsNoOp.cpp" />
     <ClCompile Include="..\src\TextSearch.cpp" />
     <ClCompile Include="..\src\TextSelection.cpp" />
     <ClCompile Include="..\src\WebpReader.cpp" />

@@ -784,6 +784,7 @@ function uia_files()
     "PageProvider.*",
     "Provider.*",
     "StartPageProvider.*",
+    "StructureProvider.*",
     "TextRange.*",
   })
 end
@@ -950,6 +951,8 @@ function engines_files()
     "PdfDarkModeOklab.cpp",
     "PdfDarkModeProfile.cpp",
     "PdfDarkModeScanProcess.cpp",
+    "PdfDocEvents.*",
+    "PdfLayersDialog.*",
   })
 end
 
@@ -1421,6 +1424,8 @@ function test_engines_files()
     "src/PdfCadEnhanceDevice.h",
     "src/PdfDarkMode.h",
     "src/PdfDarkModeNoOp.cpp",
+    "src/PdfDocEvents.h",
+    "src/PdfDocEventsNoOp.cpp",
     "src/TextSearch.cpp",
     "src/TextSearch.h",
     "src/TextSelection.cpp",
@@ -1527,6 +1532,8 @@ function pdf_preview_files()
     "PdfDarkMode.h",
     "PdfDarkModeNoOp.cpp",
     "PdfCreator.*",
+    "PdfDocEvents.h",
+    "PdfDocEventsNoOp.cpp",
     "RegistryPreview.*",
     "SumatraConfig.*",
     "SumatraLog.*",
@@ -1561,6 +1568,8 @@ function search_filter_files()
     "PdfCadEnhanceDevice.*",
     "PdfDarkMode.h",
     "PdfDarkModeNoOp.cpp",
+    "PdfDocEvents.h",
+    "PdfDocEventsNoOp.cpp",
     "RegistrySearchFilter.*",
     "SumatraLog.*",
   })
@@ -1663,6 +1672,7 @@ end
 
 function sumatrapdf_tool_files()
   files_in_dir("src", {
+    "PdfRedactTool.*",
     "sumatrapdf-tool.cpp"
   })
 end

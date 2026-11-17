@@ -318,6 +318,12 @@
     <ClInclude Include="..\src\PdfDarkModeInternal.h">
       <Filter>src</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\PdfDocEvents.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\PdfLayersDialog.h">
+      <Filter>src</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\PdfSync.h">
       <Filter>src</Filter>
     </ClInclude>
@@ -565,6 +571,9 @@
       <Filter>src\uia</Filter>
     </ClInclude>
     <ClInclude Include="..\src\uia\StartPageProvider.h">
+      <Filter>src\uia</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\uia\StructureProvider.h">
       <Filter>src\uia</Filter>
     </ClInclude>
     <ClInclude Include="..\src\uia\TextRange.h">
@@ -945,6 +954,12 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\PdfDarkModeScanProcess.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PdfDocEvents.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PdfLayersDialog.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\PdfSign.cpp">
@@ -1359,6 +1374,9 @@
       <Filter>src\uia</Filter>
     </ClCompile>
     <ClCompile Include="..\src\uia\StartPageProvider.cpp">
+      <Filter>src\uia</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\uia\StructureProvider.cpp">
       <Filter>src\uia</Filter>
     </ClCompile>
     <ClCompile Include="..\src\uia\TextRange.cpp">

@@ -90,7 +90,26 @@ struct AnnotCreateArgs {
     bool setContentToSelection = false;
     Str content;
     Pixmap* stampImage = nullptr;
+    // for Polygon, PolyLine, Ink: the vertices in page space, as collected by
+    // dragging the mouse. Fewer than 2 points means "not drawn", and the
+    // annotation is not created. Vec's default ctor is explicit, so it needs
+    // the {} to stay usable in `AnnotCreateArgs args{type}`.
+    Vec<PointF> points{};
+    // for FileAttachment: path of the file to embed in the document. Empty
+    // means "not given", and the annotation is not created.
+    Str filePath;
+    // for FileAttachment: set by EngineMupdfCreateAnnotation() to the size of
+    // the embedded file in bytes, or -1 when the annotation has no /FS
+    int attachedFileSize = -1;
+    // for FileAttachment: the bytes read back out of the annotation's /FS after
+    // the embed, so a caller can check the round-trip. Owned by the caller
+    // (str::Free). Null when there is nothing to report.
+    Str attachedFileContents;
 };
+
+// Whether annot is a FileAttachment whose /FS resolves to embedded bytes, and
+// if so how many. Returns false for any other annotation (or a bad one).
+bool AnnotationGetAttachedFileSize(Annotation* annot, int* sizeOut);
 
 int PageNo(Annotation*);
 RectF GetBounds(Annotation*);
@@ -137,6 +156,10 @@ void SetIconName(Annotation*, Str);
 void SetLineEndStyles(Annotation*, int end);
 void SetLineStartStyles(Annotation*, int start);
 
+// How many points a Polygon/PolyLine/Ink has, read back out of the PDF dict.
+// 0 for any other type (or a dead annot).
+int AnnotPointCount(Annotation*);
+
 int GetWidgetType(Annotation*);
 // which mouse cursor a form field warrants on hover. None for non-widgets and
 // read-only fields, Text (I-beam) for text/combo/listbox, Button (hand) for
@@ -165,4 +188,9 @@ bool AnnotationSupportsColor(AnnotationType);
 bool AnnotationSupportsBorder(AnnotationType);
 bool AnnotationSupportsInteriorColor(AnnotationType);
 
+// Polygon, PolyLine and Ink take their shape from a list of points the user
+// draws with the mouse, not from a rect they drag out.
+bool IsPointBasedAnnotType(AnnotationType);
+
+bool CanCreateAnnotationOfType(AnnotationType);
 AnnotationType CmdIdToAnnotationType(int cmdId);

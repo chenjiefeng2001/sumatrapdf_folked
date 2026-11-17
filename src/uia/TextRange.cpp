@@ -975,11 +975,18 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationTextRange::GetChildren(SAFEARRAY** 
 
     SumatraUIAutomationPageProvider* it = document->GetFirstPage();
     while (it) {
-        if (it->GetPageNum() >= startPage || it->GetPageNum() <= endPage) {
+        // '||' would pass for every page except the one we want, so a range
+        // spanning page 2 also filled the slot for page 1 and returned pages
+        // the range doesn't cover
+        if (it->GetPageNum() >= startPage && it->GetPageNum() <= endPage) {
             LONG index = it->GetPageNum() - startPage;
 
             HRESULT hr = SafeArrayPutElement(psa, &index, it);
-            ReportIf(FAILED(hr));
+            if (FAILED(hr)) {
+                ReportIf(hr);
+                SafeArrayDestroy(psa);
+                return hr;
+            }
             it->AddRef();
         }
 

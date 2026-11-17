@@ -2,7 +2,9 @@
    License: GPLv3 */
 
 struct DisplayModel;
+struct PageTextSpan;
 class SumatraUIAutomationDocumentProvider;
+class SumatraUIAutomationStructureProvider;
 class SumatraUIAutomationPageProvider : public IRawElementProviderFragment,
                                         public IRawElementProviderSimple,
                                         public IValueProvider {
@@ -15,11 +17,18 @@ class SumatraUIAutomationPageProvider : public IRawElementProviderFragment,
     SumatraUIAutomationPageProvider* sibling_prev;
     SumatraUIAutomationPageProvider* sibling_next;
 
+    // the tagged-PDF structure elements of this page (headings and the like),
+    // hanging off it so a screen reader's heading navigation can find them.
+    // Empty for an untagged page.
+    SumatraUIAutomationStructureProvider* struct_first;
+    SumatraUIAutomationStructureProvider* struct_last;
+
     // is dm released, and our root has released us.
     // Only UIA keeps us alive but we can't access anything
     bool released;
 
     friend class SumatraUIAutomationDocumentProvider; // for setting up next/prev sibling
+    friend class SumatraUIAutomationStructureProvider;
 
   public:
     SumatraUIAutomationPageProvider(int pageNum, HWND canvasHwnd, DisplayModel* dm,
@@ -29,6 +38,12 @@ class SumatraUIAutomationPageProvider : public IRawElementProviderFragment,
     int GetPageNum() const;
     SumatraUIAutomationPageProvider* GetNextPage();
     SumatraUIAutomationPageProvider* GetPreviousPage();
+
+    SumatraUIAutomationStructureProvider* GetNextStruct();
+    SumatraUIAutomationStructureProvider* GetPreviousStruct();
+
+    // builds the children for this page's tagged-PDF structure elements
+    void BuildStructureElements();
 
     // IUnknown
     HRESULT STDMETHODCALLTYPE QueryInterface(const IID&, void**);

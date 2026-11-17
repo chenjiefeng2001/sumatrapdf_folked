@@ -28,6 +28,7 @@ extern "C" {
 #include "base/GuessFileType.h"
 #include "EngineAll.h"
 #include "EngineMupdf.h"
+#include "PdfJournal.h"
 #include "Translations.h"
 #include "SumatraConfig.h"
 #include "DisplayModel.h"
@@ -1477,6 +1478,8 @@ static void ButtonEmbedAttachment(EditAnnotationsWindow* ew) {
         fz_buffer* contents = nullptr;
         fz_var(fs);
         fz_var(contents);
+        // embedding the file and pointing the annotation at it is one undo step
+        PdfScopedOperation opScope(ctx, engine, "Embed attachment");
         fz_try(ctx) {
             contents = fz_new_buffer_from_copied_data(ctx, (const u8*)data.s, (size_t)data.len);
             // created/modified unknown (-1); no checksum (matches mupdf gl-annotate)

@@ -4,6 +4,7 @@
 #include "base/Base.h"
 #include "base/Win.h"
 #include "Translations.h"
+#include "base/GuessFileType.h"
 
 #include <uiautomationcore.h>
 
@@ -17,6 +18,8 @@
 #include "uia/Constants.h"
 #include "uia/DocumentProvider.h"
 #include "uia/Provider.h"
+#include "uia/StructureProvider.h"
+#include "EngineAll.h"
 
 SumatraUIAutomationPageProvider::SumatraUIAutomationPageProvider(int pageNum, HWND canvasHwnd, DisplayModel* dm,
                                                                  SumatraUIAutomationDocumentProvider* root)
@@ -27,11 +30,55 @@ SumatraUIAutomationPageProvider::SumatraUIAutomationPageProvider(int pageNum, HW
       root(root),
       sibling_prev(nullptr),
       sibling_next(nullptr),
+      struct_first(nullptr),
+      struct_last(nullptr),
       released(false) {
     // root->AddRef(); Don't add refs to our parent & owner.
+    BuildStructureElements();
 }
 
-SumatraUIAutomationPageProvider::~SumatraUIAutomationPageProvider() = default;
+SumatraUIAutomationPageProvider::~SumatraUIAutomationPageProvider() {
+    SumatraUIAutomationStructureProvider* it = struct_first;
+    while (it) {
+        SumatraUIAutomationStructureProvider* next = it->GetNext();
+        it->Release();
+        it = next;
+    }
+    struct_first = nullptr;
+    struct_last = nullptr;
+}
+
+// A tagged PDF's structure elements become children of their page, so that a
+// screen reader's heading navigation (NVDA's H, Narrator's heading list) finds
+// the document's headings instead of nothing. An untagged page gets none, and
+// its provider tree is exactly as before.
+void SumatraUIAutomationPageProvider::BuildStructureElements() {
+    struct_first = nullptr;
+    struct_last = nullptr;
+    EngineBase* engine = dm ? dm->GetEngine() : nullptr;
+    if (!engine) {
+        return;
+    }
+    Vec<PageTextSpan> spans;
+    EngineMupdfGetPageStructure(engine, pageNum, &spans);
+    SumatraUIAutomationStructureProvider* prev = nullptr;
+    for (int i = 0; i < len(spans); i++) {
+        auto* current = new SumatraUIAutomationStructureProvider(pageNum, i, canvasHwnd, dm, root, this);
+        current->sibling_prev = prev;
+        if (prev) {
+            prev->sibling_next = current;
+        }
+        prev = current;
+        if (i == 0) {
+            struct_first = current;
+        }
+    }
+    struct_last = prev;
+    for (PageTextSpan& span : spans) {
+        str::Free(span.type);
+    }
+    spans.Reset();
+}
 
 int SumatraUIAutomationPageProvider::GetPageNum() const {
     return pageNum;
@@ -43,6 +90,14 @@ SumatraUIAutomationPageProvider* SumatraUIAutomationPageProvider::GetNextPage() 
 
 SumatraUIAutomationPageProvider* SumatraUIAutomationPageProvider::GetPreviousPage() {
     return sibling_prev;
+}
+
+SumatraUIAutomationStructureProvider* SumatraUIAutomationPageProvider::GetNextStruct() {
+    return struct_first;
+}
+
+SumatraUIAutomationStructureProvider* SumatraUIAutomationPageProvider::GetPreviousStruct() {
+    return struct_last;
 }
 
 HRESULT STDMETHODCALLTYPE SumatraUIAutomationPageProvider::QueryInterface(REFIID riid, void** ppv) {
@@ -82,8 +137,10 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationPageProvider::Navigate(enum Navigat
         *pRetVal = sibling_prev;
     } else if (direction == NavigateDirection_NextSibling) {
         *pRetVal = sibling_next;
-    } else if (direction == NavigateDirection_FirstChild || direction == NavigateDirection_LastChild) {
-        // do nothing
+    } else if (direction == NavigateDirection_FirstChild) {
+        *pRetVal = struct_first;
+    } else if (direction == NavigateDirection_LastChild) {
+        *pRetVal = struct_last;
     } else if (direction == NavigateDirection_Parent) {
         *pRetVal = root;
     } else {

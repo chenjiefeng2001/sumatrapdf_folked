@@ -1,6 +1,10 @@
 /* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
+// Canvas.h is included before Annotation.h, so forward-declare what it needs.
+enum class AnnotationType;
+struct Gfx;
+
 void UpdateDeltaPerLine();
 
 LRESULT CALLBACK WndProcCanvas(HWND, UINT, WPARAM, LPARAM);
@@ -18,6 +22,16 @@ void ToggleLaserPointer(MainWindow*);
 void DeleteLaserPointerCursor();
 void DrawCanvasKeyboardFocusIfNeeded(MainWindow* win, HDC hdc);
 void InvalidateCanvasKeyboardFocus(MainWindow* win);
+
+// Drawing a Polygon/PolyLine/Ink: the command arms the mode, the user drags on
+// the page, and the annotation is created from the collected points on mouse-up.
+bool IsDrawingAnnotation(MainWindow*);
+void StartDrawingAnnotation(MainWindow*, AnnotationType type);
+bool CancelDrawingAnnotation(MainWindow*);
+bool HandleDrawingAnnotMouseDown(MainWindow*, int x, int y);
+bool HandleDrawingAnnotMouseMove(MainWindow*, int x, int y);
+bool HandleDrawingAnnotMouseUp(MainWindow*, int x, int y);
+void PaintDrawingAnnotation(MainWindow*, Gfx*);
 
 extern Kind kNotifAnnotation;
 

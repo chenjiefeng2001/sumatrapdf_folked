@@ -1354,6 +1354,214 @@ static void DrawMovePattern(MainWindow* win, Point pt, Size size) {
     ReleaseDC(hwnd, hdc);
 }
 
+// --- drawing point-based annotations (Polygon, PolyLine, Ink) -----------------
+// These three can't be created by a single click, because their shape is the
+// list of points the user drags out. The command (CmdCreateAnnotPolygon etc.)
+// only arms the mode; the annotation is created on mouse-up from the collected
+// points, so there's never a half-drawn annotation in the file.
+
+// defined further down, next to the other annotation-mutation helpers
+static void OnAnnotationModified(MainWindow* win, Annotation* annot, RectF* knownBounds);
+
+static Kind kNotifAnnotDraw = "notifAnnotDraw";
+
+// two points of a drawn shape closer than this (in page units) count as the
+// same point, so a slow drag doesn't produce thousands of duplicate vertices
+static constexpr float kMinDrawPointDist = 1.5f;
+
+static void ClearDrawingAnnotNotif(MainWindow* win) {
+    if (win && win->hwndCanvas) {
+        RemoveNotificationsForGroup(win->hwndCanvas, kNotifAnnotDraw);
+    }
+}
+
+bool IsDrawingAnnotation(MainWindow* win) {
+    return win && win->drawingAnnotType >= 0 && IsPointBasedAnnotType((AnnotationType)win->drawingAnnotType);
+}
+
+// Arm the draw mode. Anything already in progress is dropped, and a
+// notification tells the user what to do, since nothing else on screen changes.
+void StartDrawingAnnotation(MainWindow* win, AnnotationType type) {
+    if (!win || !IsPointBasedAnnotType(type)) {
+        return;
+    }
+    DisplayModel* dm = win->AsFixed();
+    if (!dm) {
+        return;
+    }
+    EngineBase* engine = dm->GetEngine();
+    if (!engine || !EngineSupportsAnnotations(engine)) {
+        return;
+    }
+    win->drawingAnnotType = (int)type;
+    win->drawingAnnotActive = true;
+    win->drawingAnnotDragging = false;
+    win->drawingAnnotPageNo = -1;
+    win->drawingAnnotPoints.Reset();
+
+    TempStr name = AnnotationReadableNameTemp(type);
+    NotificationCreateArgs args;
+    args.hwndParent = win->hwndCanvas;
+    args.msg = fmt(_TRA("Drag on the page to draw the %s. Esc to cancel.").s, name);
+    args.timeoutMs = kNotifNoTimeout;
+    args.groupId = kNotifAnnotDraw;
+    args.corner = NotifCorner::BottomBar;
+    args.warning = true;
+    args.tab = win->CurrentTab();
+    ShowNotification(args);
+    HwndSetFocus(win->hwndFrame);
+}
+
+// Leaves draw mode. Returns true if it was active.
+bool CancelDrawingAnnotation(MainWindow* win) {
+    if (!IsDrawingAnnotation(win)) {
+        return false;
+    }
+    ClearDrawingAnnotNotif(win);
+    win->drawingAnnotType = -1;
+    win->drawingAnnotActive = false;
+    win->drawingAnnotDragging = false;
+    win->drawingAnnotPageNo = -1;
+    win->drawingAnnotPoints.Reset();
+    win->mouseAction = MouseAction::None;
+    if (win->hwndCanvas) {
+        ReleaseCapture();
+        SendMessageW(win->hwndCanvas, WM_SETCURSOR, 0, 0);
+    }
+    return true;
+}
+
+// Adds a point to the in-progress shape, in page space (what the PDF wants).
+// Drops points closer than a couple of pixels so a slow drag doesn't produce
+// thousands of nearly-identical vertices.
+static void AddDrawingPoint(MainWindow* win, Point screenPt) {
+    int n = len(win->drawingAnnotPoints);
+    if (n > 0) {
+        PointF last = win->drawingAnnotPoints[n - 1];
+        PointF now = win->AsFixed()->CvtFromScreen(screenPt, win->drawingAnnotPageNo);
+        float dx = now.x - last.x;
+        float dy = now.y - last.y;
+        if (dx * dx + dy * dy < kMinDrawPointDist * kMinDrawPointDist) {
+            return;
+        }
+    }
+    PointF onPage = win->AsFixed()->CvtFromScreen(screenPt, win->drawingAnnotPageNo);
+    win->drawingAnnotPoints.Append(onPage);
+}
+
+// The stroke becomes one annotation and one undo step: EngineMupdfCreateAnnotation
+// wraps the whole write in a PdfScopedOperation.
+static void FinishDrawingAnnotation(MainWindow* win) {
+    DisplayModel* dm = win->AsFixed();
+    int pageNo = win->drawingAnnotPageNo;
+    AnnotationType type = (AnnotationType)win->drawingAnnotType;
+    Vec<PointF> points;
+    points.Append(win->drawingAnnotPoints.LendData(), len(win->drawingAnnotPoints));
+    CancelDrawingAnnotation(win);
+    if (!dm || pageNo < 0 || len(points) < 2) {
+        // a click without a drag leaves nothing to draw; stay out of the file
+        return;
+    }
+    EngineBase* engine = dm->GetEngine();
+    if (!engine) {
+        return;
+    }
+    PointF mid = points[len(points) / 2];
+    // no SetAnnotCreateArgs() call: for these three types it only records that
+    // there's no separate prefs color, and MuPDF's red default is what we want
+    AnnotCreateArgs args{type};
+    args.points = points;
+    Annotation* annot = EngineMupdfCreateAnnotation(engine, pageNo, mid, &args);
+    if (!annot) {
+        return;
+    }
+    WindowTab* tab = win->CurrentTab();
+    UpdateAnnotationsList(tab ? tab->editAnnotsWindow : nullptr);
+    SetSelectedAnnotation(tab, annot, true);
+    // the create path in FrameOnCommand relies on SetSelectedAnnotation to
+    // repaint; do the render-cache invalidation explicitly like the other
+    // annotation mutations do
+    OnAnnotationModified(win, annot, nullptr);
+}
+
+// Consume the mouse-down that starts a stroke, so it doesn't select text,
+// toggle a form field, or start dragging an annotation underneath.
+bool HandleDrawingAnnotMouseDown(MainWindow* win, int x, int y) {
+    if (!IsDrawingAnnotation(win) || !win->drawingAnnotActive) {
+        return false;
+    }
+    DisplayModel* dm = win->AsFixed();
+    if (!dm) {
+        return true;
+    }
+    Point pt{x, y};
+    int pageNo = dm->GetPageNoByPoint(pt);
+    if (pageNo < 1) {
+        // outside any page: let the click through so the user can still
+        // scroll/select; the mode stays armed
+        return false;
+    }
+    ClearDrawingAnnotNotif(win);
+    win->drawingAnnotPageNo = pageNo;
+    win->drawingAnnotDragging = true;
+    win->drawingAnnotPoints.Reset();
+    win->mouseAction = MouseAction::None;
+    SetCapture(win->hwndCanvas);
+    SetCursorCached(IDC_CROSS);
+    AddDrawingPoint(win, pt);
+    return true;
+}
+
+// Returns true when the move was consumed by the draw mode.
+bool HandleDrawingAnnotMouseMove(MainWindow* win, int x, int y) {
+    if (!IsDrawingAnnotation(win) || !win->drawingAnnotDragging) {
+        return false;
+    }
+    AddDrawingPoint(win, Point{x, y});
+    ScheduleRepaint(win, 0);
+    return true;
+}
+
+// Returns true when the button-up finished a stroke (and consumed the click).
+bool HandleDrawingAnnotMouseUp(MainWindow* win, int x, int y) {
+    if (!IsDrawingAnnotation(win) || !win->drawingAnnotDragging) {
+        return false;
+    }
+    AddDrawingPoint(win, Point{x, y});
+    ReleaseCapture();
+    FinishDrawingAnnotation(win);
+    return true;
+}
+
+// Paints the stroke in progress. Drawn over the page like the selection
+// rectangle is, so the user sees what they're about to get.
+void PaintDrawingAnnotation(MainWindow* win, Gfx* gfx) {
+    if (!IsDrawingAnnotation(win) || !win->drawingAnnotDragging) {
+        return;
+    }
+    DisplayModel* dm = win->AsFixed();
+    if (!dm || win->drawingAnnotPageNo < 1) {
+        return;
+    }
+    int n = len(win->drawingAnnotPoints);
+    if (n < 2) {
+        return;
+    }
+    // red, matching the default MuPDF gives these annots on create
+    Color col = MkRgb(255, 0, 0);
+    for (int i = 1; i < n; i++) {
+        Point a = dm->CvtToScreen(win->drawingAnnotPageNo, win->drawingAnnotPoints[i - 1]);
+        Point b = dm->CvtToScreen(win->drawingAnnotPageNo, win->drawingAnnotPoints[i]);
+        gfx->DrawLineAA(a, b, col, 1.0f, 255);
+    }
+    if (win->drawingAnnotType == (int)AnnotationType::Polygon) {
+        // close the loop so the user sees what will be filled
+        Point first = dm->CvtToScreen(win->drawingAnnotPageNo, win->drawingAnnotPoints[0]);
+        Point last = dm->CvtToScreen(win->drawingAnnotPageNo, win->drawingAnnotPoints[n - 1]);
+        gfx->DrawLineAA(last, first, col, 1.0f, 255);
+    }
+}
+
 static void StartMouseDrag(MainWindow* win, int x, int y, bool right = false) {
     SetCapture(win->hwndCanvas);
     win->mouseAction = MouseAction::Dragging;
@@ -1795,6 +2003,12 @@ static void OnMouseMove(MainWindow* win, int x, int y, WPARAM /*key*/) {
         return;
     }
 
+    // a stroke in progress owns the mouse: collect points and repaint, so the
+    // hover handling below doesn't also fire
+    if (HandleDrawingAnnotMouseMove(win, x, y)) {
+        return;
+    }
+
     if (win->dragStartPending) {
         if (!IsDragDistance(x, win->dragStart.x, y, win->dragStart.y)) {
             return;
@@ -2100,6 +2314,11 @@ static void OnMouseLeftButtonDown(MainWindow* win, int x, int y, WPARAM key) {
         return;
     }
 
+    // drawing a Polygon/PolyLine/Ink: this press starts the stroke
+    if (HandleDrawingAnnotMouseDown(win, x, y)) {
+        return;
+    }
+
     // remember how this sequence started: WM_CONTEXTMENU, which a long press
     // turns into, doesn't say whether a finger or a mouse produced it
     win->lastInputWasTouch = IsMouseMessageFromTouch();
@@ -2289,6 +2508,12 @@ static void OnMouseLeftButtonUp(MainWindow* win, int x, int y, WPARAM key) {
         return;
     }
 
+    // the button-up that finishes a drawn Polygon/PolyLine/Ink. Before the
+    // mouseAction check below, which bails out for a mode we're not in.
+    if (HandleDrawingAnnotMouseUp(win, x, y)) {
+        return;
+    }
+
     if (win->lastInputWasTouch) {
         DWORD heldMs = (DWORD)GetMessageTime() - win->touchDownTime;
         logf("touch: up at %d,%d after %dms, dragging=%s, mouseAction=%d\n", x, y, (int)heldMs,
@@ -2410,7 +2635,24 @@ static void OnMouseLeftButtonUp(MainWindow* win, int x, int y, WPARAM key) {
     // resize handles stayed up and the only ways out of "editing its size"
     // were Esc or a right click (issue #5933)
     if (tab && tab->selectedAnnotation) {
+        {
+            FILE* _f = fopen("C:\\\\Users\\\\14977\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\d.txt", "a");
+            if (_f) {
+                fprintf(_f, "deselect clickedAnnot=%p selected=%p didDrag=%d\n", (void*)clickedAnnot,
+                        (void*)tab->selectedAnnotation, (int)didDragMouse);
+                fclose(_f);
+            }
+        }
         SetSelectedAnnotation(tab, nullptr);
+    } else {
+        {
+            FILE* _f = fopen("C:\\\\Users\\\\14977\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\d.txt", "a");
+            if (_f) {
+                fprintf(_f, "NODeselect clickedAnnot=%p selected=%p didDrag=%d\n", (void*)clickedAnnot,
+                        (void*)(tab ? tab->selectedAnnotation : nullptr), (int)didDragMouse);
+                fclose(_f);
+            }
+        }
     }
 
     if (link && link->GetRect().Contains(ptPage)) {
@@ -3410,6 +3652,7 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
     if (win->showSelection) {
         PaintSelection(win, &gfx);
     }
+    PaintDrawingAnnotation(win, &gfx);
     // keep the floating selection toolbar aligned with the selection while
     // scrolling/zooming; hides itself when the selection is gone or off-screen
     UpdateSelectionToolbarPosition(win);
@@ -3633,6 +3876,12 @@ static LRESULT OnSetCursor(MainWindow* win, HWND hwnd) {
     }
 
     if (IsPlacingSignature(win)) {
+        SetCursorCached(IDC_CROSS);
+        win->DeleteToolTip();
+        return TRUE;
+    }
+
+    if (IsDrawingAnnotation(win)) {
         SetCursorCached(IDC_CROSS);
         win->DeleteToolTip();
         return TRUE;
@@ -5287,7 +5536,7 @@ static void OnDropFiles(MainWindow* win, HDROP hDrop, bool dragFinish) {
     if (isShift && !win) {
         win = CreateAndShowMainWindow(nullptr);
     }
-    StartLoadDocuments(files, win);
+    StartLoadDocuments(files, win, true);
 }
 
 // returns true if url looks like it could be an image URL

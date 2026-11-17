@@ -2,6 +2,7 @@
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "base/Base.h"
+#include "base/File.h"
 #include "base/Pixmap.h"
 #include "base/ScopedWin.h"
 
@@ -16,6 +17,7 @@ extern "C" {
 #include "DocController.h"
 #include "EngineBase.h"
 #include "EngineMupdf.h"
+#include "PdfJournal.h"
 #include "GlobalPrefs.h"
 #include "Commands.h"
 #include "Translations.h"
@@ -202,6 +204,8 @@ void SetRect(Annotation* annot, RectF r) {
         auto* ctx = e->Ctx();
         ScopedRecursiveMutex cs(&e->docLock);
         fz_rect rc = ToFzRect(r);
+        // one undo step for everything this function changes
+        PdfScopedOperation opScope(ctx, e, "SetRect");
         fz_try(ctx) {
             if (annot->type == AnnotationType::Line) {
                 // line annotation doesn't have a rect but a line position
@@ -244,6 +248,36 @@ static Str MupdfCStrTemp(const char* s) {
         return {};
     }
     return str::DupTemp(Str(s));
+}
+
+// How many points a Polygon/PolyLine/Ink has, read back out of the PDF dict
+// (/Vertices or /InkList). 0 for any other type. Used to check that a drawn
+// shape actually landed in the file.
+int AnnotPointCount(Annotation* annot) {
+    if (!AnnotationIsLive(annot)) {
+        return 0;
+    }
+    EngineMupdf* e = annot->engine;
+    auto* a = annot->pdfannot;
+    auto* ctx = e->Ctx();
+    ScopedRecursiveMutex cs(&e->docLock);
+    int n = 0;
+    fz_try(ctx) {
+        if (Type(annot) == AnnotationType::Ink) {
+            if (pdf_annot_has_ink_list(ctx, a)) {
+                int nStrokes = pdf_annot_ink_list_count(ctx, a);
+                for (int i = 0; i < nStrokes; i++) {
+                    n += pdf_annot_ink_list_stroke_count(ctx, a, i);
+                }
+            }
+        } else {
+            n = pdf_annot_vertex_count(ctx, a);
+        }
+    }
+    fz_catch(ctx) {
+        n = 0;
+    }
+    return n;
 }
 
 // EditAnnotations.cpp
@@ -313,6 +347,8 @@ bool SetQuadding(Annotation* annot, int newQuadding) {
         if (!didChange) {
             return false;
         }
+        // one undo step for everything this function changes
+        PdfScopedOperation opScope(ctx, e, "SetQuadding");
         fz_try(ctx) {
             pdf_set_annot_quadding(ctx, a, newQuadding);
             pdf_update_annot(ctx, a);
@@ -352,6 +388,8 @@ void SetQuadPointsAsRect(Annotation* annot, const Vec<RectF>& rects) {
             fz_quad q = fz_quad_from_rect(r);
             quads[i] = q;
         }
+        // one undo step for everything this function changes
+        PdfScopedOperation opScope(ctx, e, "SetQuadPointsAsRect");
         fz_try(ctx) {
             pdf_clear_annot_quad_points(ctx, a);
             pdf_set_annot_quad_points(ctx, a, n, quads);
@@ -439,6 +477,8 @@ bool ToggleFormButton(Annotation* annot) {
         // rethrows errors) on _ctx, so the fz_try must be on that context.
         auto* ctx = e->BaseCtx();
         ScopedRecursiveMutex cs(&e->docLock);
+        // one undo step for everything this function changes
+        PdfScopedOperation opScope(ctx, e, "ToggleFormButton");
         fz_try(ctx) {
             int wt = pdf_widget_type(ctx, a);
             int flags = pdf_annot_field_flags(ctx, a);
@@ -578,6 +618,8 @@ bool SetWidgetTextValue(Annotation* annot, Str value) {
         // errors) on _ctx -- the fz_try must be on that same context.
         auto* ctx = e->BaseCtx();
         ScopedRecursiveMutex cs(&e->docLock);
+        // one undo step for everything this function changes
+        PdfScopedOperation opScope(ctx, e, "SetWidgetTextValue");
         fz_try(ctx) {
             ok = pdf_set_text_field_value(ctx, a, len(valueZ) == 0 ? "" : valueZ.s) != 0;
             pdf_update_annot(ctx, a);
@@ -634,6 +676,8 @@ bool SetWidgetChoiceValue(Annotation* annot, Str value) {
         // errors) on _ctx -- the fz_try must be on that same context.
         auto* ctx = e->BaseCtx();
         ScopedRecursiveMutex cs(&e->docLock);
+        // one undo step for everything this function changes
+        PdfScopedOperation opScope(ctx, e, "SetWidgetChoiceValue");
         fz_try(ctx) {
             pdf_set_choice_field_value(ctx, a, len(valueZ) == 0 ? "" : valueZ.s);
             pdf_update_annot(ctx, a);
@@ -712,6 +756,8 @@ bool SetContents(Annotation* annot, Str sv) {
     {
         auto* ctx = e->Ctx();
         ScopedRecursiveMutex cs(&e->docLock);
+        // one undo step for everything this function changes
+        PdfScopedOperation opScope(ctx, e, "SetContents");
         fz_try(ctx) {
             pdf_set_annot_contents(ctx, a, len(valueZ) == 0 ? "" : valueZ.s);
             pdf_update_annot(ctx, a);
@@ -756,6 +802,8 @@ void DeleteAnnotation(Annotation* annot) {
         auto* ctx = e->Ctx();
         ScopedRecursiveMutex cs(&e->docLock);
         pdf_page* page = nullptr;
+        // one undo step for everything this function changes
+        PdfScopedOperation opScope(ctx, e, "DeleteAnnotation");
         fz_try(ctx) {
             page = pdf_annot_page(ctx, a);
             pdf_delete_annot(ctx, page, a);
@@ -872,6 +920,8 @@ void SetIconName(Annotation* annot, Str iconName) {
     {
         auto* ctx = e->Ctx();
         ScopedRecursiveMutex cs(&e->docLock);
+        // one undo step for everything this function changes
+        PdfScopedOperation opScope(ctx, e, "SetIconName");
         fz_try(ctx) {
             pdf_set_annot_icon_name(ctx, a, len(nameZ) == 0 ? "" : nameZ.s);
             pdf_update_annot(ctx, a);
@@ -892,6 +942,8 @@ void SetLineEndStyles(Annotation* annot, int end) {
     {
         auto* ctx = e->Ctx();
         ScopedRecursiveMutex cs(&e->docLock);
+        // one undo step for everything this function changes
+        PdfScopedOperation opScope(ctx, e, "SetLineEndStyles");
         fz_try(ctx) {
             pdf_set_annot_line_end_style(ctx, a, (pdf_line_ending)end);
             pdf_update_annot(ctx, a);
@@ -912,6 +964,8 @@ void SetLineStartStyles(Annotation* annot, int start) {
     {
         auto* ctx = e->Ctx();
         ScopedRecursiveMutex cs(&e->docLock);
+        // one undo step for everything this function changes
+        PdfScopedOperation opScope(ctx, e, "SetLineStartStyles");
         fz_try(ctx) {
             pdf_set_annot_line_start_style(ctx, a, (pdf_line_ending)start);
             pdf_update_annot(ctx, a);
@@ -1035,6 +1089,8 @@ bool SetColor(Annotation* annot, PdfColor c) {
         if (!didChange) {
             return false;
         }
+        // one undo step for everything this function changes
+        PdfScopedOperation opScope(ctx, e, "SetColor");
         fz_try(ctx) {
             if (c == 0) {
                 pdf_set_annot_color(ctx, a, 0, newColor);
@@ -1113,6 +1169,8 @@ bool SetInteriorColor(Annotation* annot, PdfColor c) {
         if (!didChange) {
             return false;
         }
+        // one undo step for everything this function changes
+        PdfScopedOperation opScope(ctx, e, "SetInteriorColor");
         fz_try(ctx) {
             pdf_set_annot_interior_color(ctx, a, newN, newColor);
             pdf_update_annot(ctx, a);
@@ -1160,6 +1218,8 @@ void SetDefaultAppearanceTextFont(Annotation* annot, Str sv) {
         float sizeF{0.0};
         int n = 0;
         float textColor[4]{};
+        // one undo step for everything this function changes
+        PdfScopedOperation opScope(ctx, e, "SetDefaultAppearanceTextFont");
         fz_try(ctx) {
             pdf_annot_default_appearance(ctx, a, &fontNameZ, &sizeF, &n, textColor);
             pdf_set_annot_default_appearance(ctx, a, len(fontZ) == 0 ? "" : fontZ.s, sizeF, n, textColor);
@@ -1206,6 +1266,8 @@ void SetDefaultAppearanceTextSize(Annotation* annot, int textSize) {
         float sizeF{0.0};
         int n = 0;
         float textColor[4]{};
+        // one undo step for everything this function changes
+        PdfScopedOperation opScope(ctx, e, "SetDefaultAppearanceTextSize");
         fz_try(ctx) {
             pdf_annot_default_appearance(ctx, a, &fontNameZ, &sizeF, &n, textColor);
             pdf_set_annot_default_appearance(ctx, a, fontNameZ, (float)textSize, n, textColor);
@@ -1253,6 +1315,8 @@ void SetDefaultAppearanceTextColor(Annotation* annot, PdfColor col) {
         float sizeF{0.0};
         int n = 0;
         float textColor[4]{}; // must be at least 4
+        // one undo step for everything this function changes
+        PdfScopedOperation opScope(ctx, e, "SetDefaultAppearanceTextColor");
         fz_try(ctx) {
             pdf_annot_default_appearance(ctx, a, &fontNameZ, &sizeF, &n, textColor);
             PdfColorToFloat(col, textColor);
@@ -1327,6 +1391,8 @@ void SetBorderWidth(Annotation* annot, int newWidth) {
     {
         auto* ctx = e->Ctx();
         ScopedRecursiveMutex cs(&e->docLock);
+        // one undo step for everything this function changes
+        PdfScopedOperation opScope(ctx, e, "SetBorderWidth");
         fz_try(ctx) {
             pdf_set_annot_border_width(ctx, a, (float)newWidth);
             pdf_update_annot(ctx, a);
@@ -1372,6 +1438,8 @@ void SetOpacity(Annotation* annot, int newOpacity) {
         newOpacity = setMinMax(newOpacity, 0, 255);
         float fopacity = (float)newOpacity / 255.f;
 
+        // one undo step for everything this function changes
+        PdfScopedOperation opScope(ctx, e, "SetOpacity");
         fz_try(ctx) {
             pdf_set_annot_opacity(ctx, a, fopacity);
             pdf_update_annot(ctx, a);
@@ -1460,6 +1528,12 @@ bool AnnotationCanBeResized(AnnotationType tp) {
     return AnnotationCanBeMoved(tp);
 }
 
+// Polygon, PolyLine and Ink are drawn from a list of points rather than a rect
+// the user drags out, so they're created from a mouse stroke instead.
+bool IsPointBasedAnnotType(AnnotationType tp) {
+    return tp == AnnotationType::Polygon || tp == AnnotationType::PolyLine || tp == AnnotationType::Ink;
+}
+
 bool AnnotationSupportsInteriorColor(AnnotationType tp) {
     return IsAnnotationInList(tp, supportsInteriorColor, dimofi(supportsInteriorColor));
 }
@@ -1470,6 +1544,31 @@ bool AnnotationSupportsBorder(AnnotationType tp) {
 
 bool AnnotationSupportsColor(AnnotationType tp) {
     return IsAnnotationInList(tp, supportsColor, dimofi(supportsColor));
+}
+
+// mupdf renders Polygon/PolyLine/Ink from /Rect and never derives it from
+// /Vertices or /InkList, so without a /Rect covering the drawn points the
+// annotation shows up as nothing (and pdf_bound_annot, which the hit index and
+// the resize handles use, has nothing to work with either).
+//
+// pdf_set_annot_rect() refuses these subtypes - mupdf's rect_subtypes list
+// excludes Polygon/PolyLine/Ink, since Acrobat lets you resize them by their
+// vertices rather than their rect - so write the key directly. The page CTM is
+// applied by hand because the setter isn't available to do it.
+static void SetPointBasedAnnotRect(fz_context* ctx, pdf_page* page, pdf_annot* annot, const Vec<PointF>& points) {
+    fz_matrix page_ctm, inv_page_ctm;
+    pdf_page_transform(ctx, page, nullptr, &page_ctm);
+    inv_page_ctm = fz_invert_matrix(page_ctm);
+    float minX = points[0].x, minY = points[0].y;
+    float maxX = minX, maxY = minY;
+    for (PointF p : points) {
+        minX = fz_min(minX, p.x);
+        minY = fz_min(minY, p.y);
+        maxX = fz_max(maxX, p.x);
+        maxY = fz_max(maxY, p.y);
+    }
+    fz_rect rect = fz_transform_rect(fz_make_rect(minX, minY, maxX, maxY), inv_page_ctm);
+    pdf_dict_put_rect(ctx, pdf_annot_obj(ctx, annot), PDF_NAME(Rect), rect);
 }
 
 Annotation* EngineMupdfCreateAnnotation(EngineBase* engine, int pageNo, PointF pos, AnnotCreateArgs* args) {
@@ -1485,6 +1584,11 @@ Annotation* EngineMupdfCreateAnnotation(EngineBase* engine, int pageNo, PointF p
     pdf_annot* annot = nullptr;
     pdf_page* page = nullptr;
     auto typ = args->annotType;
+    if (IsPointBasedAnnotType(typ) && len(args->points) < 2) {
+        // nothing was drawn (a bare click), and a shape with < 2 points has no
+        // appearance - refuse rather than write an empty annot into the file
+        return nullptr;
+    }
     auto col = args->col;
     auto bgCol = args->bgCol;
     auto interiorCol = args->interiorCol;
@@ -1496,6 +1600,8 @@ Annotation* EngineMupdfCreateAnnotation(EngineBase* engine, int pageNo, PointF p
         // pdf_drop_annot (that would free the annot while still linked on the
         // page → UAF on the next render; crash reports show stamp create then
         // ACCESS_VIOLATION with float 30.0f as a pointer — stamp "DRAFT" uses h=30).
+        // one undo step for everything this function changes
+        PdfScopedOperation opScope(ctx, epdf, "EngineMupdfCreateAnnotation");
         fz_try(ctx) {
             page = pdf_page_from_fz_page(ctx, pageInfo->page);
             enum pdf_annot_type atyp = (enum pdf_annot_type)typ;
@@ -1516,14 +1622,35 @@ Annotation* EngineMupdfCreateAnnotation(EngineBase* engine, int pageNo, PointF p
             }
 
             switch (typ) {
-                case AnnotationType::Link:
                 case AnnotationType::Polygon:
-                case AnnotationType::Redact:
-                case AnnotationType::Ink:
+                case AnnotationType::PolyLine: {
+                    // points come from the mouse drag (see drawingAnnotPoints in
+                    // MainWindow.h). PolyLine is open, Polygon is closed by the
+                    // appearance stream, so the same vertex list serves both.
+                    int n = len(args->points);
+                    Vec<fz_point> pts;
+                    for (PointF p : args->points) {
+                        fz_point fp{p.x, p.y};
+                        pts.Append(fp);
+                    }
+                    pdf_set_annot_vertices(ctx, annot, n, pts.LendData());
+                    SetPointBasedAnnotRect(ctx, page, annot, args->points);
+                } break;
+                case AnnotationType::Ink: {
+                    // Ink is a list of strokes; we draw one continuous stroke
+                    int n = len(args->points);
+                    Vec<fz_point> pts;
+                    for (PointF p : args->points) {
+                        fz_point fp{p.x, p.y};
+                        pts.Append(fp);
+                    }
+                    int counts[1] = {n};
+                    pdf_set_annot_ink_list(ctx, annot, 1, counts, pts.LendData());
+                    SetPointBasedAnnotRect(ctx, page, annot, args->points);
+                } break;
+                case AnnotationType::Link:
                 case AnnotationType::Popup:
-                case AnnotationType::PolyLine:
                 case AnnotationType::Unknown:
-                case AnnotationType::FileAttachment:
                 case AnnotationType::Sound:
                 case AnnotationType::Movie:
                 case AnnotationType::RichMedia:
@@ -1535,6 +1662,7 @@ Annotation* EngineMupdfCreateAnnotation(EngineBase* engine, int pageNo, PointF p
                 case AnnotationType::ThreeD:
                 case AnnotationType::Projection:
                     // do nothing
+                    ReportIf(CanCreateAnnotationOfType(typ));
                     break;
 
                 case AnnotationType::Highlight:
@@ -1550,7 +1678,11 @@ Annotation* EngineMupdfCreateAnnotation(EngineBase* engine, int pageNo, PointF p
                 case AnnotationType::FreeText:
                 case AnnotationType::Stamp:
                 case AnnotationType::Square:
-                case AnnotationType::Circle: {
+                case AnnotationType::Circle:
+                // a redaction mark is drawn by the user as a quad over what to
+                // remove; make it start with a sensible rect at the click point
+                // (the caller sets /QuadPoints from the selection)
+                case AnnotationType::Redact: {
                     fz_rect trect = pdf_annot_rect(ctx, annot);
                     float dx = trect.x1 - trect.x0;
                     trect.x0 = pos.x;
@@ -1589,6 +1721,9 @@ Annotation* EngineMupdfCreateAnnotation(EngineBase* engine, int pageNo, PointF p
                 fz_var(img);
                 fz_var(pix);
                 fz_var(rgbPix);
+                // (no operation of its own: this is inside the one
+                // EngineMupdfCreateAnnotation opened, so embedding the stamp
+                // image and creating the annotation stay one undo step)
                 fz_try(ctx) {
                     bool isRgb = stamp->format == PixmapFormat::RGBA8;
                     int alpha = stamp->format == PixmapFormat::BGR8 ? 0 : 1;
@@ -1617,6 +1752,58 @@ Annotation* EngineMupdfCreateAnnotation(EngineBase* engine, int pageNo, PointF p
                     fz_drop_image(ctx, img);
                     fz_drop_pixmap(ctx, rgbPix);
                     fz_drop_pixmap(ctx, pix);
+                }
+                fz_catch(ctx) {
+                    fz_rethrow(ctx);
+                }
+            }
+            if (typ == AnnotationType::FileAttachment && args->filePath) {
+                // Attach a file to the document: embed its bytes and point the
+                // annotation's /FS at the resulting file specification. Acrobat
+                // uses a ~20pt paperclip square anchored at the click point.
+                Str path = args->filePath;
+                if (!file::Exists(path)) {
+                    fz_throw(ctx, FZ_ERROR_ARGUMENT, "no such file to attach");
+                }
+                Str data = file::ReadFile(path);
+                fz_buffer* buf =
+                    data ? fz_new_buffer_from_copied_data(ctx, (const unsigned char*)data.s, (size_t)data.len)
+                         : nullptr;
+                if (!buf) {
+                    fz_throw(ctx, FZ_ERROR_GENERIC, "could not read file to attach");
+                }
+                pdf_obj* fs = nullptr;
+                fz_var(fs);
+                fz_try(ctx) {
+                    TempStr name = path::GetBaseNameTemp(path);
+                    TempStr ext = path::GetExtTemp(path);
+                    TempStr mime = MimeTypeFromExtTemp(ext);
+                    // the date the file was attached; mupdf writes it as the
+                    // embedded stream's /CreationDate and /ModDate
+                    int64_t now = (int64_t)time(nullptr);
+                    fs = pdf_add_embedded_file(ctx, epdf->pdfdoc, CStrTemp(name), CStrTemp(mime), buf, now, now, 1);
+                    if (!fs) {
+                        fz_throw(ctx, FZ_ERROR_GENERIC, "could not embed file");
+                    }
+                    pdf_dict_put(ctx, pdf_annot_obj(ctx, annot), PDF_NAME(FS), fs);
+                    // PaperClip is the icon Acrobat uses; PushPin is mupdf's default
+                    pdf_set_annot_icon_name(ctx, annot, "PaperClip");
+                    const float size = 20.0f;
+                    fz_rect r = {pos.x, pos.y, pos.x + size, pos.y + size};
+                    pdf_set_annot_rect(ctx, annot, r);
+                    // read the bytes back out of /FS rather than off `data`, so
+                    // this reports what a reader of the saved file would get -
+                    // and proves the embed really is in the document object
+                    fz_buffer* back = pdf_load_embedded_file_contents(ctx, fs);
+                    if (back) {
+                        args->attachedFileSize = (int)fz_buffer_storage(ctx, back, nullptr);
+                        args->attachedFileContents = str::Dup(Str((char*)back->data, (int)back->len));
+                        fz_drop_buffer(ctx, back);
+                    }
+                }
+                fz_always(ctx) {
+                    fz_drop_buffer(ctx, buf);
+                    pdf_drop_obj(ctx, fs);
                 }
                 fz_catch(ctx) {
                     fz_rethrow(ctx);
@@ -1702,6 +1889,68 @@ Annotation* EngineMupdfCreateAnnotation(EngineBase* engine, int pageNo, PointF p
     }
     pdf_drop_annot(ctx, annot);
     return res;
+}
+
+// Which annotation types EngineMupdfCreateAnnotation() knows how to build.
+// For any other type it only creates an empty annot, so the corresponding
+// command would appear to work and produce nothing usable - we hide those
+// commands instead. Keep in sync with the switch in
+// EngineMupdfCreateAnnotation(), which asserts on the complement.
+bool CanCreateAnnotationOfType(AnnotationType type) {
+    switch (type) {
+        case AnnotationType::Text:
+        case AnnotationType::FreeText:
+        case AnnotationType::Line:
+        case AnnotationType::Square:
+        case AnnotationType::Circle:
+        case AnnotationType::Highlight:
+        case AnnotationType::Underline:
+        case AnnotationType::Squiggly:
+        case AnnotationType::StrikeOut:
+        case AnnotationType::Redact:
+        case AnnotationType::Stamp:
+        case AnnotationType::Caret:
+        case AnnotationType::FileAttachment:
+        case AnnotationType::Polygon:
+        case AnnotationType::PolyLine:
+        case AnnotationType::Ink:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Whether annot is a FileAttachment whose /FS resolves to embedded bytes, and
+// if so how many. Returns false for any other annotation (or a bad one).
+bool AnnotationGetAttachedFileSize(Annotation* annot, int* sizeOut) {
+    if (sizeOut) {
+        *sizeOut = 0;
+    }
+    if (!AnnotationIsLive(annot) || Type(annot) != AnnotationType::FileAttachment) {
+        return false;
+    }
+    EngineMupdf* e = annot->engine;
+    fz_context* ctx = e->Ctx();
+    ScopedRecursiveMutex cs(&e->docLock);
+    bool hasFs = false;
+    fz_try(ctx) {
+        pdf_obj* fs = pdf_dict_get(ctx, pdf_annot_obj(ctx, annot->pdfannot), PDF_NAME(FS));
+        if (fs) {
+            fz_buffer* buf = pdf_load_embedded_file_contents(ctx, fs);
+            if (buf) {
+                hasFs = true;
+                if (sizeOut) {
+                    *sizeOut = (int)fz_buffer_storage(ctx, buf, nullptr);
+                }
+                fz_drop_buffer(ctx, buf);
+            }
+        }
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        hasFs = false;
+    }
+    return hasFs;
 }
 
 AnnotationType CmdIdToAnnotationType(int cmdId) {

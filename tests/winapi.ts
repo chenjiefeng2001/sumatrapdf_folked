@@ -245,6 +245,9 @@ export const WM_CHAR = 0x0102;
 export const WM_MOUSEMOVE = 0x0200;
 export const WM_LBUTTONDOWN = 0x0201;
 export const WM_LBUTTONUP = 0x0202;
+// Windows synthesises this from real input, so tests that inject messages have
+// to send it themselves to make a control report a double-click
+export const WM_LBUTTONDBLCLK = 0x0203;
 export const WM_RBUTTONDOWN = 0x0204;
 export const WM_RBUTTONUP = 0x0205;
 export const WM_MBUTTONDOWN = 0x0207;

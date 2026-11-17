@@ -57,6 +57,10 @@ You can also create annotation object at your mouse location:
 - caret
 - image from the clipboard
 - image from a file (`Insert Image...`)
+- a file attachment (`File Attachment...`)
+- a polygon, polyline or ink stroke (see below)
+
+To attach a file to the document, choose **right-click → Create annotation under cursor → File Attachment...** (or run `CmdCreateAnnotFileAttachment` from the command palette) and pick a file. A paperclip is placed at the mouse position and the file's contents are embedded in the PDF, so the attachment travels with the document - anyone who opens it can save the file out again.
 
 To put a picture of your signature (or any other image) on a PDF page:
 
@@ -67,6 +71,33 @@ To put a picture of your signature (or any other image) on a PDF page:
 Pick a PNG (or JPEG, etc.). The image is stamped on the page and you can drag or resize it. Save with **File → Save Annotations to existing PDF** (or save as a new PDF). This is an electronic signature image, not a cryptographic digital signature (`File → Sign Document...`, which uses a certificate from the Windows store or a `.pfx` / `.p12` file). **Sign Document** can also draw a PNG or JPEG inside the digital signature itself, and you can turn off the "Digitally signed by" labels and the other lines.
 
 ![Context Menu Annotation Under Cursor](img/context-menu-annot-under-cursor.png)
+
+## Drawing a polygon, polyline or ink stroke
+
+Polygon, Polyline and Ink are drawn rather than placed: their shape is the list
+of points you drag out, so picking one of them from **Create annotation under
+cursor** (or running `CmdCreateAnnotPolygon`, `CmdCreateAnnotPolyLine` or
+`CmdCreateAnnotInk` from the command palette) arms a drawing mode instead of
+dropping an annotation right away. The status bar then says to drag on the page.
+
+- hold the left button and drag to draw the shape; the stroke is previewed as you drag
+- `Esc` cancels
+- a click without a drag creates nothing
+
+Polygon is closed and drawn as an outline, Polyline is left open, and Ink is a
+freehand stroke. Once created, each can be moved and resized like the other
+annotations, and a whole stroke undoes in one step.
+
+## Redacting content
+
+To mark something for removal, select it and choose **right-click → Create annotation from selection → Redact**, or run `CmdCreateAnnotRedact` from the command palette.
+
+A redaction mark on its own is **not** a redaction: it only draws a black box, and the text underneath is still in the file. To actually remove the content:
+
+- **right-click → Apply Redactions...** (or `CmdPdfRedact`) in the app, then save the document (`Ctrl+Shift+S`), or
+- from a command line, [`sumatrapdf-tool redact`](Tool-redact.md), which writes the result to a new file
+
+This is **irreversible**. There is no undo, and the original file is not touched - but if you overwrite it with the redacted version, the content is gone for good.
 
 ## Annotation editor
 
@@ -130,7 +161,7 @@ Add annotation commands to the toolbar via the `Shortcuts` array — see [Custom
 | Discard unsaved changes  | `CmdDiscardChanges` (tab context menu **Discard changes**, or `Ctrl + K` command palette) — reloads the file from disk |
 | Save when closing        | Prompt dialog — choose existing file, new file, or discard                                                             |
 
-There is **no undo** (`Ctrl + Z`) for annotation edits. Delete an annotation with `Delete` when the cursor is over it, or remove it in the annotation editor.
+Annotation edits can be undone with `Ctrl + Z` and redone with `Ctrl + Shift + Z` (`CmdUndo` / `CmdRedo`). This covers creating, editing, moving, resizing and deleting annotations, and filling in form fields. Undoing stops at the last save: saving the document starts a new history. Deleting an annotation also still works with `Delete` when the cursor is over it, or from the annotation editor.
 
 To avoid the save prompt on every close, save explicitly with `Ctrl + Shift + S` before closing. To drop unsaved work without closing the tab, use **Discard Changes** (`CmdDiscardChanges`).
 

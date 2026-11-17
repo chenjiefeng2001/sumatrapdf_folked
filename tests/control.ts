@@ -67,6 +67,15 @@ export enum ControlCommand {
   TestLayout = 70,
   TestDpi = 71,
   TestPageGeometry = 72,
+  TestDocProps = 73,
+  TestAnnotationState = 74,
+  TestAttachFile = 75,
+  TestAttachFileSave = 76,
+  TestPortfolio = 77,
+  TestOpenTocItem = 78,
+  TestPageStructure = 79,
+  TestAnnotVertices = 80,
+  TestNotifSecurity = 81,
 }
 
 export type ControlArg = number | string | Uint8Array | ControlArg[];

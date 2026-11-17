@@ -4,6 +4,20 @@
 
 Available in [pre-release](https://www.sumatrapdfreader.org/prerelease) builds.
 
+- A PDF's JavaScript can now ask SumatraPDF to do things, the way Acrobat does: show an alert box, print, open a link, compose an email, or trigger a menu command. The document's additional actions also run when they should: a page's open/close actions, and the document's will-print / did-print / will-save / did-save / will-close actions. `DisableJavaScript` turns all of this off
+- A hybrid XFA form (one that carries both an XFA and an AcroForm layer) no longer reports **XFA not supported** - its AcroForm layer fills in normally. Document Properties says **XFA Forms: using AcroForm layer**. A _pure_ XFA form still opens read-only and still says **XFA not supported**
+- **Redact** is available again as an annotation to create from a selection, and **right-click → Apply Redactions...** (`CmdPdfRedact`) permanently removes the content it covers instead of just covering it with a black box. `sumatrapdf-tool redact` does the same from a command line, always writing to a separate output file
+- Annotation and form-field edits can be undone with `Ctrl + Z` and redone with `Ctrl + Shift + Z` (`CmdUndo` / `CmdRedo`): creating, editing, moving, resizing and deleting annotations, and filling in form fields. Undoing stops at the last save
+- Document Properties for a tagged PDF now reports the state of its structure tree (**Structure Tree:** no problems found / problems repaired / broken / contains a cycle / has attributes), not just `Tagged PDF: Yes`
+- text taken from a **tagged** PDF now comes out in the order the document is meant to be read, following its structure tree instead of the order the page happens to draw the text in. So selecting and copying a paper's two columns, a slide with speaker notes, or a form-like layout no longer interleaves them, and **Extract Text From Document**, Read Aloud and search results follow the same order. Untagged PDFs are unaffected - their text stays in drawing order
+- **View → PDF Layers...** (`CmdShowLayers`) lists the optional content groups (layers) a PDF declares, the way Acrobat's layer panel does, with a checkbox per toggleable layer. Unchecking one hides that layer's content and re-renders the page; **Reset to Default** puts the document's own configuration back. Layer visibility is view state: it is not saved into the file and is not an undo step. Only offered for PDFs that actually declare layers
+- a **PDF portfolio** - a PDF whose files are the point, the way Acrobat shows it - is now recognized. Its embedded files are listed in the sidebar under **Attachments** (instead of **Bookmarks**) in the order the document asks for, each with the description the document gives it, and clicking one opens it. Previously such a file just looked like a PDF whose bookmarks were file names, the order was whatever the name tree happened to give, the descriptions were dropped, and clicking a row did nothing at all
+- opening a PDF that carries document-level JavaScript shows a **JavaScript in document** notification, so a file that can act on your machine says so before it does. `DisableJavaScript` turns this and the document's actions off
+- a PDF's own script text is now shown as plain text everywhere it appears (an `app.alert()`, or the "document wants to open" notice for `app.launchURL()`), so text in a document can't turn into a clickable command link. The notice now also reliably appears when the script runs during loading, which is the usual case
+- `doc.mailDoc()` percent-encodes each field and honors `bcc`, so text in a document can't add mail parameters or mail headers to the `mailto:` it composes
+- **right-click → Create annotation under cursor → File Attachment...** (`CmdCreateAnnotFileAttachment`) attaches a file to the document as a paperclip annotation at the mouse position. The file's contents are embedded in the PDF, so the attachment travels with the document and whoever opens it can save the file out again
+- **right-click �� Create annotation under cursor �� Polygon / Polyline / Ink** (`CmdCreateAnnotPolygon`, `CmdCreateAnnotPolyLine`, `CmdCreateAnnotInk`) draw a shape by dragging on the page, with the stroke previewed as you draw it. `Esc` cancels. They were previously commented out of the menu and hidden from the Command Palette because a click produced an empty annotation with no appearance
+- Commands for annotation types SumatraPDF cannot create (Link, Popup) no longer appear in the Command Palette. They used to run and quietly produce an empty annotation
 - The annotations window opens with annotations from the pages currently on screen; the rest of a large document fill in in the background without losing the current selection
 - Update available notification shows the build date when the update-check file has a `BuiltOn` date, e.g. **Version 3.7.21539 available (built on 2026-08-21). Update**
 - Annotations window: a search box at the top filters the list by contents and highlights matches in yellow, like the Command Palette. Delete sits under the list. Rect, Date and Author are always shown in a two-column table (empty when the annotation has no value). Per-annotation options sit in the same kind of table. Contents is a label above a 6-line edit box. Buttons match Advanced Settings. Each list row shows the type and contents on the left and the page number on the right
@@ -38,6 +52,7 @@ Available in [pre-release](https://www.sumatrapdfreader.org/prerelease) builds.
 - new built-in themes: **One Dark**, **Monokai**, **Nord**, **GitHub Dark**, **Catppuccin Mocha**, **Tokyo Night**, **Gruvbox**, **Night Owl**, **Ayu**, and **Palenight** (common palettes from VS Code and other editors)
 - theme list cleanup: removed **Darker** (folded into **Charcoal**, the former “Dark background Bright text�?; settings that still name `Darker` or the old long name keep working
 - Screen readers (Narrator, NVDA, and other UI Automation clients) can access document text on the canvas for PDF, XPS, and DjVu; the experimental UIA provider is now enabled in release builds, not only debug, reading through the document character by character, word by word, line by line or page by page now advances instead of repeating the first line, and reading the text under the mouse pointer or finger works (Narrator mouse mode / touch exploration), including telling the screen reader where that text is on screen (issue #321)
+- in a **tagged** PDF, the headings (H1-H6) are exposed to screen readers as their own UI Automation elements with the level the document declares, so a screen reader's heading navigation moves between sections the way it does in a word processor. An untagged PDF exposes no headings at all
 - smoother mouse-wheel and arrow-key scrolling when `SmoothScroll` is enabled (default **true**): continuous exponential chase of the target, sub-pixel steps, 1 ms timer while animating; set `SmoothScroll = false` for instant steps
 - add `ScrollLineAmount` advanced setting: distance scrolled by an arrow-key press or one mouse-wheel line; defaults to 16 screen pixels at 96 DPI (fixes #2447)
 - Favorites can open as a full-window tab so long paths and names use the whole window; the sidebar Favorites panel still works independently. The sidebar Favorites/ToC width can also be dragged past half the window (keeps ~200px for the document)
@@ -221,6 +236,13 @@ Available in [pre-release](https://www.sumatrapdfreader.org/prerelease) builds.
 
 **New commands:**
 
+- `CmdUndo` : "Undo" (`Ctrl + Z`) - undo the last annotation or form-field edit in a PDF
+- `CmdRedo` : "Redo" (`Ctrl + Shift + Z`) - redo the last undone annotation or form-field edit
+
+- `CmdPdfRedact` : "Apply Redactions..." - permanently remove the content under the document's redaction annotations
+
+- `CmdShowLayers` : "PDF Layers..." - View menu; toggle the document's optional content groups (layers)
+
 - `CmdToggleUniformPageWidth` : "Toggle Uniform Page Width"
 - `CmdAIChatWithClaudeCode` : "AI Chat"
 - `CmdChangeBackgroundColor` : "Change Background Color"
@@ -316,7 +338,7 @@ Available in [pre-release](https://www.sumatrapdfreader.org/prerelease) builds.
 - `-log-to-file <file>` : log to a specific file (like `-log` but with a custom log file path)
 - `/p` : Adobe Reader-compatible alias for `-print-dialog`
 - `/t` : Adobe Reader-compatible silent print (alias for `-print-to`)
-- `sumatrapdf-tool.exe <tool> <args>` : command-line tools (draw, convert, audit, bake, clean, create, extract, info, merge, pages, poster, recolor, show, trim, grep, trace)
+- `sumatrapdf-tool.exe <tool> <args>` : command-line tools (draw, convert, audit, bake, clean, create, extract, info, merge, pages, poster, recolor, redact, show, trim, grep, trace)
 - `-print-settings` tokens: `stretch`, `center`, `bin=auto`, `paper=auto`, `collate` / `nocollate`, `rotate=<90|180|270>`, `ignore-pdf-print-settings`
 - `-with-ai` : enable AI chat support (installer)
 

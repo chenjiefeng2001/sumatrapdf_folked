@@ -157,6 +157,10 @@ import { testit as issue6013 } from "./issue-6013.ts";
 import { testit as issue6018 } from "./issue-6018.ts";
 import { testit as issue6008 } from "./issue-6008.ts";
 import { testit as issue6012 } from "./issue-6012.ts";
+import { testit as issue6103 } from "./issue-6103.ts";
+import { testit as issue6104 } from "./issue-6104.ts";
+import { testit as issue6105 } from "./issue-6105.ts";
+import { testit as issue6106 } from "./issue-6106.ts";
 import { testit as annotLocking } from "./issue-annot-locking.ts";
 import { testit as displayModeAnnot } from "./issue-display-mode-annot.ts";
 import { testit as renderStability } from "./issue-render-stability.ts";
@@ -315,6 +319,10 @@ export const tests: NamedTest[] = [
   ["issue-6018", issue6018],
   ["issue-6008", issue6008],
   ["issue-6012", issue6012],
+  ["issue-6103", issue6103],
+  ["issue-6104", issue6104],
+  ["issue-6105", issue6105],
+  ["issue-6106", issue6106],
   ["issue-annot-locking", annotLocking],
   ["issue-display-mode-annot", displayModeAnnot],
   ["issue-render-stability", renderStability],

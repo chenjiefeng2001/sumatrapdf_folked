@@ -120,6 +120,61 @@ int main(int argc, char** argv) {
         SysFreeString(all);
     }
 
+    // A tagged PDF's structure elements hang off each page element. For each
+    // one report its name and heading level, which is what makes a screen
+    // reader's heading navigation work.
+    if (raw) {
+        int pageIdx = 0;
+        IUIAutomationElement* page = nullptr;
+        raw->GetFirstChildElement(doc, &page);
+        while (page) {
+            CONTROLTYPEID pct = 0;
+            page->get_CurrentControlType(&pct);
+            if (pct == UIA_DocumentControlTypeId) {
+                page->Release();
+                page = nullptr;
+                break;
+            }
+            IUIAutomationElement* child = nullptr;
+            raw->GetFirstChildElement(page, &child);
+            int nStruct = 0;
+            while (child) {
+                BSTR cname = nullptr;
+                child->get_CurrentName(&cname);
+                CONTROLTYPEID cct = 0;
+                child->get_CurrentControlType(&cct);
+                int level = 0;
+                VARIANT v;
+                VariantInit(&v);
+                if (SUCCEEDED(child->GetCurrentPropertyValue(UIA_HeadingLevelPropertyId, &v)) && v.vt == VT_I4) {
+                    level = v.lVal;
+                }
+                VariantClear(&v);
+                char key[64];
+                snprintf(key, sizeof(key), "struct.%d.%d.level", pageIdx, nStruct);
+                printf("%s=%d\n", key, level);
+                snprintf(key, sizeof(key), "struct.%d.%d.type", pageIdx, nStruct);
+                printf("%s=%d\n", key, (int)cct);
+                snprintf(key, sizeof(key), "struct.%d.%d.name", pageIdx, nStruct);
+                PrintEscaped(key, cname);
+                if (cname) {
+                    SysFreeString(cname);
+                }
+                nStruct++;
+                IUIAutomationElement* next = nullptr;
+                raw->GetNextSiblingElement(child, &next);
+                child->Release();
+                child = next;
+            }
+            printf("page.%d.nStruct=%d\n", pageIdx, nStruct);
+            pageIdx++;
+            IUIAutomationElement* next = nullptr;
+            raw->GetNextSiblingElement(page, &next);
+            page->Release();
+            page = next;
+        }
+    }
+
     // walking by character / word / line is how a screen reader reads: each
     // step must land on new text
     struct {

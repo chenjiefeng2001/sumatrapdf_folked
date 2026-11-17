@@ -110,11 +110,35 @@ enum class TextExtractionState {
 };
 
 // text is a UTF-8 byte string, coords has one entry per Unicode codepoint
+// One structural element of a tagged PDF, as a run of the page's extracted
+// text. Offsets are codepoint indices into PageText::text, which is what the
+// UI Automation text ranges address, so a span maps onto a range directly.
+//
+// Only the structure a screen reader can act on is recorded: headings (with
+// their level) and the groupings that give them context. Anything else the
+// structure tree contains stays flattened into the text, as before.
+struct PageTextSpan {
+    int startCp = 0; // first codepoint, inclusive
+    int endCp = 0;   // last codepoint, exclusive
+    // 0 for a non-heading; 1-6 for H1-H6 (PDF also has a bare H, which we
+    // report as level 1 since that is what it means in practice)
+    int headingLevel = 0;
+    // the PDF structure tag, e.g. "H1", "P", "Table", "Sect"
+    Str type;
+    // how deep in the structure tree this sits, for nesting in a UI tree
+    int depth = 0;
+};
+
 struct PageText {
     Str text;
     Rect* coords = nullptr;
-    int len = 0;         // number of bytes in text, not including the terminating null
-    int nCodepoints = 0; // number of Unicode codepoints and bounding boxes in coords
+    int len = 0;             // number of bytes in text, not including the terminating null
+    int nCodepoints = 0;     // number of Unicode codepoints and bounding boxes in coords
+    Vec<PageTextSpan> spans; // tagged-PDF structure; empty for an untagged page
+
+    // not an aggregate: Vec's default ctor is explicit, so `return {}` needs a
+    // real default ctor to call
+    PageText() = default;
 };
 
 void FreePageText(PageText*);
@@ -247,6 +271,8 @@ struct PageDestinationFile : IPageDestination {
 struct PageDestination : IPageDestination {
     Str value;
     Str name;
+    // an embedded file's /Desc, for the attachments of a PDF portfolio
+    Str description;
     int embedObjNum = 0; // PDF object number for embedded file attachment annotations
 
     PageDestination() = default;

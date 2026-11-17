@@ -11,6 +11,8 @@ void ShowPdfDeletePageDialog(MainWindow* win);
 void ShowPdfExtractPagesDialog(MainWindow* win);
 void ShowPdfEncryptDialog(MainWindow* win);
 void ShowPdfDecryptDialog(MainWindow* win);
+// permanently remove the content under the document's redaction annotations
+void ShowPdfRedactDialog(MainWindow* win);
 // comic books / image folders / single images → multi-page PDF (issue #4118)
 void ShowConvertToPdfDialog(MainWindow* win);
 // PDF pages → PNG / JPEG / BMP files (issue #5991)

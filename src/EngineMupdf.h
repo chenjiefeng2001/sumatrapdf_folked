@@ -224,6 +224,10 @@ class EngineMupdf : public EngineBase {
     Vec<FzPageInfo*> pages;
     fz_outline* outline = nullptr;
     fz_outline* attachments = nullptr;
+    // the catalog has /Root/Collection: the file is a portfolio (a bundle of
+    // embedded files), so the embedded files are the document's real content
+    // and are listed in the order /Collection/D gives
+    bool isPortfolio = false;
     pdf_obj* pdfInfo = nullptr;
     StrVec* pageLabels = nullptr;
 
@@ -246,6 +250,19 @@ class EngineMupdf : public EngineBase {
     // used to track "dirty" state of annotations. not perfect because if we add and delete
     // the same annotation, we should be back to 0
     bool modifiedAnnotations = false;
+
+    // whether MuPDF had to rebuild the xref / repair the document at load time.
+    // Asked once in FinishLoading() via pdf_was_repaired() so the UI can tell
+    // the user the file was malformed but is recoverable.
+    bool pdfWasRepaired = false;
+
+    // whether mupdf's undo journal is recording this document's changes (turned
+    // on by the first edit, see PdfJournal.h)
+    bool journalEnabled = false;
+
+    // the document carries /Root/Names/JavaScript, i.e. it runs code as soon as
+    // we enable the JS engine
+    bool hasDocumentJavaScript = false;
 
     // smart dark mode: engine-level image feature/processed caches
     DarkModeEngineCache* darkModeEngineCache = nullptr;

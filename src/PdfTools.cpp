@@ -30,7 +30,11 @@
 #include "Translations.h"
 #include "ExternalViewers.h"
 #include "Flags.h"
+#include "EditAnnotations.h"
+#include "Toolbar.h"
+#include "Notifications.h"
 #include "DisplayModel.h"
+#include "RenderCache.h"
 #include "Theme.h"
 
 #include "DarkMode_win.h"
@@ -1690,6 +1694,173 @@ void ShowConvertPdfToImagesDialog(MainWindow* win) {
     logf("ShowConvertPdfToImagesDialog: opening for '%s'\n", tab->filePath);
 
     auto* dlg = new ConvertPdfToImagesDialog();
+    if (!dlg->Create(win, tab)) {
+        delete dlg;
+    }
+}
+
+// --- Apply Redactions dialog ---
+
+// Applies the document's redaction annotations to the live document, the way
+// Acrobat's "Apply Redactions" does: the marked content is removed for good and
+// the marks themselves disappear. There is no undo - the page content streams
+// have been rewritten - so the dialog asks first and the result has to be
+// saved (as a full rewrite with garbage collection, because mupdf refuses to
+// save a redacted document incrementally).
+struct PdfRedactDialog : PdfToolDialog {
+    Edit* pagesEdit = nullptr;
+    DropDown* dropText = nullptr;
+    DropDown* dropImage = nullptr;
+    DropDown* dropLineArt = nullptr;
+
+    bool Create(MainWindow* win, WindowTab* tab);
+    void DoIt(VirtMouseEvent* ev = nullptr) override;
+};
+
+static DropDown* NewRedactDropDown(HWND parent, PlatformFont* font, const char* const* items, int nItems,
+                                   int selected) {
+    auto* dd = new DropDown();
+    DropDown::CreateArgs ddargs;
+    ddargs.parent = parent;
+    ddargs.font = font;
+    ddargs.isRtl = IsUIRtl();
+    dd->Create(ddargs);
+    StrVec values;
+    for (int i = 0; i < nItems; i++) {
+        values.Append(_TRA(items[i]));
+    }
+    dd->SetItems(values);
+    dd->SetCurrentSelection(selected);
+    dd->SetColors(ThemeWindowTextColor(), ThemeWindowControlBackgroundColor());
+    return dd;
+}
+
+bool PdfRedactDialog::Create(MainWindow* w, WindowTab* tab) {
+    if (!CreateToolDialog(w, tab, _TRA("Apply Redactions"))) {
+        return false;
+    }
+    AddPathRow();
+
+    // warn before anything else: this is the one irreversible PDF operation we
+    // offer
+    HBox* warnRow = AddRow();
+    warnRow->AddChild(NewVirtText({
+        .s = _TRA("Content under a redaction mark will be removed permanently. This cannot be undone."),
+        .font = font,
+        .isRtl = IsUIRtl(),
+    }));
+
+    pagesEdit = AddLabeledEdit(_TRA("Pages:"), StrL("all"));
+
+    static const char* kTextItems[] = {"remove", "none", "invisible"};
+    HBox* row = AddRow();
+    row->gap = font->averageCharWidth;
+    row->AddChild(NewVirtText({.s = _TRA("Text:"), .font = font, .isRtl = IsUIRtl()}));
+    dropText = NewRedactDropDown(hwnd, font, kTextItems, 3, 0);
+    row->AddChild(dropText);
+
+    static const char* kImageItems[] = {"pixels", "remove", "none", "remove-invisible"};
+    row = AddRow();
+    row->gap = font->averageCharWidth;
+    row->AddChild(NewVirtText({.s = _TRA("Images:"), .font = font, .isRtl = IsUIRtl()}));
+    dropImage = NewRedactDropDown(hwnd, font, kImageItems, 4, 0);
+    row->AddChild(dropImage);
+
+    static const char* kLineArtItems[] = {"covered", "touched", "none"};
+    row = AddRow();
+    row->gap = font->averageCharWidth;
+    row->AddChild(NewVirtText({.s = _TRA("Line art:"), .font = font, .isRtl = IsUIRtl()}));
+    dropLineArt = NewRedactDropDown(hwnd, font, kLineArtItems, 3, 0);
+    row->AddChild(dropLineArt);
+
+    AddButtonsRow(_TRA("Apply Redactions"), _TRA("Scope:"));
+    FinishDialog(pagesEdit);
+    return true;
+}
+
+void PdfRedactDialog::DoIt(VirtMouseEvent*) {
+    WindowTab* tab = win ? win->CurrentTab() : nullptr;
+    if (!tab || !IsPdfDoc(tab)) {
+        return;
+    }
+    // the redaction removes annotations, and the annotations window holds
+    // pointers to them
+    if (CloseAndDeleteEditAnnotationsWindow(tab)) {
+        // nothing else to do: the window is gone and tab->editAnnotsWindow is null
+    }
+    tab->selectedAnnotation = nullptr;
+
+    TempStr pages = pagesEdit->GetTextTemp();
+    Vec<PageRange> ranges;
+    int pageNo = -1;
+    if (pages && !str::IsEmptyOrWhiteSpace(pages) && !str::EqI(pages, StrL("all"))) {
+        if (!ParsePageRanges(pages, ranges)) {
+            MessageBoxWarning(hwnd, _TRA("'%s' is not a valid page range."), _TRA("Apply Redactions"));
+            return;
+        }
+        if (len(ranges) == 1 && ranges[0].start == ranges[0].end) {
+            pageNo = ranges[0].start;
+        }
+    }
+
+    PdfRedactOptions opts;
+    opts.drawBlackBoxes = true;
+    // dropdown order differs from the underlying mupdf enum order, so map
+    // the selected index to the enum value (see PdfRedactOptions comments)
+    static const int kTextMap[] = {0, 1, 2};
+    static const int kImageMap[] = {2, 1, 0, 3};
+    static const int kLineArtMap[] = {1, 2, 0};
+    int textSel = dropText ? dropText->GetCurrentSelection() : 0;
+    int imageSel = dropImage ? dropImage->GetCurrentSelection() : 0;
+    int lineArtSel = dropLineArt ? dropLineArt->GetCurrentSelection() : 0;
+    opts.textMethod = kTextMap[textSel];
+    opts.imageMethod = kImageMap[imageSel];
+    opts.lineArtMethod = kLineArtMap[lineArtSel];
+
+    Str msg = _TRA(
+        "Permanently remove the content under every redaction mark?\n\n"
+        "This cannot be undone. Save the document afterwards to write "
+        "the result to a file (the original file stays as it is).");
+    int res = MsgBox(win->hwndFrame, msg, _TRA("Apply Redactions"), MB_ICONWARNING | MB_YESNO);
+    if (res != IDYES) {
+        return;
+    }
+
+    logf("PdfRedactDoIt: applying redactions to '%s', page=%d\n", srcPath, pageNo);
+    bool ok = EngineMupdfApplyRedactions(tab->GetEngine(), opts, pageNo);
+    if (!ok) {
+        logf("PdfRedactDoIt: nothing to redact\n");
+        MessageBoxWarning(hwnd, _TRA("No redaction annotations found."), _TRA("Apply Redactions"));
+        return;
+    }
+
+    // the page content streams changed, so every cached tile for the whole
+    // document is stale
+    if (gRenderCache) {
+        DisplayModel* dm = win->AsFixed();
+        EngineBase* engine = tab->GetEngine();
+        int nPages = engine->PageCount();
+        for (int i = 1; i <= nPages; i++) {
+            gRenderCache->Invalidate(dm, i, engine->PageMediabox(i));
+        }
+    }
+    MainWindowRerender(win);
+    ToolbarUpdateStateForWindow(win, true);
+    Close();
+    MaybeDelayedWarningNotification(_TRA("Redactions applied. Save the document (Ctrl+Shift+S) to write it out."));
+}
+
+void ShowPdfRedactDialog(MainWindow* win) {
+    if (!win || !win->IsDocLoaded()) {
+        return;
+    }
+    WindowTab* tab = win->CurrentTab();
+    if (!tab || !tab->filePath || !IsPdfDoc(tab)) {
+        return;
+    }
+    logf("ShowPdfRedactDialog: opening for '%s'\n", tab->filePath);
+
+    auto* dlg = new PdfRedactDialog();
     if (!dlg->Create(win, tab)) {
         delete dlg;
     }

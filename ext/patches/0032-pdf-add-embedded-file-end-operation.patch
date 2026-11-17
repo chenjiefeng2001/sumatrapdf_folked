@@ -1,0 +1,19 @@
+diff --git a/ext/mupdf/source/pdf/pdf-link.c b/ext/mupdf/source/pdf/pdf-link.c
+index 72744cea4..67d1f8cac 100644
+--- a/ext/mupdf/source/pdf/pdf-link.c
++++ b/ext/mupdf/source/pdf/pdf-link.c
+@@ -516,6 +516,14 @@ pdf_add_embedded_file(fz_context *ctx, pdf_document *doc,
+ 		fz_rethrow(ctx);
+ 	}
+ 
++	/* SumatraPDF: close the operation opened above. Without this
++	 * journal->nesting stays above zero for the rest of the document's life,
++	 * and pdf_undoredo_state() then throws "Can't undo/redo during an
++	 * operation" - so every later pdf_can_undo()/pdf_undo() on this document
++	 * fails and undo is permanently broken. On the error path above
++	 * pdf_abandon_operation() has already closed it. */
++	pdf_end_operation(ctx, doc);
++
+ 	return filespec;
+ }
+ 

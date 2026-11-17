@@ -31,6 +31,7 @@ extern "C" {
 #include "PdfCadEnhanceDevice.h"
 #include "PdfDarkMode.h"
 #include "PdfDarkModeInternal.h"
+#include "PdfDocEvents.h"
 #include "EngineAll.h"
 #include "EbookBase.h"
 #include "EbookDoc.h"
@@ -137,6 +138,12 @@ void EngineMupdfCancelLoadAllAnnotations(EngineBase* engine) {
 Str EngineEbookFontUnavailable(EngineBase* engine) {
     EngineMupdf* e = AsEngineMupdf(engine);
     return e ? e->ebookFontUnavailable : Str{};
+}
+
+// declared in EngineAll.h: did mupdf have to repair this PDF at load time?
+bool EngineMupdfWasRepaired(EngineBase* engine) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    return e ? e->pdfWasRepaired : false;
 }
 
 class FitzAbortCookie : public AbortCookie {
@@ -1263,28 +1270,103 @@ static void AppendStextTextBlock(const fz_stext_block* block, str::Builder& cont
     }
 }
 
-static void AppendStextBlocks(fz_stext_block* block, str::Builder& content, Vec<Rect>& rects, Vec<SeenGlyph>& seen,
-                              Str hardLineSep, Str softLineSep) {
-    while (block) {
-        if (block->type == FZ_STEXT_BLOCK_TEXT) {
-            AppendStextTextBlock(block, content, rects, seen, hardLineSep, softLineSep);
-        } else if (block->type == FZ_STEXT_BLOCK_STRUCT && block->u.s.down) {
-            // Tagged-PDF structure nodes; MuPDF's do_as_text walks these too.
-            // They only appear when FZ_STEXT_COLLECT_STRUCTURE is set (#4859).
-            AppendStextBlocks(block->u.s.down->first_block, content, rects, seen, hardLineSep, softLineSep);
-        }
-        block = block->next;
+// Walks a page's blocks in depth-first (reading) order and appends their text.
+// MuPDF wraps the blocks of a tagged PDF in FZ_STEXT_BLOCK_STRUCT nodes that
+// form a tree; the block list itself is in content-stream order, which for a
+// multi-column or reflowed layout is not the order a reader reads. The DFS
+// iterator descends into struct nodes and never stops on them, so it yields
+// the logical order. For an untagged page there are no struct nodes and this is
+// exactly the plain list order, so it is safe to always use.
+// The heading level a structure type implies, or 0 if it is not a heading.
+// PDF has a bare /H as well as /H1../H6; a bare H means "a heading", which for
+// our purposes is level 1.
+static int HeadingLevelOfStruct(fz_stext_struct* st) {
+    if (!st) {
+        return 0;
+    }
+    switch (st->standard) {
+        case FZ_STRUCTURE_H:
+            return 1;
+        case FZ_STRUCTURE_H1:
+        case FZ_STRUCTURE_H2:
+        case FZ_STRUCTURE_H3:
+        case FZ_STRUCTURE_H4:
+        case FZ_STRUCTURE_H5:
+        case FZ_STRUCTURE_H6:
+            return st->standard - FZ_STRUCTURE_H1 + 1;
+        default:
+            return 0;
     }
 }
 
-static Str FzTextPageToUtf8(fz_stext_page* text, Rect** coordsOut) {
+// The structure tag of the innermost enclosing struct, or "" when the block is
+// not inside one (an untagged page, or content MuPDF left unstructured).
+static Str StructTypeName(fz_stext_struct* st) {
+    if (!st) {
+        return {};
+    }
+    // raw[] is the PDF's own /S name and is always set; standard is the
+    // normalised one. Prefer raw so a document's custom tag survives.
+    const char* s = st->raw[0] ? st->raw : fz_structure_to_string(st->standard);
+    return (s && *s) ? str::Dup(Str(s)) : Str{};
+}
+
+// Walks a page's blocks in depth-first (reading) order and appends their text.
+// MuPDF wraps the blocks of a tagged PDF in FZ_STEXT_BLOCK_STRUCT nodes that
+// form a tree; the block list itself is in content-stream order, which for a
+// multi-column or reflowed layout is not the order a reader reads. The DFS
+// iterator descends into struct nodes and never stops on them, so it yields
+// the logical order. For an untagged page there are no struct nodes and this is
+// exactly the plain list order, so it is safe to always use.
+//
+// The iterator also carries the enclosing struct in `parent`, so each block
+// knows which structure element it belongs to; we record that as a span so a
+// screen reader can be told where the headings are (see PageTextSpan).
+static void AppendStextPageInReadingOrder(fz_stext_page* text, str::Builder& content, Vec<Rect>& rects,
+                                          Vec<SeenGlyph>& seen, Str hardLineSep, Str softLineSep,
+                                          Vec<PageTextSpan>* spansOut, int* codepointsOut) {
+    int codepoints = 0;
+    fz_stext_page_block_iterator pos = fz_stext_page_block_iterator_begin_dfs(text);
+    while (!fz_stext_page_block_iterator_eod_dfs(pos)) {
+        fz_stext_block* block = pos.block;
+        if (block && block->type == FZ_STEXT_BLOCK_TEXT) {
+            int startCp = codepoints;
+            AppendStextTextBlock(block, content, rects, seen, hardLineSep, softLineSep);
+            // one glyph rect was appended per codepoint, so the block's text
+            // length is the change in rect count
+            int endCp = len(rects);
+            codepoints = endCp;
+            if (spansOut) {
+                fz_stext_struct* st = pos.parent;
+                int headingLevel = HeadingLevelOfStruct(st);
+                if (headingLevel > 0) {
+                    PageTextSpan span;
+                    span.startCp = startCp;
+                    span.endCp = endCp;
+                    span.headingLevel = headingLevel;
+                    span.type = StructTypeName(st);
+                    span.depth = 1;
+                    if (!spansOut->Append(span)) {
+                        str::Free(span.type);
+                    }
+                }
+            }
+        }
+        pos = fz_stext_page_block_iterator_next_dfs(pos);
+    }
+    if (codepointsOut) {
+        *codepointsOut = codepoints;
+    }
+}
+
+static Str FzTextPageToUtf8(fz_stext_page* text, Rect** coordsOut, Vec<PageTextSpan>* spansOut = nullptr) {
     Str hardLineSep = StrL("\n");
     Str softLineSep = StrL(" ");
     str::Builder content;
     Vec<Rect> rects;
     Vec<SeenGlyph> seen;
 
-    AppendStextBlocks(text->first_block, content, rects, seen, hardLineSep, softLineSep);
+    AppendStextPageInReadingOrder(text, content, rects, seen, hardLineSep, softLineSep, spansOut, nullptr);
 
     ReportIf(Utf8CodepointCount(ToStr(content)) != len(rects));
 
@@ -2794,6 +2876,26 @@ static Str ExtractJsCallName(Str js) {
     return {};
 }
 
+// Does the document carry document-level JavaScript (/Root/Names/JavaScript)?
+// Those scripts run as soon as we call pdf_enable_js(), so the caller uses
+// this to tell the user before anything happens rather than after.
+static bool HasDocumentLevelJavaScript(fz_context* ctx, pdf_document* doc) {
+    if (!ctx || !doc) {
+        return false;
+    }
+    bool found = false;
+    fz_try(ctx) {
+        pdf_obj* dict = pdf_load_name_tree(ctx, doc, PDF_NAME(JavaScript));
+        found = (pdf_dict_len(ctx, dict) > 0);
+        pdf_drop_obj(ctx, dict);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        found = false;
+    }
+    return found;
+}
+
 static char* LookupNamedJavaScript(fz_context* ctx, pdf_document* doc, Str name) {
     if (!ctx || !doc || !name) {
         return nullptr;
@@ -2919,22 +3021,106 @@ static pdf_obj* PdfCopyStrDict(fz_context* ctx, pdf_document* /*doc*/, pdf_obj* 
     return copy;
 }
 
+// The /Desc (description) of a portfolio entry, or "" when it has none.
+// Kept out of pdf_filespec_params, which mupdf does not fill in from /Desc.
+static Str PdfFilespecDescription(fz_context* ctx, pdf_obj* fs) {
+    pdf_obj* desc = pdf_dict_get(ctx, fs, PDF_NAME(Desc));
+    if (!pdf_is_string(ctx, desc)) {
+        return {};
+    }
+    const char* s = pdf_to_text_string(ctx, desc);
+    return (s && *s) ? str::Dup(Str(s)) : Str{};
+}
+
+// The portfolio's display order: /Root/Collection/D is an ordered array of
+// file specs (or of nested collections, which we flatten). Returns the number
+// of entries written to `out`, each a kept reference the caller must drop.
+//
+// This is the only order-preserving source. pdf_load_name_tree() flattens the
+// name tree into a pdf_obj dict, and mupdf dicts are kept key-sorted, so
+// enumerating that way silently re-sorts the files alphabetically - fine for
+// the attachment list, wrong for a portfolio whose order is meaningful.
+static int PdfLoadCollectionOrder(fz_context* ctx, pdf_document* doc, pdf_obj** out, int maxOut) {
+    int n = 0;
+    fz_try(ctx) {
+        pdf_obj* root = pdf_dict_get(ctx, pdf_trailer(ctx, doc), PDF_NAME(Root));
+        // both of these are borrowed from the catalog - do NOT drop them
+        pdf_obj* collection = pdf_dict_get(ctx, root, PDF_NAME(Collection));
+        if (!pdf_is_dict(ctx, collection)) {
+            break;
+        }
+        pdf_obj* arr = pdf_dict_get(ctx, collection, PDF_NAME(D));
+        if (!pdf_is_array(ctx, arr)) {
+            break;
+        }
+        int len = pdf_array_len(ctx, arr);
+        for (int i = 0; i < len && n < maxOut; i++) {
+            pdf_obj* o = pdf_array_get(ctx, arr, i);
+            if (!o) {
+                continue;
+            }
+            if (pdf_is_dict(ctx, o) && pdf_dict_get(ctx, o, PDF_NAME(D))) {
+                // a nested collection: recurse into it, keeping the outer order
+                n += PdfLoadCollectionOrder(ctx, doc, out + n, maxOut - n);
+                continue;
+            }
+            out[n++] = pdf_keep_obj(ctx, o);
+        }
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+    }
+    return n;
+}
+
+static const int kMaxCollectionEntries = 4096;
+
+// A PDF portfolio: the catalog has /Root/Collection, so the document is a
+// bundle of embedded files rather than something to read page by page.
+static bool PdfIsPortfolio(fz_context* ctx, pdf_document* doc) {
+    if (!doc) {
+        return false;
+    }
+    bool isPortfolio = false;
+    fz_try(ctx) {
+        pdf_obj* root = pdf_dict_get(ctx, pdf_trailer(ctx, doc), PDF_NAME(Root));
+        isPortfolio = pdf_is_dict(ctx, pdf_dict_get(ctx, root, PDF_NAME(Collection)));
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        isPortfolio = false;
+    }
+    return isPortfolio;
+}
+
 // Note: make sure to only call with docLock
 // PdfLoadAttachment && PdfLoadAttachments must traverse in the same order
 static Str PdfLoadAttachment(fz_context* ctx, pdf_document* doc, int no) {
     pdf_obj* dict;
-    fz_var(dict);
+    pdf_obj** ordered = nullptr;
+    int nOrdered = 0;
     Str res;
+    fz_var(dict);
 
     fz_try(ctx) {
-        dict = pdf_load_name_tree(ctx, doc, PDF_NAME(EmbeddedFiles));
-        if (!dict) {
-            break;
+        // must match the order PdfLoadAttachments() enumerated in
+        if (PdfIsPortfolio(ctx, doc)) {
+            ordered = (pdf_obj**)fz_malloc(ctx, sizeof(pdf_obj*) * kMaxCollectionEntries);
+            nOrdered = PdfLoadCollectionOrder(ctx, doc, ordered, kMaxCollectionEntries);
+        }
+        if (nOrdered <= 0) {
+            fz_free(ctx, ordered);
+            ordered = nullptr;
+            nOrdered = 0;
+            dict = pdf_load_name_tree(ctx, doc, PDF_NAME(EmbeddedFiles));
+            if (!dict) {
+                break;
+            }
         }
 
-        int n = pdf_dict_len(ctx, dict);
+        int n = ordered ? nOrdered : pdf_dict_len(ctx, dict);
         for (int i = 0; i < n; i++) {
-            pdf_obj* fs = pdf_dict_get_val(ctx, dict, i);
+            pdf_obj* fs = ordered ? ordered[i] : pdf_dict_get_val(ctx, dict, i);
 
             // https://github.com/sumatrapdfreader/sumatrapdf/issues/1666
             // the `false &&` disable is deliberate; silence /analyze C6237
@@ -2944,11 +3130,20 @@ static Str PdfLoadAttachment(fz_context* ctx, pdf_document* doc, int no) {
             }
             if (no == i + 1) {
                 fz_buffer* buf = pdf_load_embedded_file_contents(ctx, fs);
-                res = str::Dup(Str((char*)buf->data, (int)buf->len));
-                fz_drop_buffer(ctx, buf);
+                if (buf) {
+                    res = str::Dup(Str((char*)buf->data, (int)buf->len));
+                    fz_drop_buffer(ctx, buf);
+                }
                 i = n + 1; // exit for loop
             }
         }
+    }
+    fz_always(ctx) {
+        for (int i = 0; i < nOrdered; i++) {
+            pdf_drop_obj(ctx, ordered[i]);
+        }
+        fz_free(ctx, ordered);
+        pdf_drop_obj(ctx, dict);
     }
     fz_always(ctx) {
         pdf_drop_obj(ctx, dict);
@@ -2988,19 +3183,36 @@ static Str PdfLoadAnnotationAttachment(fz_context* ctx, pdf_document* doc, int o
 static fz_outline* PdfLoadAttachments(fz_context* ctx, pdf_document* doc, Str path) {
     fz_outline root{};
     pdf_obj* dict;
+    // the portfolio's order, when the document has one; kept out here so
+    // fz_always can release it even when the try block throws
+    pdf_obj** ordered = nullptr;
+    int nOrdered = 0;
 
     fz_var(root);
     fz_var(dict);
 
     fz_try(ctx) {
-        dict = pdf_load_name_tree(ctx, doc, PDF_NAME(EmbeddedFiles));
-        if (!dict) {
-            break;
+        // A portfolio (/Root/Collection) states its own display order, and that
+        // order is the whole point of it, so walk that when it is there.
+        // Otherwise fall back to /Names/EmbeddedFiles.
+        if (PdfIsPortfolio(ctx, doc)) {
+            ordered = (pdf_obj**)fz_malloc(ctx, sizeof(pdf_obj*) * kMaxCollectionEntries);
+            nOrdered = PdfLoadCollectionOrder(ctx, doc, ordered, kMaxCollectionEntries);
+        }
+        if (nOrdered <= 0) {
+            fz_free(ctx, ordered);
+            ordered = nullptr;
+            nOrdered = 0;
+            dict = pdf_load_name_tree(ctx, doc, PDF_NAME(EmbeddedFiles));
+            if (!dict) {
+                break;
+            }
         }
 
         fz_outline* curr = &root;
-        for (int i = 0; i < pdf_dict_len(ctx, dict); i++) {
-            pdf_obj* fs = pdf_dict_get_val(ctx, dict, i);
+        int n = ordered ? nOrdered : pdf_dict_len(ctx, dict);
+        for (int i = 0; i < n; i++) {
+            pdf_obj* fs = ordered ? ordered[i] : pdf_dict_get_val(ctx, dict, i);
 
             // https://github.com/sumatrapdfreader/sumatrapdf/issues/1666
             // the `false &&` disable is deliberate; silence /analyze C6237
@@ -3017,12 +3229,19 @@ static fz_outline* PdfLoadAttachments(fz_context* ctx, pdf_document* doc, Str pa
             fz_outline* link = fz_new_outline(ctx);
             link->title = fz_strdup(ctx, nameStr);
             link->page.page = i + 1;
-            link->uri = fz_strdup(ctx, nameStr);
+            // not used for attachments otherwise, and it is where the
+            // description goes; see DestFromAttachment
+            Str desc = PdfFilespecDescription(ctx, fs);
+            link->uri = desc ? fz_strdup(ctx, desc.s) : nullptr;
             curr->next = link;
             curr = link;
         }
     }
     fz_always(ctx) {
+        for (int i = 0; i < nOrdered; i++) {
+            pdf_drop_obj(ctx, ordered[i]);
+        }
+        fz_free(ctx, ordered);
         pdf_drop_obj(ctx, dict);
     }
     fz_catch(ctx) {
@@ -3381,6 +3600,9 @@ EngineMupdf::~EngineMupdf() {
         PdfDarkModeEngineCacheFree(ctx, darkModeEngineCache);
         darkModeEngineCache = nullptr;
     }
+    // let the document run its /Root/AA/WC (will close) action while the page
+    // tree is still alive
+    PdfDocEventWillClose(this);
     for (FzPageInfo* pi : pages) {
         DeleteVecMembers(pi->links);
         DeleteVecMembers(pi->autoLinks);
@@ -3408,6 +3630,15 @@ EngineMupdf::~EngineMupdf() {
         }
         PdfDarkModeInvalidatePage(ctx, pi);
         if (pi->page) {
+            // run the page's /AA/C (close) action before the page goes away
+            if (pdfdoc) {
+                fz_try(ctx) {
+                    pdf_page_event_close(ctx, pdf_page_from_fz_page(ctx, pi->page));
+                }
+                fz_catch(ctx) {
+                    fz_report_error(ctx);
+                }
+            }
             fz_drop_page(ctx, pi->page);
         }
         // storage is arena-owned; run the destructor in place so the inner
@@ -4474,6 +4705,13 @@ bool EngineMupdf::FinishLoading() {
     auto* ctx = Ctx();
     pdfdoc = pdf_specifics(ctx, _doc);
     if (pdfdoc) {
+        // Remember whether MuPDF had to rebuild the xref. The repair itself is
+        // silent (only a fz_warn), so without this the user has no idea the file
+        // was malformed. Ask while the document is fresh and we still hold no
+        // locks that pdf_was_repaired() could need.
+        pdfWasRepaired = pdf_was_repaired(ctx, pdfdoc) != 0;
+    }
+    if (pdfdoc) {
         // allow loading external-file image streams from next to the PDF (#3731)
         pdf_set_load_external_stream_fn(ctx, pdfdoc, EngineMupdfLoadExternalStream, this);
     }
@@ -4565,6 +4803,12 @@ bool EngineMupdf::FinishLoading() {
 
     attachments = PdfLoadAttachments(ctx, pdfdoc, FilePath());
 
+    // A portfolio (/Root/Collection) is a bundle of files rather than a
+    // document to read: Acrobat shows the file list instead of the pages.
+    // mupdf never looks at /Collection, so note it here and let the UI label
+    // and order the embedded files the way the document asks for.
+    isPortfolio = PdfIsPortfolio(ctx, pdfdoc);
+
     pdf_obj* origInfo = nullptr;
     fz_var(origInfo);
     fz_try(ctx) {
@@ -4588,6 +4832,19 @@ bool EngineMupdf::FinishLoading() {
         bool isMarked = pdf_to_bool(ctx, marked);
         if (isMarked) {
             pdf_dict_puts_drop(ctx, pdfInfo, "Marked", PDF_TRUE);
+            // Validate the structure tree. This has to happen here rather than
+            // in the properties window, because it repairs what it can (a
+            // missing /P on a StructElem, say) as a side effect. It memoizes
+            // its result on the document, so re-checking is free.
+            fz_try(ctx) {
+                int structStatus = (int)pdf_check_structure_tree(ctx, pdfdoc);
+                if (structStatus != 0) {
+                    pdf_dict_puts_drop(ctx, pdfInfo, "StructTree", pdf_new_int(ctx, structStatus));
+                }
+            }
+            fz_catch(ctx) {
+                fz_report_error(ctx);
+            }
         }
         // also remember known output intents (PDF/X, etc.)
         pdf_obj* intents = pdf_dict_getp(ctx, trailer, "Root/OutputIntents");
@@ -4603,10 +4860,21 @@ bool EngineMupdf::FinishLoading() {
             }
             pdf_dict_puts_drop(ctx, pdfInfo, "OutputIntents", list);
         }
-        // also note common unsupported features (such as XFA forms)
-        pdf_obj* xfa = pdf_dict_getp(ctx, pdf_trailer(ctx, pdfdoc), "Root/AcroForm/XFA");
+        // also note XFA forms. We only ever render the AcroForm layer. A "pure
+        // XFA" document has no AcroForm/Fields at all, so there is nothing we
+        // can fill in and the user deserves to know why the form is empty. A
+        // "hybrid" one (XFA + AcroForm, as produced by Acrobat) fills in fine
+        // on its AcroForm layer, so warning about it would be a false alarm -
+        // just note it in document properties.
+        // (We deliberately don't use pdf_was_pure_xfa() here: it walks every
+        // saved version and runs off the end of the xref for a document with
+        // no pure-XFA version, and it throws for documents mupdf repaired.)
+        pdf_obj* acroForm = pdf_dict_getp(ctx, pdf_trailer(ctx, pdfdoc), "Root/AcroForm");
+        pdf_obj* xfa = pdf_dict_get(ctx, acroForm, PDF_NAME(XFA));
         if (pdf_is_array(ctx, xfa)) {
-            pdf_dict_puts_drop(ctx, pdfInfo, "Unsupported_XFA", PDF_TRUE);
+            bool isPureXfa = pdf_array_len(ctx, pdf_dict_get(ctx, acroForm, PDF_NAME(Fields))) == 0;
+            pdf_dict_puts_drop(ctx, pdfInfo, isPureXfa ? "Unsupported_XFA" : "Xfa_Forms",
+                               isPureXfa ? PDF_TRUE : pdf_new_name(ctx, "hybrid"));
         }
     }
     fz_catch(ctx) {
@@ -4640,6 +4908,11 @@ bool EngineMupdf::FinishLoading() {
     // the fz_context passed here as its allocator and fz_drop_document() must
     // tear it down with the same context (see ~EngineMupdf).
     if (!gDisableFormJavaScript) {
+        hasDocumentJavaScript = HasDocumentLevelJavaScript(_ctx, pdfdoc);
+        // must come first: pdf_enable_js() below runs /Root/Names/JavaScript,
+        // whose app.alert() / doc.print() / app.launchURL() calls would have
+        // nowhere to go if we only installed the callback afterwards
+        PdfInstallDocEventCallback(this);
         fz_try(_ctx) {
             pdf_enable_js(_ctx, pdfdoc);
         }
@@ -4663,6 +4936,10 @@ static NO_INLINE IPageDestination* DestFromAttachment(EngineMupdf* engine, fz_ou
     dest->kind = kindDestinationAttachment;
     // WCHAR* path = ToWStr(outline->uri);
     dest->name = str::Dup(outline->title);
+    // the description the filespec gives (/Desc), which a portfolio uses to say
+    // what each file is; PdfLoadAttachments parks it in outline->uri, which
+    // attachments have no other use for
+    dest->description = outline->uri ? str::Dup(outline->uri) : Str{};
     // page is really a stream number
     Str title = outline->title ? Str(outline->title) : StrL("");
     TempStr nameHex = str::MemToHexTemp(title);
@@ -5599,6 +5876,13 @@ FzPageInfo* EngineMupdf::GetFzPageInfo(int pageNo, bool loadQuick, fz_cookie* co
     if (!pageInfo->page) {
         fz_try(ctx) {
             pageInfo->page = fz_load_page(ctx, _doc, pageIdx);
+            // run the page's /AA/O (open) action. We load pages with
+            // fz_load_page() rather than pdf_open_page(), so mupdf never runs
+            // it for us; this is the one place the long-lived fz_page is
+            // created, so the action fires exactly once per page.
+            if (pageInfo->page && pdfdoc) {
+                pdf_page_event_open(ctx, pdf_page_from_fz_page(ctx, pageInfo->page));
+            }
         }
         fz_catch(ctx) {
             fz_report_error(ctx);
@@ -5684,8 +5968,17 @@ FzPageInfo* EngineMupdf::GetFzPageInfo(int pageNo, bool loadQuick, fz_cookie* co
     // calls see the flag and skip slow path.
     pageInfo->fullyLoaded = true;
 
-    // Load page links (fast operation, done inside renderLock)
-    fz_link* link = fz_load_links(ctx, page);
+    // Load page links (fast operation, done inside renderLock). A malformed
+    // /Annots array can make fz_load_links throw; don't let an uncaught throw
+    // reach mupdf's abort path just because a page has broken links.
+    fz_link* link = nullptr;
+    fz_try(ctx) {
+        link = fz_load_links(ctx, page);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        link = nullptr;
+    }
     link = FixupPageLinks(link);
     if (pdfdoc) {
         fz_link* btnLinks = nullptr;
@@ -5723,7 +6016,15 @@ FzPageInfo* EngineMupdf::GetFzPageInfo(int pageNo, bool loadQuick, fz_cookie* co
             // so show the description the PDF gives it, like other viewers do
             auto* dest = (PageDestinationMupdf*)pel->AsLink();
             if (dest && !PageDestGetValue(dest)) {
-                dest->value = PdfLinkContents(ctx, pdfdoc, pdfpage, pageNo, link->rect);
+                // the link destination's target object can be broken even
+                // though the link itself loaded; keep the link with an empty
+                // description instead of aborting the whole page load
+                fz_try(ctx) {
+                    dest->value = PdfLinkContents(ctx, pdfdoc, pdfpage, pageNo, link->rect);
+                }
+                fz_catch(ctx) {
+                    fz_report_error(ctx);
+                }
             }
             pageInfo->links.Append(pel);
         }
@@ -5761,7 +6062,10 @@ void ExtractTextLazy(EngineMupdf* engine, FzPageInfo* pageInfo, fz_cookie* cooki
 
     fz_stext_page* stext = nullptr;
     fz_var(stext);
-    fz_stext_options opts = NewTextPageOptions(FZ_STEXT_PRESERVE_IMAGES);
+    // COLLECT_STRUCTURE: for a tagged PDF, wrap the blocks in structure-tree
+    // nodes so FzTextPageToUtf8 can emit them in reading order instead of
+    // content-stream order. No effect on an untagged page.
+    fz_stext_options opts = NewTextPageOptions(FZ_STEXT_PRESERVE_IMAGES | FZ_STEXT_COLLECT_STRUCTURE);
     {
         ScopedRecursiveMutex docScope(&engine->docLock);
         fz_try(ctx) {
@@ -6726,8 +7030,15 @@ Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
         if (pageRect) {
             pRect = ToFzRect(*pageRect);
         } else {
-            // TODO(port): use pageInfo->mediabox?
-            pRect = fz_bound_page(ctx, page);
+            fz_try(ctx) {
+                pRect = fz_bound_page(ctx, page);
+            }
+            fz_catch(ctx) {
+                fz_report_error(ctx);
+                // pageInfo->mediabox always has a usable value (FinishLoading
+                // and GetFzPageInfo fall back to 612x792 for broken pages)
+                pRect = ToFzRect(pageInfo->mediabox);
+            }
         }
         ctm = viewctm(page, zoom, rotation);
         ibounds = fz_round_rect(fz_transform_rect(pRect, ctm));
@@ -7206,7 +7517,9 @@ static PageText ExtractPageTextLocked(EngineMupdf* e, FzPageInfo* pageInfo) {
     ScopedRecursiveMutex docScope(&e->docLock);
     fz_stext_page* stext = nullptr;
     fz_var(stext);
-    fz_stext_options opts = NewTextPageOptions();
+    // COLLECT_STRUCTURE: see ExtractTextLazy(); makes exported text follow the
+    // tagged PDF's reading order
+    fz_stext_options opts = NewTextPageOptions(FZ_STEXT_COLLECT_STRUCTURE);
     fz_try(ctx) {
         stext = fz_new_stext_page_from_whole_page(ctx, pageInfo->page, &opts);
     }
@@ -7217,11 +7530,33 @@ static PageText ExtractPageTextLocked(EngineMupdf* e, FzPageInfo* pageInfo) {
         return {};
     }
     PageText res;
-    res.text = FzTextPageToUtf8(stext, &res.coords);
+    // collect the structure spans too: this is the text a screen reader gets
+    // (via UI Automation), and it is the only place that knows which run of it
+    // is a heading
+    res.text = FzTextPageToUtf8(stext, &res.coords, &res.spans);
     fz_drop_stext_page(ctx, stext);
     res.len = res.text.len;
     res.nCodepoints = Utf8CodepointCount(res.text);
     return res;
+}
+
+// The tagged-PDF structure of a page: which runs of its extracted text are
+// headings, and at what level. The caller owns the Str in each span, so it must
+// release them (str::Free) when done.
+void EngineMupdfGetPageStructure(EngineBase* engine, int pageNo, Vec<PageTextSpan>* out) {
+    out->Reset();
+    PageText pageText = engine->ExtractPageText(pageNo);
+    for (const PageTextSpan& span : pageText.spans) {
+        // deep copy: PageText owns the tag strings and is about to be freed,
+        // so a shallow copy here would leave the caller with dangling pointers
+        PageTextSpan copy = span;
+        copy.type = span.type ? str::Dup(span.type) : Str{};
+        if (!out->Append(copy)) {
+            str::Free(copy.type);
+            break;
+        }
+    }
+    FreePageText(&pageText);
 }
 
 PageText EngineMupdf::ExtractPageText(int pageNo) {
@@ -7533,6 +7868,41 @@ TempStr EngineMupdf::GetPropertyTemp(DocProp prop) {
             return "XFA";
         }
         return {};
+    }
+
+    if (prop == DocProp::XfaForms) {
+        // stable token, translated by the properties dialog
+        pdf_obj* xfa = pdf_dict_gets(ctx, pdfInfo, "Xfa_Forms");
+        return pdf_is_name(ctx, xfa) ? Str(pdf_to_name(ctx, xfa)) : Str();
+    }
+
+    if (prop == DocProp::StructTreeStatus) {
+        // pdf_check_structure_result bitmask, as stable tokens the properties
+        // dialog turns into text (the engine layer doesn't translate).
+        pdf_obj* status = pdf_dict_gets(ctx, pdfInfo, "StructTree");
+        if (!pdf_is_int(ctx, status)) {
+            return {};
+        }
+        int flags = pdf_to_int(ctx, status);
+        StrVec parts;
+        if (flags & PDF_STRUCT_BROKEN) {
+            parts.Append(StrL("broken"));
+        } else if (flags & PDF_STRUCT_FIXED) {
+            parts.Append(StrL("repaired"));
+        } else {
+            parts.Append(StrL("valid"));
+        }
+        if (flags & PDF_STRUCT_HAS_CYCLE) {
+            parts.Append(StrL("cycle"));
+        }
+        if (flags & PDF_STRUCT_HAS_TABLE_SPAN_ATTRIBUTES) {
+            parts.Append(StrL("table-spans"));
+        } else if (flags & PDF_STRUCT_HAS_TABLE_ATTRIBUTES) {
+            parts.Append(StrL("table-attributes"));
+        } else if (flags & PDF_STRUCT_HAS_ATTRIBUTES) {
+            parts.Append(StrL("attributes"));
+        }
+        return JoinTemp(&parts, ",");
     }
 
     // @gen-start docprop-pdf-info
@@ -8144,8 +8514,6 @@ bool EngineMupdfSaveUpdated(EngineBase* engine, Str path, const ShowErrorCb& sho
 
     pdf_write_options save_opts{};
     save_opts = pdf_default_write_options2;
-    // TODO: if saving to a new file, don't do incremental and linearlize?
-    // save_opts.do_linear = 1;
     save_opts.do_incremental = pdf_can_be_saved_incrementally(ctx, epdf->pdfdoc);
     save_opts.do_compress = 1;
     save_opts.do_compress_images = 1;
@@ -8156,6 +8524,9 @@ bool EngineMupdfSaveUpdated(EngineBase* engine, Str path, const ShowErrorCb& sho
 
     bool ok = false;
     fz_var(ok);
+    // /Root/AA/WS and /Root/AA/DS; mupdf saves without running them for us.
+    // did_save runs even when the save failed, which is what the action means.
+    PdfDocEventWillSave(engine);
     fz_try(ctx) {
         pdf_save_document(ctx, epdf->pdfdoc, CStrTemp(path), &save_opts);
         ok = true;
@@ -8170,6 +8541,7 @@ bool EngineMupdfSaveUpdated(EngineBase* engine, Str path, const ShowErrorCb& sho
             showErrorFunc.Call(Str(mupdfErr));
         }
     }
+    PdfDocEventDidSave(engine);
 
     // TOOD: what if not ok?
     // note: this should be short-lived as we should re-load the file
@@ -8203,6 +8575,291 @@ bool EngineMupdfSaveCopy(EngineBase* engine, Str path) {
         logf("EngineMupdfSaveCopy: saving '%s' failed: '%s'\n", path, Str(fz_caught_message(ctx)));
     }
     return ok;
+}
+
+// Throw away a page's cached Annotation* wrappers so they get rebuilt from
+// mupdf's state on next access. Anything else holding those pointers (the
+// annotations window, the selected annotation) must be reset by the caller
+// first - they are non-owning.
+static void DropAnnotationCache(EngineMupdf* e, int pageNo) {
+    ScopedRecursiveMutex scope(&e->pagesLock);
+    if (pageNo < 1 || pageNo > len(e->pages)) {
+        return;
+    }
+    FzPageInfo* pi = e->pages[pageNo - 1];
+    if (!pi) {
+        return;
+    }
+    DeleteVecMembers(pi->annotations);
+    DeleteVecMembers(pi->widgets);
+    DeleteVecMembers(pi->comments);
+    pi->annotations.Clear();
+    pi->widgets.Clear();
+    pi->comments.Clear();
+    pi->annotsLoaded = false;
+    pi->hitIndexDirty = true;
+    pi->elementsNeedRebuilding = true;
+    // the annot display list (and any tiles made from it) still show the marks
+    pi->annotDisplayList = nullptr;
+    // redaction rewrites the page's content stream, so the cached content
+    // display list is stale too
+    if (pi->displayList) {
+        fz_drop_display_list(e->Ctx(), pi->displayList);
+        pi->displayList = nullptr;
+    }
+    pi->annotGeneration++;
+}
+
+// Permanently remove the content covered by redaction annotations. mupdf
+// deletes the Redact annotations themselves plus any /Link and /FreeText they
+// touch, rewrites the page's content streams, and sets doc->redacted (which
+// makes incremental saving impossible and turns on garbage collection, so the
+// removed objects really do leave the file).
+bool EngineMupdfApplyRedactions(EngineBase* engine, const PdfRedactOptions& opts, int pageNo) {
+    EngineMupdf* epdf = AsEngineMupdf(engine);
+    if (!epdf || !epdf->pdfdoc) {
+        return false;
+    }
+    if (pageNo >= 1 && (pageNo > epdf->pageCount || pageNo > len(epdf->pages))) {
+        return false;
+    }
+    auto* ctx = epdf->Ctx();
+    ScopedRecursiveMutex scope(&epdf->docLock);
+
+    pdf_redact_options ropts{};
+    ropts.black_boxes = opts.drawBlackBoxes ? 1 : 0;
+    ropts.image_method = opts.imageMethod;
+    ropts.line_art = opts.lineArtMethod;
+    ropts.text = opts.textMethod;
+
+    int firstPage = pageNo >= 1 ? pageNo : 1;
+    int lastPage = pageNo >= 1 ? pageNo : epdf->pageCount;
+    bool applied = false;
+    for (int pn = firstPage; pn <= lastPage; pn++) {
+        FzPageInfo* pi = epdf->pages[pn - 1];
+        if (!pi || !pi->page) {
+            continue;
+        }
+        fz_try(ctx) {
+            if (pdf_redact_page(ctx, epdf->pdfdoc, pdf_page_from_fz_page(ctx, pi->page), &ropts)) {
+                applied = true;
+                logf("EngineMupdfApplyRedactions: page %d redacted\n", pn);
+            }
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+            logf("EngineMupdfApplyRedactions: page %d failed: %s\n", pn, Str(fz_caught_message(ctx)));
+        }
+    }
+    if (!applied) {
+        return false;
+    }
+    for (int pn = firstPage; pn <= lastPage; pn++) {
+        DropAnnotationCache(epdf, pn);
+    }
+    // pdf_redact_page() doesn't know about our dirty flag, and without it
+    // EngineMupdfSaveUpdated() bails out and silently saves nothing.
+    epdf->modifiedAnnotations = true;
+    return true;
+}
+
+// Steps the document's undo journal. After a step the cached Annotation*
+// wrappers describe objects mupdf has replaced, so they are dropped and
+// rebuilt on next access - same reasoning as after applying redactions.
+static bool EngineMupdfStepUndo(EngineBase* engine, bool isUndo) {
+    EngineMupdf* epdf = AsEngineMupdf(engine);
+    if (!epdf || !epdf->pdfdoc || !epdf->journalEnabled) {
+        return false;
+    }
+    auto* ctx = epdf->Ctx();
+    ScopedRecursiveMutex scope(&epdf->docLock);
+    bool ok = false;
+    fz_try(ctx) {
+        if (isUndo) {
+            pdf_undo(ctx, epdf->pdfdoc);
+        } else {
+            pdf_redo(ctx, epdf->pdfdoc);
+        }
+        ok = true;
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        logf("%s failed: %s\n", Str(isUndo ? "pdf_undo" : "pdf_redo"), Str(fz_caught_message(ctx)));
+        return false;
+    }
+    if (!ok) {
+        return false;
+    }
+    for (int pn = 1; pn <= epdf->pageCount; pn++) {
+        DropAnnotationCache(epdf, pn);
+        // page content and appearances can have changed too
+        FzPageInfo* pi = epdf->pages[pn - 1];
+        if (!pi) {
+            continue;
+        }
+        if (pi->displayList) {
+            fz_drop_display_list(ctx, pi->displayList);
+            pi->displayList = nullptr;
+        }
+        if (pi->annotDisplayList) {
+            fz_drop_display_list(ctx, pi->annotDisplayList);
+            pi->annotDisplayList = nullptr;
+        }
+    }
+    epdf->modifiedAnnotations = true;
+    return true;
+}
+
+static bool EngineMupdfCanStep(EngineBase* engine, bool isUndo) {
+    EngineMupdf* epdf = AsEngineMupdf(engine);
+    if (!epdf || !epdf->pdfdoc || !epdf->journalEnabled) {
+        return false;
+    }
+    // pdf_can_undo()/pdf_can_redo() throw when the journal is off, which is
+    // why the journalEnabled check has to come first
+    auto* ctx = epdf->Ctx();
+    ScopedRecursiveMutex scope(&epdf->docLock);
+    bool can = false;
+    fz_try(ctx) {
+        can = isUndo ? (pdf_can_undo(ctx, epdf->pdfdoc) != 0) : (pdf_can_redo(ctx, epdf->pdfdoc) != 0);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        can = false;
+    }
+    return can;
+}
+
+bool EngineMupdfCanUndo(EngineBase* engine) {
+    return EngineMupdfCanStep(engine, true);
+}
+
+bool EngineMupdfCanRedo(EngineBase* engine) {
+    return EngineMupdfCanStep(engine, false);
+}
+
+bool EngineMupdfUndo(EngineBase* engine) {
+    return EngineMupdfStepUndo(engine, true);
+}
+
+bool EngineMupdfRedo(EngineBase* engine) {
+    return EngineMupdfStepUndo(engine, false);
+}
+
+bool EngineMupdfHasDocumentJavaScript(EngineBase* engine) {
+    EngineMupdf* epdf = AsEngineMupdf(engine);
+    if (!epdf || !epdf->pdfdoc) {
+        return false;
+    }
+    return epdf->hasDocumentJavaScript;
+}
+
+// Layer visibility is baked into the page's display list, so a change means
+// every page has to be re-run - not just the visible ones.
+static void DropAllDisplayLists(EngineMupdf* epdf) {
+    auto* ctx = epdf->Ctx();
+    for (int pn = 1; pn <= epdf->pageCount; pn++) {
+        FzPageInfo* pi = epdf->pages[pn - 1];
+        if (!pi) {
+            continue;
+        }
+        if (pi->displayList) {
+            fz_drop_display_list(ctx, pi->displayList);
+            pi->displayList = nullptr;
+        }
+        if (pi->annotDisplayList) {
+            fz_drop_display_list(ctx, pi->annotDisplayList);
+            pi->annotDisplayList = nullptr;
+        }
+    }
+}
+
+int EngineMupdfGetLayerUiCount(EngineBase* engine) {
+    EngineMupdf* epdf = AsEngineMupdf(engine);
+    if (!epdf || !epdf->pdfdoc) {
+        return 0;
+    }
+    auto* ctx = epdf->Ctx();
+    ScopedRecursiveMutex scope(&epdf->docLock);
+    int n = 0;
+    fz_try(ctx) {
+        n = pdf_count_layer_config_ui(ctx, epdf->pdfdoc);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        n = 0;
+    }
+    return n;
+}
+
+bool EngineMupdfGetLayerUiItem(EngineBase* engine, int idx, PdfLayerUiItem& out) {
+    EngineMupdf* epdf = AsEngineMupdf(engine);
+    if (!epdf || !epdf->pdfdoc || idx < 0) {
+        return false;
+    }
+    auto* ctx = epdf->Ctx();
+    ScopedRecursiveMutex scope(&epdf->docLock);
+    bool ok = false;
+    fz_try(ctx) {
+        pdf_layer_config_ui info = {};
+        pdf_layer_config_ui_info(ctx, epdf->pdfdoc, idx, &info);
+        out.text = str::Dup(Str(info.text ? info.text : ""));
+        out.depth = info.depth;
+        out.type = (int)info.type;
+        out.selected = info.selected != 0;
+        out.locked = info.locked != 0;
+        ok = true;
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        ok = false;
+    }
+    return ok;
+}
+
+bool EngineMupdfSetLayerUiSelected(EngineBase* engine, int idx, bool selected) {
+    EngineMupdf* epdf = AsEngineMupdf(engine);
+    if (!epdf || !epdf->pdfdoc || idx < 0) {
+        return false;
+    }
+    auto* ctx = epdf->Ctx();
+    ScopedRecursiveMutex scope(&epdf->docLock);
+    bool ok = false;
+    fz_try(ctx) {
+        if (selected) {
+            pdf_select_layer_config_ui(ctx, epdf->pdfdoc, idx);
+        } else {
+            pdf_deselect_layer_config_ui(ctx, epdf->pdfdoc, idx);
+        }
+        DropAllDisplayLists(epdf);
+        ok = true;
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        ok = false;
+    }
+    if (ok) {
+        logf("layer %d -> %d\n", idx, (int)selected);
+    }
+    return ok;
+}
+
+void EngineMupdfResetLayerUi(EngineBase* engine) {
+    EngineMupdf* epdf = AsEngineMupdf(engine);
+    if (!epdf || !epdf->pdfdoc) {
+        return;
+    }
+    auto* ctx = epdf->Ctx();
+    ScopedRecursiveMutex scope(&epdf->docLock);
+    fz_try(ctx) {
+        // -1 is the document's own default configuration (OCProperties/D);
+        // 0 and up index OCProperties/Configs, which many files don't have
+        pdf_select_layer_config(ctx, epdf->pdfdoc, -1);
+        DropAllDisplayLists(epdf);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+    }
 }
 
 // caller must hold pagesLock (protects pages[] and pageInfo->images)
@@ -8722,6 +9379,13 @@ Str EngineMupdfLoadAnnotAttachment(EngineBase* engine, int objNum) {
     }
     ScopedRecursiveMutex scope(&epdf->docLock);
     return PdfLoadAnnotationAttachment(epdf->Ctx(), epdf->pdfdoc, objNum);
+}
+
+// A PDF portfolio: the catalog has /Root/Collection, so the document is a
+// bundle of embedded files rather than something to read page by page.
+bool EngineMupdfIsPortfolio(EngineBase* engine) {
+    EngineMupdf* epdf = AsEngineMupdf(engine);
+    return epdf && epdf->isPortfolio;
 }
 
 // (re)builds the spatial hit-test indexes for a page's annotations and

@@ -50,6 +50,9 @@ struct PageInfo {
 
     // set to true if rendering this page failed (e.g. corrupt image data)
     bool failedToRender = false;
+    // consecutive render failures, used to retry transient failures before
+    // giving up and showing the error page
+    int renderFailCount = 0;
 };
 
 /* The current scroll state (needed for saving/restoring the scroll position) */

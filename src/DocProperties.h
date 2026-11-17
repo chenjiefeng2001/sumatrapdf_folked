@@ -56,6 +56,8 @@ enum class DocProp : u8 {
     SceneType = 51,
     ImageFileSize = 52,
     ImagePath = 53,
+    XfaForms = 54,
+    StructTreeStatus = 55,
 };
 
 extern DocProp gAllProps[];

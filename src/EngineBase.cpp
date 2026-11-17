@@ -64,6 +64,10 @@ static void EnsurePageText(PageText* pageText) {
 void FreePageText(PageText* pageText) {
     str::Free(pageText->text);
     free((void*)pageText->coords);
+    for (PageTextSpan& span : pageText->spans) {
+        str::Free(span.type);
+    }
+    pageText->spans.Reset();
     pageText->text = {};
     pageText->coords = nullptr;
     pageText->len = 0;
@@ -73,6 +77,7 @@ void FreePageText(PageText* pageText) {
 PageDestination::~PageDestination() {
     str::Free(value);
     str::Free(name);
+    str::Free(description);
 }
 
 // string value associated with the destination (e.g. a path or a URL)
@@ -402,11 +407,12 @@ bool EngineBase::HasErrors() {
     return !errors.IsEmpty();
 }
 
-// internal builder buffer (no copy); valid until next AppendError or engine
-// destruction — do not free or keep beyond the current frame
+// Copy the accumulated errors into the temp arena. A plain ToStr() would be a
+// view into errors' buffer, which a render thread's AppendError can reallocate
+// while the caller (Show Errors) is still building the window — a dangling read.
 TempStr EngineBase::GetErrorsTextTemp() {
     ScopedMutex scope(&errorsLock);
-    return ToStr(errors);
+    return ToStrTemp(errors);
 }
 
 EngineBase::~EngineBase() {

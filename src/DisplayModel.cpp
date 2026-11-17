@@ -74,6 +74,11 @@
 // if true, we pre-render the pages right before and after the visible pages
 bool gPredictiveRender = true;
 
+// A render can fail for transient reasons (temporary GDI/memory pressure), so
+// don't permanently mark a page as broken on the first failure. Retry a bounded
+// number of times; only then show the "Couldn't render page N" error page.
+static constexpr int kMaxRenderRetries = 2;
+
 static int ColumnsFromDisplayMode(DisplayMode displayMode) {
     if (!IsSingle(displayMode)) {
         return 2;
@@ -323,13 +328,25 @@ void DisplayModel::RenderFinished(PageRenderRequest* req) {
     if (req->errorCode == 1) {
         PageInfo* pageInfo = GetPageInfo(req->pageNo);
         if (pageInfo) {
-            pageInfo->failedToRender = true;
+            if (pageInfo->renderFailCount < kMaxRenderRetries) {
+                // A single failed render is often just transient GDI/memory
+                // pressure. Queue another attempt before branding the page as
+                // permanently broken (the retry goes through the render queue,
+                // so the UI thread is not blocked).
+                pageInfo->renderFailCount++;
+                if (cb) {
+                    cb->RequestRendering(this, req->pageNo);
+                }
+            } else {
+                pageInfo->failedToRender = true;
+            }
         }
         RepaintDisplay();
     } else if (req->errorCode == 0) {
         PageInfo* pageInfo = GetPageInfo(req->pageNo);
         if (pageInfo) {
             pageInfo->failedToRender = false;
+            pageInfo->renderFailCount = 0;
         }
         if (PageVisibleNearby(req->pageNo)) {
             RepaintDisplay();
@@ -1417,6 +1434,13 @@ void DisplayModel::Relayout(float newZoomVirtual, int newRotation) {
     rotation = NormalizeRotation(newRotation);
     zoomVirtual = newZoomVirtual;
     spreadCacheValid = false;
+
+    // a new zoom/rotation can make a previously failing page render fine
+    int nPages = PageCount();
+    for (int i = 0; i < nPages; i++) {
+        pagesInfo[i].failedToRender = false;
+        pagesInfo[i].renderFailCount = 0;
+    }
 
     bool needHScroll = false;
     bool needVScroll = false;

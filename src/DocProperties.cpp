@@ -59,6 +59,8 @@ static SeqStrings gPropNames =
     "sceneType\0"
     "imageFileSize\0"
     "imagePath\0"
+    "xfaForms\0"
+    "structTreeStatus\0"
     "\0";
 
 // clang-format off
@@ -75,6 +77,8 @@ DocProp gAllProps[] = {
     DocProp::PdfVersion,
     DocProp::PdfProducer,
     DocProp::PdfFileStructure,
+    DocProp::XfaForms,
+    DocProp::StructTreeStatus,
     DocProp::None,
 };
 // clang-format on

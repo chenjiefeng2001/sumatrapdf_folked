@@ -433,7 +433,42 @@ static void AppendPropTranslated(str::Builder& out, DocProp prop, Str val) {
     AppendProp(out, label, val);
 }
 
-static void AppendPdfFileStructure(str::Builder& out, Str fstruct, Str filePath) {
+// The engine reports the structure tree's health as stable, comma-separated
+// tokens (see DocProp::StructTreeStatus); turn them into one readable line.
+static void AppendStructTreeStatus(str::Builder& out, Str status) {
+    if (!status) {
+        return;
+    }
+    StrVec toks;
+    Split(&toks, status, ",", true);
+    StrVec texts;
+    for (Str tok : toks) {
+        Str text;
+        if (str::Eq(tok, StrL("valid"))) {
+            text = _TRA("no problems found");
+        } else if (str::Eq(tok, StrL("repaired"))) {
+            text = _TRA("problems repaired");
+        } else if (str::Eq(tok, StrL("broken"))) {
+            text = _TRA("broken");
+        } else if (str::Eq(tok, StrL("cycle"))) {
+            text = _TRA("contains a cycle");
+        } else if (str::Eq(tok, StrL("table-spans"))) {
+            text = _TRA("has table spans");
+        } else if (str::Eq(tok, StrL("table-attributes"))) {
+            text = _TRA("has table attributes");
+        } else if (str::Eq(tok, StrL("attributes"))) {
+            text = _TRA("has attributes");
+        }
+        if (text) {
+            texts.Append(text);
+        }
+    }
+    if (len(texts) > 0) {
+        AppendProp(out, _TRA("Structure Tree:"), JoinTemp(&texts, ", "));
+    }
+}
+
+static void AppendPdfFileStructure(str::Builder& out, Str fstruct, Str filePath, Str structTreeStatus) {
     if (len(fstruct) == 0) {
         bool isPDF = str::EndsWithI(filePath, StrL(".pdf"));
         if (isPDF) {
@@ -454,6 +489,7 @@ static void AppendPdfFileStructure(str::Builder& out, Str fstruct, Str filePath)
 
     if (parts.Contains("tagged")) {
         props.Append(_TRA("Tagged PDF"));
+        AppendStructTreeStatus(out, structTreeStatus);
     }
     if (parts.Contains("PDFX")) {
         props.Append("PDF/X (ISO 15930)");
@@ -640,7 +676,15 @@ static void GetPropsText(DocController* ctrl, str::Builder& out) {
     strTemp = FormatPermissionsTemp(ctrl);
     AppendProp(out, _TRA("Denied Permissions:"), strTemp);
 
-    AppendPdfFileStructure(out, GetPropValueTemp(props, DocProp::PdfFileStructure), ctrl->GetFilePath());
+    AppendPdfFileStructure(out, GetPropValueTemp(props, DocProp::PdfFileStructure), ctrl->GetFilePath(),
+                           GetPropValueTemp(props, DocProp::StructTreeStatus));
+
+    // XFA forms: "pure" ones can't be filled in at all (hence also the
+    // "XFA not supported" notification), "hybrid" ones use their AcroForm layer
+    Str xfaForms = GetPropValueTemp(props, DocProp::XfaForms);
+    if (str::Eq(xfaForms, StrL("hybrid"))) {
+        AppendProp(out, _TRA("XFA Forms:"), _TRA("using AcroForm layer"));
+    }
 
     int pageNo = ctrl->CurrentPageNo();
     bool isImages = false;
@@ -671,6 +715,8 @@ static void GetPropsText(DocController* ctrl, str::Builder& out) {
         DocProp::CreatorApp, DocProp::PdfProducer, DocProp::PdfVersion,
         DocProp::PdfFileStructure, DocProp::Files,
         DocProp::UnsupportedFeatures, DocProp::FontList,
+        DocProp::XfaForms,
+        DocProp::StructTreeStatus,
         DocProp::None,
     };
     // clang-format on

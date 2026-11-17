@@ -61,6 +61,7 @@ void EngineEbookCleanup();
 // the ebook font this reflowable document asked for and we couldn't load, so
 // the text came out in the default font; null if that didn't happen (#4600)
 Str EngineEbookFontUnavailable(EngineBase* engine);
+bool EngineMupdfWasRepaired(EngineBase* engine);
 
 // the user CSS generated from ebook settings (font family + line height), so
 // the Ebook Settings dialog can show exactly what the engine will apply
@@ -117,6 +118,57 @@ Str EngineMupdfGetPassword(EngineBase* engine);
 bool EngineMupdfSaveUpdated(EngineBase* engine, Str path, const ShowErrorCb& showErrorFunc);
 bool EngineMupdfSaveCopy(EngineBase* engine, Str path);
 
+// How to destroy content under a redaction annotation. Mirrors mupdf's
+// pdf_redact_options; the defaults here are stricter than mupdf's own, which
+// leaves vector graphics alone unless asked.
+struct PdfRedactOptions {
+    bool drawBlackBoxes = true;
+    // 0 = leave images, 1 = remove an image that intrudes at all, 2 = black out
+    // the intruding pixels, 3 = remove unless the intrusion is invisible
+    int imageMethod = 2;
+    // 0 = leave vector art, 1 = remove art that is fully covered, 2 = remove art
+    // that is touched at all
+    int lineArtMethod = 1;
+    // 0 = remove overlapping text (the safe choice), 1 = leave text alone
+    // (insecure), 2 = only remove text hidden via render mode
+    int textMethod = 0;
+};
+
+// Applies the redaction annotations on `pageNo` (or on every page when
+// pageNo < 0), permanently removing the content they cover. Irreversible:
+// saves the document as a full rewrite with garbage collection.
+bool EngineMupdfApplyRedactions(EngineBase*, const PdfRedactOptions&, int pageNo);
+
+// Undo/redo of annotation and form edits, via mupdf's journal. Only PDF
+// documents have them, and only after the first edit (the journal is enabled
+// lazily - see PdfJournal.h).
+bool EngineMupdfCanUndo(EngineBase*);
+bool EngineMupdfCanRedo(EngineBase*);
+bool EngineMupdfUndo(EngineBase*);
+bool EngineMupdfRedo(EngineBase*);
+
+// True when the document carries document-level JavaScript that runs on load
+// (and only when JavaScript is enabled).
+bool EngineMupdfHasDocumentJavaScript(EngineBase*);
+
+// PDF optional content (OCG) layers, as the document's own layer panel lists
+// them. Layer visibility is view state, not a document edit: nothing here marks
+// the document dirty or records an undo step.
+struct PdfLayerUiItem {
+    Str text;
+    int depth = 0;
+    // 0 = a plain label (not interactive), 1 = checkbox, 2 = radiobox
+    int type = 0;
+    bool selected = false;
+    bool locked = false;
+};
+
+int EngineMupdfGetLayerUiCount(EngineBase*);
+bool EngineMupdfGetLayerUiItem(EngineBase*, int idx, PdfLayerUiItem& out);
+bool EngineMupdfSetLayerUiSelected(EngineBase*, int idx, bool selected);
+// go back to the configuration the document was authored with
+void EngineMupdfResetLayerUi(EngineBase*);
+
 // digitally signing a PDF (SignDocumentDialog.cpp drives this)
 // appearance flag bits match mupdf's PDF_SIGNATURE_SHOW_* (logo is never used)
 constexpr int kPdfSignShowLabels = 1;
@@ -166,6 +218,12 @@ void EngineMupdfInvalidateDarkMode(EngineBase* engine);
 bool EngineSupportsSmartDarkMode(EngineBase* engine);
 Str EngineMupdfLoadAttachment(EngineBase*, int attachmentNo);
 Str EngineMupdfLoadAnnotAttachment(EngineBase*, int objNum);
+// the file is a PDF portfolio (/Root/Collection): its embedded files are the
+// content, listed in the order the document asks for
+bool EngineMupdfIsPortfolio(EngineBase*);
+// the tagged-PDF structure of a page, as runs of its extracted text. Only
+// headings are reported today; empty for an untagged page.
+void EngineMupdfGetPageStructure(EngineBase* engine, int pageNo, Vec<PageTextSpan>* out);
 TempStr EngineMupdfGetPdfInfo(Str path);
 TempStr EngineMupdfGetPdfOutline(Str path);
 

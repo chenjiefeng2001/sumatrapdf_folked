@@ -15,6 +15,7 @@
 #include "EngineBase.h"
 #include "base/GuessFileType.h"
 #include "EngineAll.h"
+#include "PdfDocEvents.h"
 #include "GlobalPrefs.h"
 #include "ChmModel.h"
 #include "MarkdownModel.h"
@@ -692,7 +693,10 @@ static bool PrintPageInBands(EngineBase& engine, HDC hdc, int pageNo, float zoom
     return anyOk;
 }
 
-static bool PrintToDevice(const PrintData& pd) {
+static bool PrintToDeviceImpl(const PrintData& pd, int* failedPagesOut) {
+    if (failedPagesOut) {
+        *failedPagesOut = 0;
+    }
     ReportIf(!pd.engine);
     if (!pd.engine) {
         logf("PrintToDevice: !pd.engine\n");
@@ -1052,14 +1056,21 @@ static bool PrintToDevice(const PrintData& pd) {
             }
 
             RectF mediabox = engine.PageMediabox((int)pageNo);
+            bool pageOk;
             if (PrintScaleAdv::Stretch == pd.advData.scale) {
                 // resize the rendered page to exactly fill the printable area
                 Rect stretchRc(0, 0, printable.dx, printable.dy);
-                PrintPageInBands(engine, hdc, (int)pageNo, zoom, rotation, mediabox, Point(0, 0), &stretchRc,
-                                 RenderTarget::Print, abortCookie, progressCb);
+                pageOk = PrintPageInBands(engine, hdc, (int)pageNo, zoom, rotation, mediabox, Point(0, 0), &stretchRc,
+                                          RenderTarget::Print, abortCookie, progressCb);
             } else {
-                PrintPageInBands(engine, hdc, (int)pageNo, zoom, rotation, mediabox, offset, nullptr,
-                                 RenderTarget::Print, abortCookie, progressCb);
+                pageOk = PrintPageInBands(engine, hdc, (int)pageNo, zoom, rotation, mediabox, offset, nullptr,
+                                          RenderTarget::Print, abortCookie, progressCb);
+            }
+            if (!pageOk && !WasCanceled(progressCb)) {
+                logf("PrintToDevice: failed to render page %d for printing\n", (int)pageNo);
+                if (failedPagesOut) {
+                    (*failedPagesOut)++;
+                }
             }
 
             res = EndPage(hdc);
@@ -1078,8 +1089,24 @@ static bool PrintToDevice(const PrintData& pd) {
         logf("PrintToDevice: EndDoc() failed with %d\n", res);
         return false;
     }
-    logf("PrintToDevice: finished ok\n");
+    if (failedPagesOut && *failedPagesOut > 0) {
+        logf("PrintToDevice: finished with %d page(s) that failed to render (printed blank)\n", *failedPagesOut);
+    } else {
+        logf("PrintToDevice: finished ok\n");
+    }
     return true;
+}
+
+static bool PrintToDevice(const PrintData& pd, int* failedPagesOut = nullptr) {
+    if (pd.engine) {
+        PdfDocEventWillPrint(pd.engine);
+    }
+    defer {
+        if (pd.engine) {
+            PdfDocEventDidPrint(pd.engine);
+        }
+    };
+    return PrintToDeviceImpl(pd, failedPagesOut);
 }
 
 struct UpdatePrintProgressData {
@@ -1187,7 +1214,11 @@ static void PrintThread(PrintThreadData* ptd) {
     pd->progressCb = MkFunc1<PrintThreadData, ProgressUpdateData*>(UpdatePrintProgress, ptd);
     ;
     pd->abortCookie = &ptd->cookie;
-    PrintToDevice(*pd);
+    int failedPages = 0;
+    PrintToDevice(*pd, &failedPages);
+    if (failedPages > 0) {
+        MaybeDelayedWarningNotification(fmt(_TRA("%d page(s) failed to render and were printed blank").s, failedPages));
+    }
 
     auto* data = new DeletePrinterThreadData;
     data->win = win;
@@ -1595,7 +1626,12 @@ void PrintCurrentFile(MainWindow* win, bool waitForCompletion) {
     if (!waitForCompletion) {
         PrintToDeviceOnThread(win, pd);
     } else {
-        PrintToDevice(*pd);
+        int failedPages = 0;
+        PrintToDevice(*pd, &failedPages);
+        if (failedPages > 0) {
+            MaybeDelayedWarningNotification(
+                fmt(_TRA("%d page(s) failed to render and were printed blank").s, failedPages));
+        }
         delete pd;
     }
 
@@ -2159,10 +2195,14 @@ PrintResult PrintFile2(EngineBase* engine, Str printerName, bool displayErrors, 
 
         // takes ownership of printer
         PrintData pd(engine, printer, ranges, advanced);
-        ok = PrintToDevice(pd);
+        int failedPages = 0;
+        ok = PrintToDevice(pd, &failedPages);
         if (!ok) {
             logf("PrintToDevice: failed\n");
             MessageBoxWarningCond(displayErrors, _TRA("Couldn't initialize printer"), _TRA("Printing problem."));
+        } else if (failedPages > 0) {
+            TempStr msg = fmt(_TRA("%d page(s) failed to render and were printed blank").s, failedPages);
+            MessageBoxWarningCond(displayErrors, msg, _TRA("Printing problem."));
         }
     }
     if (!ok) {

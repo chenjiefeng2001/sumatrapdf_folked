@@ -49,6 +49,10 @@ char** fz_argv_from_wargv(int argc, wchar_t** wargv);
 void fz_free_argv(int argc, char** argv);
 }
 
+// implemented in src/PdfRedactTool.cpp (mupdf 1.28 dropped its own redact
+// tool); C++ linkage, so it must not be declared inside the extern "C" block
+int PdfRedactMain(int argc, char* argv[]);
+
 // must match premake5.lua and src/SumatraStartup.cpp
 #define FZ_ENABLE_JS 1
 #define FZ_ENABLE_PDF 1
@@ -79,6 +83,7 @@ static Tool gTools[] = {
     {"pages", pdfpages_main, "show information about PDF pages"},
     {"poster", pdfposter_main, "split large PDF page into many tiles"},
     {"recolor", pdfrecolor_main, "change colorspace of PDF document"},
+    {"redact", PdfRedactMain, "permanently remove content marked with redaction annotations"},
     {"show", pdfshow_main, "show internal PDF objects"},
     {"sign", pdfsign_main, "manipulate PDF digital signatures"},
     {"trim", pdftrim_main, "trim PDF page contents"},

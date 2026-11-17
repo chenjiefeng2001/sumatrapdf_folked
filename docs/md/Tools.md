@@ -31,6 +31,7 @@ The difference is that `SumatraPDF.exe` is a GUI application so it won't work as
 | Remove compression streams                     | `clean` — [Decompress a PDF](Tool-x-decompress-pdf.md)                                                           |
 | Password-protect a PDF                         | `clean` — [Encrypt a PDF](Tool-x-encrypt-pdf-with-password.md)                                                   |
 | Remove password                                | `clean` — [Decrypt a PDF](Tool-x-decrypt-pdf.md)                                                                 |
+| Permanently remove redacted content            | `redact` — [Apply Redactions](Tool-redact.md)                                                                    |
 | Convert images / other formats to PDF          | `convert` / `draw` — [Tool convert](Tool-convert.md); GUI for comics/images: [Convert to PDF](Convert-to-PDF.md) |
 | Inspect PDF structure                          | `info`, `show`, `pages` — [Tool info](Tool-info.md)                                                              |
 | Run JavaScript on PDFs                         | `run` — [Tool run](Tool-run.md)                                                                                  |
@@ -51,6 +52,7 @@ sumatrapdf-tool.exe <command> [options]
   pages   -- show information about PDF pages
   poster  -- split large PDF page into many tiles
   recolor -- change colorspace of PDF document
+  redact  -- permanently remove content marked with redaction annotations
   show    -- show internal PDF objects
   trim    -- trim PDF page contents
   grep    -- search for text
@@ -71,6 +73,7 @@ Tools:
 - [pages](Tool-pages.md)
 - [poster](Tool-poster.md)
 - [recolor](Tool-recolor.md)
+- [redact](Tool-redact.md)
 - [show](Tool-show.md)
 - [trim](Tool-trim.md)
 - [grep](Tool-grep.md)

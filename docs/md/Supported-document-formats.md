@@ -3,6 +3,13 @@
 SumatraPDF reader supports the following document types:
 
 - PDF (.pdf, .ai)
+
+  Interactive forms (AcroForm) can be filled in. XFA ("dynamic") forms are not rendered: a hybrid XFA form, which carries both an XFA and an AcroForm layer, is filled in on its AcroForm layer and reported as **XFA Forms: using AcroForm layer** in document properties; a pure XFA form has no AcroForm layer at all, so it opens read-only and SumatraPDF reports **XFA not supported**.
+
+  For a tagged (structured) PDF, text is returned in reading order - the order of the document's structure tree - so copying, extracting, reading aloud and searching follow how the document is meant to be read rather than the order its page draws the text in. Document Properties reports the state of the structure tree (**Structure Tree:** no problems found / problems repaired / broken / contains a cycle / has attributes). Optional content groups (layers) a PDF declares can be turned on and off from **View → PDF Layers...**; that is view state and is not saved into the file.
+
+  A **PDF portfolio** (a PDF whose catalog has `/Collection`, i.e. a bundle of files rather than a document to read) lists its embedded files in the sidebar, which is captioned **Attachments** instead of **Bookmarks**. The files appear in the order the document asks for, each shows the description the document gives it on hover, and clicking one opens it. Right-click still offers **Save Attachment...**.
+
 - eBook formats:
   - unencrypted EPUB (.epub)
   - MOBI / Kindle (.mobi, and un-encrypted .azw, .azw3, .prc); Print Replica (.azw4) opens as the wrapped PDF

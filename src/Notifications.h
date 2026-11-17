@@ -76,6 +76,16 @@ void SetNotificationsEnabled(bool);
 bool RemoveNotificationsForGroup(HWND, Kind);
 void RemoveNotificationsForHwnd(HWND);
 NotificationWnd* GetNotificationForGroup(HWND, Kind);
+// How many clickable links a notification's message ended up with. Non-zero only
+// when the message was markup-parsed (i.e. not plainText), which is why text
+// from outside the app has to be shown plain. Exposed so a test can assert that
+// a document's script can't put a command link into a notification.
+int NotificationLinkCount(NotificationWnd*);
+// How many notifications are currently shown on this hwnd, whatever their group.
+int NotificationCountForHwnd(HWND);
+// The nth notification on this hwnd, so a caller can look at all of them (and
+// their groups) rather than having to know which group to ask for.
+NotificationWnd* GetNthNotificationForHwnd(HWND, int idx);
 bool UpdateNotificationProgress(NotificationWnd*, Str msg, int perc);
 void RelayoutNotifications(HWND hwnd);
 void ShowNotificationsForActiveTab(HWND hwndCanvas, WindowTab* activeTab);
@@ -91,6 +101,9 @@ NotificationWnd* ShowPlainNotification(HWND hwnd, Str msg, int timeoutMs = kNoti
 NotificationWnd* ShowPlainWarningNotification(HWND hwndParent, Str msg, int timeoutMs);
 
 void MaybeDelayedWarningNotification(Str msg);
+// Same, for text that came from outside the app (a PDF, a server response):
+// shown verbatim, so markup in it can't become a clickable command link.
+void MaybeDelayedPlainWarningNotification(Str msg);
 void ShowMaybeDelayedNotifications(HWND hwndParent);
 
 int CalcPerc(int current, int total);

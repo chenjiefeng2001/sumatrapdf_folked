@@ -24,6 +24,10 @@
 #include "Theme.h"
 
 static StrNode* gDelayedNotifications = nullptr;
+// same, for messages whose text comes from outside the app (a PDF, a server
+// response). They must be shown verbatim: markup in them would become a
+// clickable [text](CmdFoo) link, letting the document run a command
+static StrNode* gDelayedPlainNotifications = nullptr;
 
 Kind kNotifCursorPos = "cursorPosHelper";
 Kind kNotifActionResponse = "responseToAction";
@@ -935,18 +939,111 @@ NotificationWnd* GetNotificationForGroup(HWND hwnd, Kind kind) {
     return NotifsGetForGroup(wnds, nWnds, kind);
 }
 
-void MaybeDelayedWarningNotification(Str msg) {
-    log(msg);
+int NotificationLinkCount(NotificationWnd* wnd) {
+    if (!wnd || !wnd->txtCtrl) {
+        return 0;
+    }
+    // rich == the message was markup-parsed. A plainText message never gets
+    // one, so its markup stays inert text.
+    VirtRichText* rich = wnd->txtCtrl->rich;
+    if (!rich) {
+        return 0;
+    }
+    int n = 0;
+    for (TipLink* link = rich->links.next; link; link = link->next) {
+        n++;
+    }
+    return n;
+}
 
+int NotificationCountForHwnd(HWND hwnd) {
+    NotificationWnd* wnds[kMaxNotifs];
+    return GetForHwnd(hwnd, wnds);
+}
+
+NotificationWnd* GetNthNotificationForHwnd(HWND hwnd, int idx) {
+    if (idx < 0) {
+        return nullptr;
+    }
+    NotificationWnd* wnds[kMaxNotifs];
+    int n = GetForHwnd(hwnd, wnds);
+    return idx < n ? wnds[idx] : nullptr;
+}
+
+// Shown on the UI thread, from a task posted by a caller on another one.
+struct DelayedShow {
+    Str msg = nullptr;
+    bool plain = false;
+};
+
+static void RunDelayedShow(DelayedShow* d) {
     HWND hwnd = GetHwndForNotification();
     if (hwnd) {
-        ShowWarningNotification(hwnd, msg, kNotifNoTimeout);
+        if (d->plain) {
+            ShowPlainWarningNotification(hwnd, d->msg, kNotifNoTimeout);
+        } else {
+            ShowWarningNotification(hwnd, d->msg, kNotifNoTimeout);
+        }
     } else {
-        StrNode* node = AllocStrNode(nullptr, msg);
+        // still no window: queue it for when one appears
+        StrNode* node = AllocStrNode(nullptr, d->msg);
         if (node) {
-            ListInsertFront(&gDelayedNotifications, node);
+            if (d->plain) {
+                ListInsertFront(&gDelayedPlainNotifications, node);
+            } else {
+                ListInsertFront(&gDelayedNotifications, node);
+            }
         }
     }
+    str::Free(d->msg);
+    delete d;
+}
+
+static void ShowWarningNotificationOnUiThread(Str msg, bool plain) {
+    if (uitask::IsMainUIThread()) {
+        HWND hwnd = GetHwndForNotification();
+        if (hwnd) {
+            if (plain) {
+                ShowPlainWarningNotification(hwnd, msg, kNotifNoTimeout);
+            } else {
+                ShowWarningNotification(hwnd, msg, kNotifNoTimeout);
+            }
+            return;
+        }
+        // no window yet: it waits for one, and ShowMaybeDelayedNotifications
+        // drains the list when the window is created
+        StrNode* node = AllocStrNode(nullptr, msg);
+        if (node) {
+            if (plain) {
+                ListInsertFront(&gDelayedPlainNotifications, node);
+            } else {
+                ListInsertFront(&gDelayedNotifications, node);
+            }
+        }
+        return;
+    }
+    // Another thread - typically a document's script, which runs while the
+    // document loads. Creating a window needs the UI thread, and the document
+    // usually finishes loading *after* the window exists, so queueing for
+    // window-creation would never show it. Hand it to the UI thread instead.
+    auto* d = new DelayedShow();
+    d->msg = str::Dup(msg);
+    d->plain = plain;
+    uitask::Post(MkFunc0<DelayedShow>(RunDelayedShow, d), "TaskDelayedNotification");
+}
+
+void MaybeDelayedWarningNotification(Str msg) {
+    log(msg);
+    ShowWarningNotificationOnUiThread(msg, /* plain */ false);
+}
+
+// for text that came from a document or a server response rather than from the
+// app. Notification markup turns "[text](CmdFoo)" into a clickable command
+// link, so untrusted text must not be shown through the markup-parsing path -
+// use this (or plainText = true) instead. See GHSA-2wv2-qm2f-vmxh.
+void MaybeDelayedPlainWarningNotification(Str msg) {
+    log(msg);
+    ShowWarningNotificationOnUiThread(msg, /* plain */ true);
 }
 
 void ShowMaybeDelayedNotifications(HWND hwndParent) {
@@ -959,4 +1056,13 @@ void ShowMaybeDelayedNotifications(HWND hwndParent) {
     }
     FreeStrNode(nullptr, gDelayedNotifications);
     gDelayedNotifications = nullptr;
+
+    ListReverse(&gDelayedPlainNotifications);
+    curr = gDelayedPlainNotifications;
+    while (curr) {
+        ShowPlainWarningNotification(hwndParent, curr->s, kNotifNoTimeout);
+        curr = curr->next;
+    }
+    FreeStrNode(nullptr, gDelayedPlainNotifications);
+    gDelayedPlainNotifications = nullptr;
 }

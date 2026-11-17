@@ -118,6 +118,7 @@ CmdToggleLinks,,Toggle Show Links,"Toggle drawing blue rectangle around links, v
 CmdToggleHighlightFormFields,,Toggle Highlight Form Fields,"ver 3.7+, toggles pale-blue highlight of empty fillable PDF form fields (`HighlightFormFields`; default on) (fixes #5966)"
 CmdToggleDisableLinks,,Toggle Disable Links,"ver 3.7+, palette-only; toggles `DisableLinks` so clicks, hover and keyboard following ignore document links (fixes #5939)"
 CmdToggleHoverPreview,,Toggle Hover Preview,"ver 3.7+, palette-only; toggles the citation/reference hover popup (`CitationHoverDelay`: 300 ms when on, -1 when off)"
+CmdShowLayers,,PDF Layers...,"ver 3.7+, opens a panel listing the document's optional content groups (layers) as the PDF declares them, with a checkbox per toggleable layer; unchecking hides that layer's content and re-renders the page. **Reset to Default** restores the document's own configuration. Layer visibility is view state only: it is not written to the file and is not an undo step. Only available for PDFs that declare layers"
 ```
 
 ## Tabs
@@ -354,6 +355,9 @@ CmdPdfDeletePages,,Delete Pages From PDF,"Delete pages from a PDF file using pag
 CmdPdfExtractPages,,Extract Pages From PDF,"Extract pages from a PDF file using page ranges like 1,3-8,13-N where N is the last page, ver 3.7+"
 CmdPdfEncrypt,,Encrypt PDF,"Encrypt a PDF file with a password using AES-256 encryption, ver 3.7+"
 CmdPdfDecrypt,,Decrypt PDF,"Decrypt an encrypted PDF file, removing password protection, ver 3.7+"
+CmdPdfRedact,,Apply Redactions,"Permanently remove the content under the document's redaction annotations. Irreversible; the result is only written out when the document is saved, ver 3.7+"
+CmdUndo,,Undo,`Ctrl + Z` - undo the last annotation or form-field edit in a PDF. Undoing stops at the last save, ver 3.7+
+CmdRedo,,Redo,`Ctrl + Shift + Z` - redo the last undone annotation or form-field edit in a PDF, ver 3.7+
 CmdSetScreenshotHotkey,,Set Screenshot Hotkey,"Open dialog to set or remove a global hotkey for taking screenshots, ver 3.7+"
 CmdReadAloud,,Read Aloud,"Read selected text (or from the viewport if no selection) through the end of the document using Windows text-to-speech. Invoking again pauses reading. Voice is chosen in the Read Aloud Voice submenu and remembered in ReadAloudVoiceId, ver 3.7+"
 CmdPauseReadAloud,,Pause Reading,"Pause reading text aloud; resume with CmdContinueReadAloud, ver 3.7+"
@@ -515,6 +519,30 @@ Shortcuts [
     ]
 ]
 ```
+
+## `CmdCreateAnnotFileAttachment`
+
+**Ver 3.7+**
+
+Asks for a file and attaches it to the current document as a file attachment
+annotation (a paperclip) at the mouse position. The file's contents are embedded
+in the PDF, so it travels with the document. Only available for documents that
+support annotations. Cancelling the file dialog does nothing.
+
+Takes no arguments. It is not offered for annotation types SumatraPDF cannot
+build (Link, Popup) - those commands are hidden rather than failing silently.
+
+## `CmdCreateAnnotPolygon`, `CmdCreateAnnotPolyLine`, `CmdCreateAnnotInk`
+
+**Ver 3.7+**
+
+Draw a shape instead of placing it. The command arms a drawing mode and the next
+drag on the page creates the annotation from the points you dragged through
+(`/Vertices` for Polygon and PolyLine, `/InkList` for Ink), previewed as you
+drag. `Esc` cancels, and a click without a drag creates nothing.
+
+Takes no arguments. Polygon is closed, Polyline is open. Only available for
+documents that support annotations.
 
 ## Other CmdCreateAnnot\* arguments
 

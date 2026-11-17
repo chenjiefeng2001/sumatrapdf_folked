@@ -45,6 +45,9 @@ DefaultZoom = fit page
 
 ; if true, JavaScript in PDF documents is disabled (e.g. form-field calculations
 ; won't run) (introduced in version 3.7)
+; This also disables the document's additional actions (/AA) and anything its
+; JavaScript asks the application to do (showing an alert, printing, opening a
+; link, composing an email).
 DisableJavaScript = false
 
 ; if true, a PDF may load an image stored in a separate file referenced by name

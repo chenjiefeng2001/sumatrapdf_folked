@@ -68,13 +68,31 @@ static void TestPixelConversionBgr8ToBgra8() {
     // Row-interleaved source data: B0,G0,R0, pad, B1,G1,R1, pad, ...
     u8 srcData[h * srcStride] = {
         // Row 0: B G R pad
-        0x10, 0x20, 0x30, 0x00,
-        0x40, 0x50, 0x60, 0x00,
-        0x70, 0x80, 0x90, 0x00,
+        0x10,
+        0x20,
+        0x30,
+        0x00,
+        0x40,
+        0x50,
+        0x60,
+        0x00,
+        0x70,
+        0x80,
+        0x90,
+        0x00,
         // Row 1
-        0x11, 0x21, 0x31, 0x00,
-        0x41, 0x51, 0x61, 0x00,
-        0x71, 0x81, 0x91, 0x00,
+        0x11,
+        0x21,
+        0x31,
+        0x00,
+        0x41,
+        0x51,
+        0x61,
+        0x00,
+        0x71,
+        0x81,
+        0x91,
+        0x00,
     };
 
     u8 dstData[h * dstStride] = {0};
@@ -215,7 +233,7 @@ static void TestDeviceGenerationCounter() {
 
     // Simulate bitmap upload matching: after device recreation, cached
     // ID2D1Bitmap instances have stale generation.
-    int bitmapGen = 0; // from old device
+    int bitmapGen = 0;                       // from old device
     utassert(bitmapGen != deviceGeneration); // stale!
 
     // After recreation on the new device, bitmapGen is updated

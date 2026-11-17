@@ -2576,6 +2576,7 @@ static Str HandleOpenCmd(Str cmd, bool* ack) {
     if (doLoad) {
         LoadArgs args(filePath, win);
         args.activateExisting = !isCtrl;
+        args.forceTabs = newWindow == 0;
         if (newWindow) {
             args.activateExisting = false;
         }
@@ -3169,7 +3170,7 @@ static void OpenManyCopyDataAsyncRun(OpenManyCopyDataAsync* d) {
     if (win) {
         win->Focus();
     }
-    StartLoadDocuments(d->paths, win);
+    StartLoadDocuments(d->paths, win, d->newWindow == 0);
     delete d;
 }
 
@@ -3212,6 +3213,7 @@ static void OpenCopyDataAsyncRun(OpenCopyDataAsync* d) {
     }
     LoadArgs args(d->path, win);
     args.activateExisting = d->newWindow == 0;
+    args.forceTabs = d->newWindow == 0;
     // Match the legacy DDE Open(..., setFocus=1) behavior used by
     // shell/reuseInstance launches: opening into an existing instance should
     // bring that window to the foreground.

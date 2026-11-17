@@ -9,7 +9,7 @@
 // They operate on Str (char*, int len) not NUL-terminated C strings.
 
 #include <intrin.h>
-#include <emmintrin.h>  // SSE2
+#include <emmintrin.h> // SSE2
 
 // Detect SSE4.2 at runtime via __cpuidex. The feature bit for SSE4.2 is
 // ECX bit 20 after CPUID(1). For the PCMPESTRI-based fast path.

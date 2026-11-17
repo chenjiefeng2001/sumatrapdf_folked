@@ -335,6 +335,10 @@ static void MaybeStartSearch(MainWindow* win, Str searchTerm) {
 
 static MainWindow* LoadOnStartup(Str filePath, const Flags& flags, bool isFirstWin) {
     LoadArgs args(filePath, nullptr);
+    // Startup loads (cmdline file list and files forwarded during startup) must
+    // share one window as tabs, otherwise quick successive Explorer opens pile
+    // up separate windows when UseTabs is off.
+    args.forceTabs = true;
     args.showWin = !(flags.printDialog && flags.exitWhenDone) && !gPluginMode;
     if (isFirstWin) {
         args.initialDisplayMode = flags.startView;
@@ -580,19 +584,99 @@ static bool IsWindowOnCurrentDesktop(ISumatraVirtualDesktopManager* vdm, HWND hw
     return onCurrent != FALSE;
 }
 
+// True if pid is this same executable. Guards against a recycled pid that now
+// belongs to an unrelated process.
+static bool ProcessExeMatchesSelf(DWORD pid) {
+    WCHAR self[MAX_PATH + 2]{};
+    GetModuleFileNameW(nullptr, self, dimof(self) - 1);
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h) {
+        return false;
+    }
+    WCHAR other[MAX_PATH + 2]{};
+    DWORD n = dimof(other) - 1;
+    BOOL ok = QueryFullProcessImageNameW(h, 0, other, &n);
+    CloseHandle(h);
+    if (!ok) {
+        return false;
+    }
+    return _wcsicmp(self, other) == 0;
+}
+
 // Finds a window of a previously running instance to reuse. Prefers a window on
 // the current virtual desktop; if the instance only has windows on other
 // desktops, returns one of them and sets *openInNewWindow so the caller opens
 // the file in a new window (which Windows places on the current desktop),
-// instead of switching to another desktop (#5630). Returns nullptr if we can't
-// talk to the previous instance (e.g. it runs elevated and we don't), so the
-// caller opens files in this process instead of sending DDE messages that the
-// elevated process would never receive.
-// Sequential Explorer opens (double-clicking files one after another) routinely
-// arrive while the previous instance is still past the mapping but before its
-// first frame exists (DLL load, settings, session restore). The old 3x100ms
-// wait gave up too early and each click became an orphaned process invisible
-// to later forwards, leaving several SumatraPDF in the background.
+// instead of switching to another desktop (#5630). Skips instances we can't
+// talk to (e.g. elevated) and windows of a different executable.
+static HWND FindReusableFrameWindow(bool* openInNewWindow, DWORD* outPid) {
+    *openInNewWindow = false;
+    *outPid = 0;
+    ISumatraVirtualDesktopManager* vdm = CreateVirtualDesktopManager();
+    HWND currentDesktopWnd = nullptr;
+    DWORD currentPid = 0;
+    HWND otherDesktopWnd = nullptr;
+    DWORD otherPid = 0;
+    HWND hwnd = nullptr;
+    while ((hwnd = FindWindowExW(HWND_DESKTOP, hwnd, FRAME_CLASS_NAME, nullptr)) != nullptr) {
+        DWORD pid;
+        GetWindowThreadProcessId(hwnd, &pid);
+        if (pid == GetCurrentProcessId()) {
+            continue;
+        }
+        if (!CanTalkToProcess(pid)) {
+            continue;
+        }
+        if (!ProcessExeMatchesSelf(pid)) {
+            continue;
+        }
+        if (IsWindowOnCurrentDesktop(vdm, hwnd)) {
+            if (!currentDesktopWnd) {
+                currentDesktopWnd = hwnd;
+                currentPid = pid;
+            }
+        } else if (!otherDesktopWnd) {
+            otherDesktopWnd = hwnd;
+            otherPid = pid;
+        }
+    }
+    if (vdm) {
+        vdm->Release();
+    }
+    if (currentDesktopWnd) {
+        AllowSetForegroundWindow(currentPid);
+        *outPid = currentPid;
+        return currentDesktopWnd;
+    }
+    if (otherDesktopWnd) {
+        AllowSetForegroundWindow(otherPid);
+        *openInNewWindow = true;
+        *outPid = otherPid;
+        return otherDesktopWnd;
+    }
+    return nullptr;
+}
+
+// Open (or create) the shared instance mapping and set its owner pid. When
+// keepHandle is non-null the mapping handle is stored there so the mapping
+// stays alive for the lifetime of this process.
+static void SetInstanceMappingPid(Str mapId, DWORD pid, HANDLE* keepHandle) {
+    HANDLE hMap = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(DWORD), CWStrTemp(mapId));
+    if (!hMap) {
+        return;
+    }
+    DWORD* p = (DWORD*)MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(DWORD));
+    if (p) {
+        *p = pid;
+        UnmapViewOfFile(p);
+    }
+    if (keepHandle) {
+        *keepHandle = hMap;
+    } else {
+        CloseHandle(hMap);
+    }
+}
+
 static HWND FindExistingSumatraProcessHwnd(HANDLE* hMutex, bool* openInNewWindow) {
     *openInNewWindow = false;
     // create a unique identifier for this executable and appdata combination
@@ -602,9 +686,10 @@ static HWND FindExistingSumatraProcessHwnd(HANDLE* hMutex, bool* openInNewWindow
     u32 hash = MurmurHash2(combinedPath);
     TempStr mapId = fmt("SumatraPDF-%08x", hash);
 
-    // up to ~6s waiting for the owner's first frame; each retry re-reads the
-    // mapping so a dead owner is picked up as a fresh start instead of an orphan
+    // up to ~6s waiting for the owner to write its pid; once the pid is known
+    // and the owner is alive we wait for its first frame instead of taking over
     int retriesLeft = 60;
+    int waitTicks = 0;
     HANDLE hMap = nullptr;
     HWND hwnd = nullptr;
     DWORD prevProcId = 0;
@@ -612,15 +697,18 @@ static HWND FindExistingSumatraProcessHwnd(HANDLE* hMutex, bool* openInNewWindow
     bool hasPrevInst;
     DWORD lastErr = 0;
 Retry:
+    hwnd = nullptr;
     // use a memory mapping containing a process id as mutex
     hMap = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(DWORD), CWStrTemp(mapId));
     if (!hMap) {
+        logf("FindExistingSumatraProcessHwnd: CreateFileMapping('%s') failed, lastError=%u\n", mapId, GetLastError());
         goto Error;
     }
     lastErr = GetLastError();
     hasPrevInst = (lastErr == ERROR_ALREADY_EXISTS);
     procId = (DWORD*)MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(DWORD));
     if (!procId) {
+        logf("FindExistingSumatraProcessHwnd: MapViewOfFile failed, lastError=%u\n", GetLastError());
         CloseHandle(hMap);
         hMap = nullptr;
         goto Error;
@@ -629,16 +717,57 @@ Retry:
         *procId = GetCurrentProcessId();
         UnmapViewOfFile(procId);
         *hMutex = hMap;
+        logf("FindExistingSumatraProcessHwnd: became owner, pid=%u, mapId='%s'\n", GetCurrentProcessId(), mapId);
         return nullptr;
     }
 
     // if the mapping already exists, find one window belonging to the original process
     prevProcId = *procId;
+    // If the recorded owner is no longer alive (crashed/killed without
+    // cleaning up the mapping), the mapping is stale: take it over so later
+    // launches stop reading a dead pid and spawning duplicate instances.
+    if (prevProcId != 0 && (!CanTalkToProcess(prevProcId) || !ProcessExeMatchesSelf(prevProcId))) {
+        UnmapViewOfFile(procId);
+        CloseHandle(hMap);
+        hMap = nullptr;
+        // The recorded owner looks dead, but before taking over the mapping
+        // (which would strand a still-running instance) double-check for any
+        // live frame window of the same executable we can reuse.
+        DWORD reusablePid = 0;
+        HWND reusableHwnd = FindReusableFrameWindow(openInNewWindow, &reusablePid);
+        if (reusableHwnd) {
+            SetInstanceMappingPid(mapId, reusablePid, nullptr);
+            logf("FindExistingSumatraProcessHwnd: reused stale-owner fallback hwnd=0x%p pid=%u\n", reusableHwnd,
+                 reusablePid);
+            return reusableHwnd;
+        }
+        SetInstanceMappingPid(mapId, GetCurrentProcessId(), hMutex);
+        logf("FindExistingSumatraProcessHwnd: took over stale mapping from dead pid=%u\n", prevProcId);
+        return nullptr;
+    }
     UnmapViewOfFile(procId);
     CloseHandle(hMap);
+    // the owner writes its pid right after creating the mapping; a 0 means we
+    // read it before that write landed, so retry instead of treating it as dead
+    if (prevProcId == 0) {
+        logf("FindExistingSumatraProcessHwnd: owner pid not written yet, retriesLeft=%d\n", retriesLeft);
+        goto Error;
+    }
     // a non-admin process can't send DDE messages to an admin process, so
     // don't return its window; retrying won't help either
-    if (!CanTalkToProcess(prevProcId)) {
+    if (!CanTalkToProcess(prevProcId) || !ProcessExeMatchesSelf(prevProcId)) {
+        DWORD reusablePid = 0;
+        HWND reusableHwnd = FindReusableFrameWindow(openInNewWindow, &reusablePid);
+        if (reusableHwnd) {
+            SetInstanceMappingPid(mapId, reusablePid, nullptr);
+            logf("FindExistingSumatraProcessHwnd: reused cantalk fallback hwnd=0x%p pid=%u\n", reusableHwnd,
+                 reusablePid);
+            return reusableHwnd;
+        }
+        // The owner died (or its pid was recycled) between the two checks.
+        // Take over the mapping so later launches stop reading a dead pid.
+        SetInstanceMappingPid(mapId, GetCurrentProcessId(), hMutex);
+        logf("FindExistingSumatraProcessHwnd: can't talk to pid=%u, took over mapping\n", prevProcId);
         return nullptr;
     }
     {
@@ -657,6 +786,8 @@ Retry:
                     vdm->Release();
                 }
                 AllowSetForegroundWindow(prevProcId);
+                logf("FindExistingSumatraProcessHwnd: found hwnd=0x%p for pid=%u, retriesLeft=%d\n", hwnd, prevProcId,
+                     retriesLeft);
                 return hwnd; // reuse the window on the current desktop
             }
             otherDesktopWnd = hwnd;
@@ -670,13 +801,50 @@ Retry:
             // current desktop) rather than switching desktops (#5630).
             AllowSetForegroundWindow(prevProcId);
             *openInNewWindow = true;
+            logf("FindExistingSumatraProcessHwnd: found hwnd=0x%p on other desktop for pid=%u\n", otherDesktopWnd,
+                 prevProcId);
             return otherDesktopWnd;
         }
     }
 
-    // process is alive but its window isn't ready yet (startup race): retry
+    // The recorded owner pid may be stale (e.g. after a long-running session):
+    // if no window matched it but another live instance of the same executable
+    // exists, reuse that instead of waiting/retrying into a duplicate process.
+    {
+        DWORD reusablePid = 0;
+        HWND reusableHwnd = FindReusableFrameWindow(openInNewWindow, &reusablePid);
+        if (reusableHwnd) {
+            SetInstanceMappingPid(mapId, reusablePid, nullptr);
+            logf("FindExistingSumatraProcessHwnd: reused stale-pid fallback hwnd=0x%p pid=%u\n", reusableHwnd,
+                 reusablePid);
+            return reusableHwnd;
+        }
+    }
+
+    // The owner is alive and we can talk to it, but it hasn't created its first
+    // frame yet. Do not take over the mapping: that would strand the slow
+    // owner and make every waiter spawn its own window. Keep waiting until the
+    // owner creates a frame or exits (then the loop above takes over).
+    if ((waitTicks++ % 50) == 0) {
+        logf("FindExistingSumatraProcessHwnd: waiting for pid=%u to create its first frame\n", prevProcId);
+    }
+    Sleep(100);
+    goto Retry;
+
+// Only reached when the owner pid hasn't been written yet or the mapping
+// couldn't be created/opened. Give it a short grace period, then take over.
 Error:
     if (--retriesLeft < 0) {
+        DWORD reusablePid = 0;
+        HWND reusableHwnd = FindReusableFrameWindow(openInNewWindow, &reusablePid);
+        if (reusableHwnd) {
+            SetInstanceMappingPid(mapId, reusablePid, nullptr);
+            logf("FindExistingSumatraProcessHwnd: reused timeout fallback hwnd=0x%p pid=%u\n", reusableHwnd,
+                 reusablePid);
+            return reusableHwnd;
+        }
+        logf("FindExistingSumatraProcessHwnd: timed out waiting for pid=%u\n", prevProcId);
+        SetInstanceMappingPid(mapId, GetCurrentProcessId(), hMutex);
         return nullptr;
     }
     Sleep(100);

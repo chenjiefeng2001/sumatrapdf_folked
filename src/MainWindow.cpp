@@ -268,8 +268,9 @@ void ClearMouseState(MainWindow* win) {
 bool MainWindow::HasDocsLoaded() const {
     int nTabs = TabCount();
     if (nTabs == 0) {
-        // logf("HasDocsLoaded: false because nTabs == 0\n");
-        return true;
+        // no tabs at all means no document is loaded; callers use this to find
+        // an empty window to reuse (DDE/COPYDATA newWindow path)
+        return false;
     }
     for (int i = 0; i < nTabs; i++) {
         auto* tab = GetTab(i);

@@ -309,6 +309,10 @@ static SeqStrings gCommandNames =
     "CmdToggleEscToExit\0"
     "CmdToggleReuseInstance\0"
     "CmdToggleChmUI\0"
+    "CmdPdfRedact\0"
+    "CmdUndo\0"
+    "CmdRedo\0"
+    "CmdShowLayers\0"
     "CmdNone\0"
     "\0";
 
@@ -606,6 +610,10 @@ static i32 gCommandIds[] = {
     CmdToggleEscToExit,
     CmdToggleReuseInstance,
     CmdToggleChmUI,
+    CmdPdfRedact,
+    CmdUndo,
+    CmdRedo,
+    CmdShowLayers,
     CmdNone,
 };
 
@@ -903,6 +911,10 @@ SeqStrings gCommandDescriptions =
     "Toggle Esc to Exit\0"
     "Toggle Reuse Instance\0"
     "Toggle CHM UI\0"
+    "Apply Redactions...\0"
+    "Undo\0"
+    "Redo\0"
+    "Change Layers...\0"
     "Do nothing\0"
     "\0";
 // clang-format on

@@ -563,6 +563,15 @@ enum class ControlCmd : u16 {
     TestLayout = 70,
     TestDpi = 71,
     TestPageGeometry = 72,
+    TestDocProps = 73,
+    TestAnnotationState = 74,
+    TestAttachFile = 75,
+    TestAttachFileSave = 76,
+    TestPortfolio = 77,
+    TestOpenTocItem = 78,
+    TestPageStructure = 79,
+    TestAnnotVertices = 80,
+    TestNotifSecurity = 81,
 };
 
 enum class ControlArgType : u16 {
@@ -1596,6 +1605,91 @@ static void ExecuteControlRequest(ControlRequest* req) {
             int exitCode = 0;
             Str geoRes = PageGeometryResultTemp(path, passes, &exitCode);
             AppendTestResult(req, exitCode, geoRes);
+            break;
+        }
+
+        case ControlCmd::TestDocProps: {
+            Str path = StringArg(req, 0);
+            if (!path) {
+                AppendError(req, "TestDocProps expects string path");
+                break;
+            }
+            int exitCode = 0;
+            Str propsRes = DocPropsResultTemp(path, &exitCode);
+            AppendTestResult(req, exitCode, propsRes);
+            break;
+        }
+
+        case ControlCmd::TestAnnotationState: {
+            int exitCode = 0;
+            Str res = AnnotationStateResultTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestAttachFile: {
+            Str filePath = StringArg(req, 0);
+            if (!filePath) {
+                AppendError(req, "TestAttachFile expects string path");
+                break;
+            }
+            int exitCode = 0;
+            Str res = AttachFileResultTemp(filePath, &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestAttachFileSave: {
+            Str destPath = StringArg(req, 0);
+            if (!destPath) {
+                AppendError(req, "TestAttachFileSave expects string path");
+                break;
+            }
+            int exitCode = 0;
+            Str res = AttachFileSaveResultTemp(destPath, &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestPortfolio: {
+            int exitCode = 0;
+            Str res = PortfolioResultTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestOpenTocItem: {
+            i32 itemNo = 1;
+            if (!IntArg(req, 0, itemNo)) {
+                AppendError(req, "TestOpenTocItem expects int item number");
+                break;
+            }
+            int exitCode = 0;
+            Str res = OpenTocItemResultTemp(itemNo, &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestPageStructure: {
+            i32 pageNo = 1;
+            IntArg(req, 0, pageNo);
+            int exitCode = 0;
+            Str res = PageStructureResultTemp(pageNo, &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestAnnotVertices: {
+            int exitCode = 0;
+            Str res = AnnotVerticesResultTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestNotifSecurity: {
+            int exitCode = 0;
+            Str res = NotifSecurityResultTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
             break;
         }
 

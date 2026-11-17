@@ -174,6 +174,7 @@ bool SettingsRememberOpenedFiles() {
 
 static Kind kNotifPersistentWarning = "persistentWarning";
 static Kind kNotifDocErrors = "docErrors";
+static Kind kNotifDocRepaired = "docRepaired";
 static Kind kNotifZoomOrView = "zoomOrView";
 
 HBITMAP gBitmapReloadingCue;
@@ -373,6 +374,7 @@ LoadArgs* LoadArgs::Clone() {
     res->tabState = this->tabState;
     res->targetTab = this->targetTab;
     res->forceReuse = this->forceReuse;
+    res->forceTabs = this->forceTabs;
     res->noSavePrefs = this->noSavePrefs;
     res->onFinished = this->onFinished;
     res->hwndPwdParent = this->hwndPwdParent;
@@ -2716,6 +2718,22 @@ static void ReplaceDocumentInCurrentTab(LoadArgs* args, DocController* ctrl, Fil
         ShowNotification(nargs);
     }
 
+    // MuPDF silently rebuilt a broken xref at load time. Tell the user the file
+    // was repaired (and may be incomplete) instead of pretending it was clean.
+    if (engineErr && EngineMupdfWasRepaired(engineErr)) {
+        NotificationCreateArgs nargs;
+        nargs.hwndParent = win->hwndCanvas;
+        nargs.warning = true;
+        nargs.timeoutMs = 16 * 1000;
+        nargs.groupId = kNotifDocRepaired;
+        nargs.msg = _TRA("This document was repaired because it contained errors");
+        nargs.tab = tab;
+        nargs.corner = NotifCorner::BottomRight;
+        nargs.xMargin = 2;
+        nargs.yMargin = 2;
+        ShowNotification(nargs);
+    }
+
     // EBookUI.FontName names a font we can't load, so the ebook silently
     // rendered in the default font. Say so, otherwise the setting looks like
     // it does nothing (issue #4600)
@@ -3841,7 +3859,7 @@ MainWindow* LoadDocumentFinish(LoadArgs* args) {
     // it loaded, so it's no longer one of the files next/prev skips
     MarkFileOpenedOk(fullPath);
 
-    bool openNewTab = SettingsUseTabs() && !args->forceReuse;
+    bool openNewTab = (SettingsUseTabs() || args->forceTabs) && !args->forceReuse;
     ReportIf(openNewTab && args->forceReuse);
 
     // Clear any tip from the previous document/tab (LoadModelIntoTab also does
@@ -3896,7 +3914,7 @@ MainWindow* LoadDocumentFinish(LoadArgs* args) {
     }
 
     // TODO: stop remembering/restoring window positions when using tabs?
-    args->placeWindow = !SettingsUseTabs();
+    args->placeWindow = !(SettingsUseTabs() || args->forceTabs);
     bool lazyLoad = args->lazyLoad;
     if (!lazyLoad) {
         if (!IsMainWindowValidAndNotClosing(win)) {
@@ -3988,7 +4006,7 @@ MainWindow* LoadDocumentFinish(LoadArgs* args) {
 
 static MainWindow* MaybeCreateWindowForFileLoad(LoadArgs* args) {
     MainWindow* win = args->win;
-    bool openNewTab = SettingsUseTabs() && !args->forceReuse;
+    bool openNewTab = (SettingsUseTabs() || args->forceTabs) && !args->forceReuse;
     if (openNewTab && !args->win) {
         // modify the args so that we always reuse the same window
         // TODO: enable the tab bar if tabs haven't been initialized
@@ -4470,7 +4488,7 @@ void StartLoadDocument(LoadArgs* argsIn) {
         if (argsIn->targetTab == win->CurrentTab()) {
             HwndInvalidate(win->hwndCanvas);
         }
-    } else if (SettingsUseTabs() && !argsIn->forceReuse) {
+    } else if ((SettingsUseTabs() || argsIn->forceTabs) && !argsIn->forceReuse) {
         if (!win->IsCurrentTabAbout()) {
             SaveCurrentWindowTab(win);
             CloseDocumentInCurrentTab(win, true, false);
@@ -4506,7 +4524,7 @@ void StartLoadDocument(LoadArgs* argsIn) {
         StartLoadingMessageTimer(tab);
         HwndInvalidate(win->hwndCanvas);
         UpdateWindow(win->hwndCanvas);
-    } else if (SettingsUseTabs() && win->CurrentTab()) {
+    } else if ((SettingsUseTabs() || argsIn->forceTabs) && win->CurrentTab()) {
         argsIn->targetTab = win->CurrentTab();
         argsIn->targetTab->loadState = WindowTab::LoadState::Loading;
         HwndInvalidate(win->hwndCanvas);
@@ -4585,10 +4603,11 @@ void StartLoadDocument(LoadArgs* argsIn) {
     StartOrQueueLoadDocument(data);
 }
 
-void StartLoadDocuments(StrVec& paths, MainWindow* win) {
-    if (!SettingsUseTabs() || !win) {
+void StartLoadDocuments(StrVec& paths, MainWindow* win, bool forceTabs) {
+    if ((!SettingsUseTabs() && !forceTabs) || !win) {
         for (Str path : paths) {
             LoadArgs args(path, win);
+            args.forceTabs = forceTabs;
             args.activateExisting = true;
             args.activateExistingInWindow = win != nullptr;
             StartLoadDocument(&args);
@@ -4630,6 +4649,7 @@ void StartLoadDocuments(StrVec& paths, MainWindow* win) {
 
     for (int i = 0; i < len(pathsToLoad); i++) {
         LoadArgs args(pathsToLoad[i], win);
+        args.forceTabs = forceTabs;
         args.targetTab = tabs[i];
         StartLoadDocument(&args);
     }
@@ -6686,7 +6706,7 @@ static void OpenFileWithOSFilePicker(MainWindow* win) {
         }
         paths.Append(path);
     }
-    StartLoadDocuments(paths, win);
+    StartLoadDocuments(paths, win, true);
 }
 
 // FilePicker: empty/os = Windows dialog; sumatrapdf = Navigate Files in Folder.
@@ -8915,6 +8935,9 @@ static WCHAR SingleCharLowerW(WCHAR c) {
 static void OnFrameKeyEsc(MainWindow* win) {
     if (win->isQuickLook) {
         CloseWindow(win, true, false);
+        return;
+    }
+    if (CancelDrawingAnnotation(win)) {
         return;
     }
     if (StopKeyboardLinkFollowing(win)) {
@@ -11714,8 +11737,8 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
         case CmdShowErrors: {
             EngineBase* engine = dm ? dm->GetEngine() : nullptr;
             if (engine && engine->HasErrors()) {
-                // GetErrorsTextTemp is the engine's internal buffer; ShowTextInWindow
-                // copies it before returning, so it must not be kept past this frame.
+                // GetErrorsTextTemp copies into the temp arena, so it stays valid
+                // even while render threads keep appending to the engine's errors.
                 TempStr text = engine->GetErrorsTextTemp();
                 ShowTextInWindow("Errors", text);
             }
@@ -12277,6 +12300,32 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
             return 0;
         }
 
+        case CmdUndo:
+        case CmdRedo: {
+            EngineBase* engine = dm ? dm->GetEngine() : nullptr;
+            if (!engine || !tab) {
+                return 0;
+            }
+            bool ok = (cmdId == CmdUndo) ? EngineMupdfUndo(engine) : EngineMupdfRedo(engine);
+            if (!ok) {
+                return 0;
+            }
+            // the undone annotation may be gone, so drop any selection of it
+            SetSelectedAnnotation(tab, nullptr);
+            UpdateAnnotationsList(tab->editAnnotsWindow);
+            // undo/redo can change any page (and its annotations), so drop
+            // every page's cached tiles, not just the current one
+            if (gRenderCache && dm) {
+                int nPages = engine->PageCount();
+                for (int pn = 1; pn <= nPages; pn++) {
+                    gRenderCache->Invalidate(dm, pn, engine->PageMediabox(pn));
+                }
+            }
+            MainWindowRerender(win);
+            ToolbarUpdateStateForWindow(win, true);
+            return 0;
+        }
+
         case CmdCreateAnnotHighlight:
             [[fallthrough]];
         case CmdCreateAnnotSquiggly:
@@ -12300,6 +12349,18 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
         } break;
 
             // Note: duplicated in OnWindowContextMenu because slightly different handling
+        case CmdCreateAnnotPolygon:
+            [[fallthrough]];
+        case CmdCreateAnnotPolyLine:
+            [[fallthrough]];
+        case CmdCreateAnnotInk: {
+            if (!win) {
+                return 0;
+            }
+            StartDrawingAnnotation(win, annotType);
+            return 0;
+        }
+
         case CmdCreateAnnotText:
             [[fallthrough]];
         case CmdCreateAnnotFreeText:

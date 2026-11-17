@@ -303,6 +303,10 @@ export const commands = [
     "CmdToggleEscToExit", "Toggle Esc to Exit",
     "CmdToggleReuseInstance", "Toggle Reuse Instance",
     "CmdToggleChmUI", "Toggle CHM UI",
+    "CmdPdfRedact", "Apply Redactions...",
+    "CmdUndo", "Undo",
+    "CmdRedo", "Redo",
+    "CmdShowLayers", "Change Layers...",
     "CmdNone", "Do nothing",
 ];
 

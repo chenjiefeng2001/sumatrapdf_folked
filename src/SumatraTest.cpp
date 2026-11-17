@@ -10,6 +10,7 @@
 #include "GlobalPrefs.h"
 #include "gui/UIModels.h"
 #include "DocController.h"
+#include "DocProperties.h"
 #include "EngineBase.h"
 #include "base/GuessFileType.h"
 #include "EngineAll.h"
@@ -27,6 +28,7 @@
 #include "SearchAndDDE.h"
 #include "ReadAloudHighlight.h"
 #include "Translations.h"
+#include "Notifications.h"
 #include "MarkdownModel.h"
 #include "TableOfContents.h"
 #include "gui/win/BrowserDocView.h"
@@ -1384,6 +1386,180 @@ TempStr PageCommentsResultTemp(Str path, int pageNo, int* exitCodeOut) {
     return ToStrTemp(out);
 }
 
+// Dump every document property we expose, one "key=value" line per property,
+// so a test can assert on the ones it cares about (XFA kind, structure tree
+// health, encryption, signatures, ...) without a GUI.
+TempStr DocPropsResultTemp(Str path, int* exitCodeOut) {
+    ScopedGdiPlus gdiPlus;
+    EnsureTestGlobalPrefs();
+
+    str::Builder out;
+    EngineBase* engine = CreateEngineFromFile(path, nullptr, false);
+    if (!engine) {
+        if (exitCodeOut) {
+            *exitCodeOut = 1;
+        }
+        out.Append(fmt("ERROR engine-create-failed path=%s\n", path));
+        return ToStrTemp(out);
+    }
+
+    Props props;
+    engine->GetProperties(props);
+    for (int i = 0; i < PropsCount(props); i++) {
+        DocProp prop = props[i].prop;
+        Str val = props[i].val;
+        if (!val) {
+            continue;
+        }
+        TempStr flat = str::ReplaceTemp(val, StrL("\n"), StrL("|"));
+        TempStr name = PropNameTemp(prop);
+        out.Append(fmt("%s=%s\n", name, flat));
+    }
+    if (exitCodeOut) {
+        *exitCodeOut = 0;
+    }
+    SafeEngineRelease(&engine);
+    return ToStrTemp(out);
+}
+
+// Annotation and form-field counts of the *open* document, plus how far the
+// undo stack has been walked. Needs the live engine: the other probes open the
+// file from disk, so they can't see unsaved edits.
+TempStr AnnotationStateResultTemp(int* exitCodeOut) {
+    str::Builder out;
+    if (len(gWindows) == 0) {
+        out.Append("NOTREADY no-window\n");
+        if (exitCodeOut) {
+            *exitCodeOut = 2;
+        }
+        return ToStrTemp(out);
+    }
+    MainWindow* win = gWindows[0];
+    if (!win || !win->IsDocLoaded() || !win->ctrl) {
+        out.Append("NOTREADY no-doc\n");
+        if (exitCodeOut) {
+            *exitCodeOut = 2;
+        }
+        return ToStrTemp(out);
+    }
+    DisplayModel* dm = win->AsFixed();
+    if (!dm) {
+        out.Append("NOTREADY not-fixed-page\n");
+        if (exitCodeOut) {
+            *exitCodeOut = 2;
+        }
+        return ToStrTemp(out);
+    }
+    EngineBase* engine = dm->GetEngine();
+    int nAnnots = 0;
+    for (int pageNo = 1; pageNo <= engine->PageCount(); pageNo++) {
+        Vec<IPageElement*> els = engine->GetElements(pageNo);
+        for (IPageElement* el : els) {
+            if (el && el->Is(kindPageElementComment)) {
+                nAnnots++;
+            }
+        }
+    }
+    bool canUndo = EngineMupdfCanUndo(engine);
+    bool canRedo = EngineMupdfCanRedo(engine);
+    bool hasJs = EngineMupdfHasDocumentJavaScript(engine);
+    out.Append(fmt("OK annots=%d canUndo=%d canRedo=%d js=%d\n", nAnnots, (int)canUndo, (int)canRedo, (int)hasJs));
+    if (exitCodeOut) {
+        *exitCodeOut = 0;
+    }
+    return ToStrTemp(out);
+}
+
+// Attaches a file to the open document as a FileAttachment annotation and
+// reports what mupdf made of it. The command that creates one in the UI goes
+// through the same EngineMupdfCreateAnnotation() call, but asks for the path
+// with the file picker, which a test can't drive - so this takes the path
+// directly. Reports the annotation type, its rect, and the /FS it ended up
+// with ("none" when the embed didn't take).
+TempStr AttachFileResultTemp(Str filePath, int* exitCodeOut) {
+    str::Builder out;
+    if (len(gWindows) == 0) {
+        out.Append("NOTREADY no-window\n");
+        if (exitCodeOut) {
+            *exitCodeOut = 2;
+        }
+        return ToStrTemp(out);
+    }
+    MainWindow* win = gWindows[0];
+    if (!win || !win->IsDocLoaded() || !win->ctrl) {
+        out.Append("NOTREADY no-doc\n");
+        if (exitCodeOut) {
+            *exitCodeOut = 2;
+        }
+        return ToStrTemp(out);
+    }
+    DisplayModel* dm = win->AsFixed();
+    EngineBase* engine = dm ? dm->GetEngine() : nullptr;
+    if (!engine) {
+        out.Append("NOTREADY not-fixed-page\n");
+        if (exitCodeOut) {
+            *exitCodeOut = 2;
+        }
+        return ToStrTemp(out);
+    }
+    if (!filePath || !file::Exists(filePath)) {
+        out.Append(fmt("ERROR no-such-file path=%s\n", filePath));
+        if (exitCodeOut) {
+            *exitCodeOut = 1;
+        }
+        return ToStrTemp(out);
+    }
+    // a plain Text annotation first, as a control: it goes through the exact
+    // same path minus the file embed, so a difference in nAnnots/canUndo tells
+    // us whether the embed is what broke it
+    AnnotCreateArgs plainArgs{AnnotationType::Text};
+    EngineMupdfCreateAnnotation(engine, 1, PointF{200.f, 300.f}, &plainArgs);
+    Vec<Annotation*> afterPlain;
+    EngineGetAnnotations(engine, afterPlain);
+    int canUndoAfterPlain = (int)EngineMupdfCanUndo(engine);
+
+    AnnotCreateArgs args{AnnotationType::FileAttachment};
+    args.filePath = str::Dup(filePath);
+    Annotation* annot = EngineMupdfCreateAnnotation(engine, 1, PointF{72.f, 100.f}, &args);
+    str::Free(args.filePath);
+    // the bytes as they came back out of the annotation, hex so any encoding
+    // oddity shows up rather than being mangled by the console
+    str::Builder hex;
+    hex.Append(StrL("bytes="));
+    for (int i = 0; i < len(args.attachedFileContents); i++) {
+        hex.Append(fmt("%02x", (u8)args.attachedFileContents.s[i]));
+    }
+    out.Append(fmt("size=%d %s\n", args.attachedFileSize, ToStrTemp(hex)));
+    str::Free(args.attachedFileContents);
+    Vec<Annotation*> afterAttach;
+    EngineGetAnnotations(engine, afterAttach);
+    int canUndoAfterAttach = (int)EngineMupdfCanUndo(engine);
+    out.Append(fmt("control: nAnnots=%d canUndo=%d\n", len(afterPlain), canUndoAfterPlain));
+    if (!annot) {
+        out.Append(StrL("ERROR create-failed\n"));
+        if (exitCodeOut) {
+            *exitCodeOut = 1;
+        }
+        return ToStrTemp(out);
+    }
+    Str typeName = AnnotationReadableNameTemp(Type(annot));
+    RectF r = GetRect(annot);
+    int embeddedSize = -1;
+    bool hasFs = AnnotationGetAttachedFileSize(annot, &embeddedSize);
+    Str fsState = hasFs ? StrL("ok") : StrL("none");
+    out.Append(fmt("OK annot=%s rect=%g,%g,%g,%g fs=%s size=%d nAnnots=%d canUndo=%d canRedo=%d\n", typeName, r.x, r.y,
+                   r.dx, r.dy, fsState, embeddedSize, len(afterAttach), canUndoAfterAttach,
+                   (int)EngineMupdfCanRedo(engine)));
+    if (hasFs) {
+        // the embed resolves to real bytes
+        out.Append(StrL("OK\n"));
+    }
+    if (exitCodeOut) {
+        *exitCodeOut = 0;
+    }
+    return ToStrTemp(out);
+}
+
 // Color histogram of a page rendered with the CAD/engineering enhancement forced
 // on, so a test can tell what that enhancement did to the page's grays. Reports
 // the most common neutral grays as "gray=<value> count=<n>" (issue #5937).
@@ -1808,6 +1984,331 @@ TempStr SignDocumentResultTemp(Str pdfPath, Str destPath, Str thumbprint, Str ce
     return ToStrTemp(out);
 }
 
+// Saves the open document to destPath and re-opens the saved file, reporting
+// what its FileAttachment annotation resolves to. An embedded file that only
+// lived in memory would be lost here, so this is what proves the attach
+// survives a save/reload the way a reader of the file would see it.
+TempStr AttachFileSaveResultTemp(Str destPath, int* exitCodeOut) {
+    str::Builder out;
+    if (len(gWindows) == 0) {
+        out.Append("NOTREADY no-window\n");
+        if (exitCodeOut) {
+            *exitCodeOut = 2;
+        }
+        return ToStrTemp(out);
+    }
+    MainWindow* win = gWindows[0];
+    DisplayModel* dm = win && win->IsDocLoaded() ? win->AsFixed() : nullptr;
+    EngineBase* engine = dm ? dm->GetEngine() : nullptr;
+    if (!engine) {
+        out.Append("NOTREADY not-fixed-page\n");
+        if (exitCodeOut) {
+            *exitCodeOut = 2;
+        }
+        return ToStrTemp(out);
+    }
+    if (!destPath) {
+        out.Append(StrL("ERROR no-dest-path\n"));
+        if (exitCodeOut) {
+            *exitCodeOut = 1;
+        }
+        return ToStrTemp(out);
+    }
+    if (!EngineMupdfSaveUpdated(engine, destPath, {})) {
+        out.Append(fmt("ERROR save-failed path=%s\n", destPath));
+        if (exitCodeOut) {
+            *exitCodeOut = 1;
+        }
+        return ToStrTemp(out);
+    }
+    // a separate engine, so the open document's caches can't answer for it
+    EngineBase* reopened = CreateEngineFromFile(destPath, nullptr, false);
+    if (!reopened) {
+        out.Append(fmt("ERROR reopen-failed path=%s\n", destPath));
+        if (exitCodeOut) {
+            *exitCodeOut = 1;
+        }
+        return ToStrTemp(out);
+    }
+    Vec<Annotation*> annots;
+    EngineGetAnnotations(reopened, annots);
+    Annotation* found = nullptr;
+    for (Annotation* a : annots) {
+        if (Type(a) == AnnotationType::FileAttachment) {
+            found = a;
+            break;
+        }
+    }
+    if (!found) {
+        SafeEngineRelease(&reopened);
+        out.Append(fmt("ERROR no-file-attachment-in-saved nAnnots=%d\n", len(annots)));
+        if (exitCodeOut) {
+            *exitCodeOut = 1;
+        }
+        return ToStrTemp(out);
+    }
+    int size = -1;
+    bool hasFs = AnnotationGetAttachedFileSize(found, &size);
+    RectF r = GetRect(found);
+    SafeEngineRelease(&reopened);
+    out.Append(
+        fmt("OK nAnnots=%d fs=%d size=%d rect=%g,%g,%g,%g\n", len(annots), (int)hasFs, size, r.x, r.y, r.dx, r.dy));
+    if (exitCodeOut) {
+        *exitCodeOut = 0;
+    }
+    return ToStrTemp(out);
+}
+
+// Reports what a PDF portfolio looks like from the UI's side: whether the
+// document is one, and for each embedded file its name, the description the
+// portfolio gives it, and a checksum-ish prefix of the bytes that loading it
+// produces. The sidebar builds its rows straight out of this, so a change to
+// the order or the descriptions shows up here.
+TempStr PortfolioResultTemp(int* exitCodeOut) {
+    str::Builder out;
+    if (len(gWindows) == 0) {
+        out.Append("NOTREADY no-window\n");
+        if (exitCodeOut) {
+            *exitCodeOut = 2;
+        }
+        return ToStrTemp(out);
+    }
+    MainWindow* win = gWindows[0];
+    DisplayModel* dm = win && win->IsDocLoaded() ? win->AsFixed() : nullptr;
+    EngineBase* engine = dm ? dm->GetEngine() : nullptr;
+    if (!engine) {
+        out.Append("NOTREADY not-fixed-page\n");
+        if (exitCodeOut) {
+            *exitCodeOut = 2;
+        }
+        return ToStrTemp(out);
+    }
+    bool isPortfolio = EngineMupdfIsPortfolio(engine);
+    out.Append(fmt("OK isPortfolio=%d\n", (int)isPortfolio));
+
+    TocTree* tree = engine->GetToc();
+    // tree->root is a synthetic parent; the real entries hang off its child
+    TocItem* item = (tree && tree->root) ? tree->root->child : nullptr;
+    int n = 0;
+    for (; item; item = item->next) {
+        n++;
+        IPageDestination* dest = item->GetPageDestination();
+        Str name = dest ? PageDestGetName(dest) : item->title;
+        Str desc;
+        int attachNo = -1;
+        if (dest && dest->kind == kindDestinationAttachment) {
+            desc = ((PageDestination*)dest)->description;
+            attachNo = dest->pageNo;
+        }
+        // the bytes the sidebar's Open/Save would get for this row
+        Str data = attachNo > 0 ? EngineMupdfLoadAttachment(engine, attachNo) : Str{};
+        Str firstLine, rest;
+        str::CutChar(data, '\n', &firstLine, &rest);
+        out.Append(
+            fmt("item=%d no=%d name=%s desc=%s bytes=%d first=%s\n", n, attachNo, name, desc, len(data), firstLine));
+        str::Free(data);
+    }
+    out.Append(fmt("OK nItems=%d\n", n));
+    if (exitCodeOut) {
+        *exitCodeOut = 0;
+    }
+    return ToStrTemp(out);
+}
+
+// Activates the nth entry of the open document's bookmark/attachment tree the
+// way the command palette's TOC mode does, i.e. through GoToTocItem ->
+// GoToTocLink. That is the same path a double-click in the sidebar takes, but
+// reachable without a mouse, so a test can check what activating an embedded
+// file does. Returns how many tabs the window has afterwards, and the title of
+// the one that is current.
+TempStr OpenTocItemResultTemp(int itemNo, int* exitCodeOut) {
+    str::Builder out;
+    if (len(gWindows) == 0) {
+        out.Append("NOTREADY no-window\n");
+        if (exitCodeOut) {
+            *exitCodeOut = 2;
+        }
+        return ToStrTemp(out);
+    }
+    MainWindow* win = gWindows[0];
+    if (!win || !win->IsDocLoaded() || !win->ctrl) {
+        out.Append("NOTREADY no-doc\n");
+        if (exitCodeOut) {
+            *exitCodeOut = 2;
+        }
+        return ToStrTemp(out);
+    }
+    TocTree* tree = win->ctrl->GetToc();
+    TocItem* first = (tree && tree->root) ? tree->root->child : nullptr;
+    TocItem* item = first;
+    for (int i = 1; i < itemNo && item; i++) {
+        item = item->next;
+    }
+    if (!item) {
+        out.Append(fmt("ERROR no-item n=%d\n", itemNo));
+        if (exitCodeOut) {
+            *exitCodeOut = 1;
+        }
+        return ToStrTemp(out);
+    }
+    Str title = item->title ? str::Dup(item->title) : Str{};
+    // the window already has a Home tab plus the document, so report the count
+    // either side: what matters is whether activating the item *added* a tab
+    int tabsBefore = len(win->Tabs());
+    GoToTocItem(win, item);
+    // GoToTocItem posts a task; give it a chance to run
+    for (int i = 0; i < 40; i++) {
+        Sleep(50);
+    }
+    int tabsAfter = len(win->Tabs());
+    WindowTab* cur = win->CurrentTab();
+    Str curTitle = cur ? cur->GetTabTitle() : Str{};
+    out.Append(
+        fmt("OK activated=%s tabs=%d->%d current=%s\n", title, tabsBefore, tabsAfter, curTitle ? curTitle : StrL("")));
+    str::Free(title);
+    if (exitCodeOut) {
+        *exitCodeOut = 0;
+    }
+    return ToStrTemp(out);
+}
+
+// Reports the tagged-PDF structure of a page: which runs of its text are
+// headings, at what level, and what the text of each is. This is what the UI
+// Automation provider turns into heading elements, so it is the cheapest place
+// to check that structure is being read at all.
+TempStr PageStructureResultTemp(int pageNo, int* exitCodeOut) {
+    str::Builder out;
+    if (len(gWindows) == 0) {
+        out.Append("NOTREADY no-window\n");
+        if (exitCodeOut) {
+            *exitCodeOut = 2;
+        }
+        return ToStrTemp(out);
+    }
+    MainWindow* win = gWindows[0];
+    DisplayModel* dm = win && win->IsDocLoaded() ? win->AsFixed() : nullptr;
+    EngineBase* engine = dm ? dm->GetEngine() : nullptr;
+    if (!engine) {
+        out.Append("NOTREADY not-fixed-page\n");
+        if (exitCodeOut) {
+            *exitCodeOut = 2;
+        }
+        return ToStrTemp(out);
+    }
+    if (pageNo < 1 || pageNo > engine->PageCount()) {
+        out.Append(fmt("ERROR bad-page n=%d of=%d\n", pageNo, engine->PageCount()));
+        if (exitCodeOut) {
+            *exitCodeOut = 1;
+        }
+        return ToStrTemp(out);
+    }
+    PageText pageText = engine->ExtractPageText(pageNo);
+    Vec<PageTextSpan> spans;
+    EngineMupdfGetPageStructure(engine, pageNo, &spans);
+    // the text of a span, so a test can tell H1 from H6 without guessing
+    out.Append(fmt("OK page=%d nSpans=%d nCodepoints=%d\n", pageNo, len(spans), pageText.nCodepoints));
+    for (int i = 0; i < len(spans); i++) {
+        PageTextSpan& span = spans[i];
+        // span offsets are codepoints; the page text is utf-8 bytes
+        int startByte = Utf8CodepointToByteIndex(pageText.text, span.startCp);
+        int endByte = Utf8CodepointToByteIndex(pageText.text, span.endCp);
+        Str text = pageText.text.s ? Str(pageText.text.s + startByte, endByte - startByte) : Str{};
+        // collapse whitespace so one span is one line of output
+        TempStr oneLine = str::ReplaceTemp(text, StrL("\n"), StrL(" "));
+        out.Append(fmt("span=%d level=%d depth=%d type=%s cp=%d-%d text=%s\n", i, span.headingLevel, span.depth,
+                       span.type, span.startCp, span.endCp, oneLine));
+    }
+    for (PageTextSpan& span : spans) {
+        str::Free(span.type);
+    }
+    FreePageText(&pageText);
+    if (exitCodeOut) {
+        *exitCodeOut = 0;
+    }
+    return ToStrTemp(out);
+}
+
+// Reports the geometry mupdf actually reads back out of each point-based
+// annotation on page 1 (/Vertices, /InkList, /Rect). That round-trip is the only
+// proof the drawn shape survives being written to the file.
+TempStr AnnotVerticesResultTemp(int* exitCodeOut) {
+    str::Builder out;
+    if (len(gWindows) == 0) {
+        out.Append("NOTREADY no-window\n");
+        if (exitCodeOut) {
+            *exitCodeOut = 2;
+        }
+        return ToStrTemp(out);
+    }
+    MainWindow* win = gWindows[0];
+    DisplayModel* dm = win && win->IsDocLoaded() ? win->AsFixed() : nullptr;
+    EngineBase* engine = dm ? dm->GetEngine() : nullptr;
+    if (!engine) {
+        out.Append("NOTREADY not-fixed-page\n");
+        if (exitCodeOut) {
+            *exitCodeOut = 2;
+        }
+        return ToStrTemp(out);
+    }
+    Vec<Annotation*> annots;
+    EngineGetAnnotations(engine, annots);
+    out.Append(fmt("OK nAnnots=%d canUndo=%d\n", len(annots), (int)EngineMupdfCanUndo(engine)));
+    for (Annotation* annot : annots) {
+        AnnotationType tp = Type(annot);
+        if (!IsPointBasedAnnotType(tp)) {
+            continue;
+        }
+        RectF r = GetRect(annot);
+        // EngineMupdf reads the vertices/ink list back out of the PDF dict; the
+        // number has to match what was drawn or the shape is empty in the file
+        out.Append(fmt("annot=%s rect=%g,%g,%g,%g nPoints=%d\n", AnnotationReadableNameTemp(tp), r.x, r.y, r.dx, r.dy,
+                       AnnotPointCount(annot)));
+    }
+    if (exitCodeOut) {
+        *exitCodeOut = 0;
+    }
+    return ToStrTemp(out);
+}
+
+// Reports every notification currently on the canvas: how many clickable links
+// it ended up with, and its text. A document must not be able to turn its own
+// script text into a [text](CmdFoo) command link, so a notification whose text
+// carries that markup must report nLinks=0 and still show the markup verbatim.
+TempStr NotifSecurityResultTemp(int* exitCodeOut) {
+    str::Builder out;
+    if (len(gWindows) == 0) {
+        out.Append("NOTREADY no-window\n");
+        if (exitCodeOut) {
+            *exitCodeOut = 2;
+        }
+        return ToStrTemp(out);
+    }
+    MainWindow* win = gWindows[0];
+    if (!win || !win->hwndCanvas) {
+        out.Append("NOTREADY no-canvas\n");
+        if (exitCodeOut) {
+            *exitCodeOut = 2;
+        }
+        return ToStrTemp(out);
+    }
+    int n = NotificationCountForHwnd(win->hwndCanvas);
+    out.Append(fmt("OK nNotifs=%d\n", n));
+    for (int i = 0; i < n; i++) {
+        NotificationWnd* wnd = GetNthNotificationForHwnd(win->hwndCanvas, i);
+        if (!wnd) {
+            continue;
+        }
+        TempStr text = NotificationGetMessageTemp(wnd);
+        // one line, so the output stays parseable whatever the document said
+        TempStr oneLine = str::ReplaceTemp(text, StrL("\n"), StrL("\\n"));
+        out.Append(fmt("notif=%d nLinks=%d text=%s\n", i, NotificationLinkCount(wnd), oneLine));
+    }
+    if (exitCodeOut) {
+        *exitCodeOut = 0;
+    }
+    return ToStrTemp(out);
+}
+
 // Headless test for page geometry correctness during continuous scrolling.
 // Opens the PDF and simulates scrolling through all pages for the given number
 // of passes, verifying that each page's mediabox dimensions:
@@ -1868,8 +2369,7 @@ TempStr PageGeometryResultTemp(Str path, int passes, int* exitCodeOut) {
 
             // Validation 1: width and height must be positive.
             if (mbox.dx <= 0.0f || mbox.dy <= 0.0f) {
-                out.Append(fmt("FAIL pass=%d page=%d zero-dimension w=%.2f h=%.2f\n",
-                               pass, pn, mbox.dx, mbox.dy));
+                out.Append(fmt("FAIL pass=%d page=%d zero-dimension w=%.2f h=%.2f\n", pass, pn, mbox.dx, mbox.dy));
                 allPassed = false;
                 failedChecks++;
                 continue;
@@ -1877,8 +2377,8 @@ TempStr PageGeometryResultTemp(Str path, int passes, int* exitCodeOut) {
 
             // Validation 2: width and height must be reasonable (< 100000 pt).
             if (mbox.dx > 100000.0f || mbox.dy > 100000.0f) {
-                out.Append(fmt("FAIL pass=%d page=%d unreasonable-dimension w=%.2f h=%.2f\n",
-                               pass, pn, mbox.dx, mbox.dy));
+                out.Append(
+                    fmt("FAIL pass=%d page=%d unreasonable-dimension w=%.2f h=%.2f\n", pass, pn, mbox.dx, mbox.dy));
                 allPassed = false;
                 failedChecks++;
                 continue;
@@ -1894,15 +2394,12 @@ TempStr PageGeometryResultTemp(Str path, int passes, int* exitCodeOut) {
                 // Allow up to 0.5 pt for floating-point jitter on repeated
                 // fz_bound_page calls (which MuPDF internally may do).
                 const float eps = 0.5f;
-                if (fabsf(mbox.dx - baseline[pn - 1].w) > eps ||
-                    fabsf(mbox.dy - baseline[pn - 1].h) > eps) {
-                    out.Append(fmt("FAIL pass=%d page=%d geometry-mismatch "
-                                   "baseline(w=%.2f h=%.2f) current(w=%.2f h=%.2f) diff(w=%.2f h=%.2f)\n",
-                                   pass, pn,
-                                   baseline[pn - 1].w, baseline[pn - 1].h,
-                                   mbox.dx, mbox.dy,
-                                   fabsf(mbox.dx - baseline[pn - 1].w),
-                                   fabsf(mbox.dy - baseline[pn - 1].h)));
+                if (fabsf(mbox.dx - baseline[pn - 1].w) > eps || fabsf(mbox.dy - baseline[pn - 1].h) > eps) {
+                    out.Append(
+                        fmt("FAIL pass=%d page=%d geometry-mismatch "
+                            "baseline(w=%.2f h=%.2f) current(w=%.2f h=%.2f) diff(w=%.2f h=%.2f)\n",
+                            pass, pn, baseline[pn - 1].w, baseline[pn - 1].h, mbox.dx, mbox.dy,
+                            fabsf(mbox.dx - baseline[pn - 1].w), fabsf(mbox.dy - baseline[pn - 1].h)));
                     allPassed = false;
                     failedChecks++;
                 } else {
@@ -1922,8 +2419,7 @@ TempStr PageGeometryResultTemp(Str path, int passes, int* exitCodeOut) {
             *exitCodeOut = 0;
         }
     } else {
-        out.Append(fmt("RESULT pages=%d passes=%d checks=%d failed=%d\n",
-                       nPages, passes, totalChecks, failedChecks));
+        out.Append(fmt("RESULT pages=%d passes=%d checks=%d failed=%d\n", nPages, passes, totalChecks, failedChecks));
         if (exitCodeOut) {
             *exitCodeOut = 1;
         }

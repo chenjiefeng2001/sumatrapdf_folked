@@ -19,6 +19,23 @@ TempStr I18nErrorStringResultTemp(int* exitCodeOut = nullptr);
 TempStr GetTocResultTemp(Str path, int* exitCodeOut = nullptr);
 TempStr PageLinksResultTemp(Str path, int pageNo, int* exitCodeOut = nullptr);
 TempStr PageCommentsResultTemp(Str path, int pageNo, int* exitCodeOut = nullptr);
+TempStr DocPropsResultTemp(Str path, int* exitCodeOut = nullptr);
+TempStr AnnotationStateResultTemp(int* exitCodeOut = nullptr);
+// attaches a file to the open document as a FileAttachment annotation, so a
+// test can check the embed without driving the file picker
+TempStr AttachFileResultTemp(Str filePath, int* exitCodeOut = nullptr);
+// saves the open document (with whatever attachments it has) and re-opens it
+TempStr AttachFileSaveResultTemp(Str destPath, int* exitCodeOut = nullptr);
+// reports the embedded-file listing of the open document, and whether it is a
+// PDF portfolio
+TempStr PortfolioResultTemp(int* exitCodeOut = nullptr);
+// activates the nth bookmark/attachment entry, as the command palette's TOC
+// mode does (the same path a sidebar double-click takes)
+TempStr OpenTocItemResultTemp(int itemNo, int* exitCodeOut = nullptr);
+// reports the tagged-PDF structure (headings) of a page
+TempStr PageStructureResultTemp(int pageNo, int* exitCodeOut = nullptr);
+TempStr AnnotVerticesResultTemp(int* exitCodeOut = nullptr);
+TempStr NotifSecurityResultTemp(int* exitCodeOut = nullptr);
 TempStr TocNavigateResultTemp(int destNo, int* exitCodeOut = nullptr);
 TempStr DestZoomNavResultTemp(int destNo, int startZoomPerc, int* exitCodeOut = nullptr);
 TempStr MarkdownTocNavigateResultTemp(int destNo, int minScrollY, int* exitCodeOut = nullptr);

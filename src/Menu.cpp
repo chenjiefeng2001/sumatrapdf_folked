@@ -289,6 +289,10 @@ static MenuDef menuDefView[] = {
         CmdToggleBookmarks,
     },
     {
+        _TRN("Change &Layers..."),
+        CmdShowLayers,
+    },
+    {
         _TRN("Show &Menu"),
         CmdToggleMenuBar,
     },
@@ -902,7 +906,10 @@ static MenuDef menuDefCreateAnnotFromSelection[] = {
         _TRN("S&quiggly"),
         CmdCreateAnnotSquiggly,
     },
-    //{ _TRN("Redact"), CmdCreateAnnotRedact, },
+    {
+        _TRN("&Redact"),
+        CmdCreateAnnotRedact,
+    },
     {
         nullptr,
         0,
@@ -948,16 +955,22 @@ static MenuDef menuDefCreateAnnotUnderCursor[] = {
         _TRN("Circle"),
         CmdCreateAnnotCircle,
     },
-    //{
-    //    _TRN("Polygon"),
-    //    CmdCreateAnnotPolygon,
-    //},
-    //{
-    //    _TRN("Polyline"),
-    //    CmdCreateAnnotPolyLine,
-    //},
-    //{ _TRN("Ink"), CmdCreateAnnotInk, },
-    //{ _TRN("File Attachment"), CmdCreateAnnotFileAttachment, },
+    {
+        _TRN("&Polygon"),
+        CmdCreateAnnotPolygon,
+    },
+    {
+        _TRN("&Polyline"),
+        CmdCreateAnnotPolyLine,
+    },
+    {
+        _TRN("&Ink"),
+        CmdCreateAnnotInk,
+    },
+    {
+        _TRN("File &Attachment..."),
+        CmdCreateAnnotFileAttachment,
+    },
     {
         nullptr,
         0,
@@ -1064,6 +1077,10 @@ static MenuDef menuDefDocumentOperations[] = {
     {
         _TRN("Decrypt PDF"),
         CmdPdfDecrypt,
+    },
+    {
+        _TRN("Apply Redactions..."),
+        CmdPdfRedact,
     },
     {
         _TRN("Bake PDF"),

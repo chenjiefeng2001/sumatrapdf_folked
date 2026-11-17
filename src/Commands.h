@@ -302,7 +302,11 @@ enum {
     CmdToggleEscToExit = 491,
     CmdToggleReuseInstance = 492,
     CmdToggleChmUI = 493,
-    CmdNone = 494,
+    CmdPdfRedact = 494,
+    CmdUndo = 495,
+    CmdRedo = 496,
+    CmdShowLayers = 497,
+    CmdNone = 498,
 
     /* range for file history */
     CmdFileHistoryFirst,

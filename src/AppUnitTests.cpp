@@ -81,6 +81,12 @@ static void ParseTip_UnitTests() {
     ParseTipExpectPlainContains("file (Key/foo).pdf", "(Key/foo).pdf");
     ParseTipExpectPlainContains("(Key/CmdCommandPalette)", "Ctrl");
 
+    // A "Cmd..." link target is a clickable command, so it is exactly why
+    // text from outside the app (a PDF's app.alert() text) must be shown with
+    // plainText = true. See tests/issue-6106.ts.
+    ParseTipExpectLinkCmd("Your invoice [Click here](CmdExitApplication) to view", "CmdExitApplication");
+    ParseTipExpectWordsLinks("Your invoice [Click here](CmdExitApplication) to view", 6, 1);
+
     // (Kbd/...) draws as a key-cap word; nests with (Key/...)
     {
         VirtRichText* tip = ParseTip("(Kbd/Cmd+Shift)");

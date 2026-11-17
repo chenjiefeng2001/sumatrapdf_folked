@@ -43,6 +43,21 @@ static void LayoutTocContainer(MainWindow* win);
 // (issue #4642). Easy to flip for comparison with single-selection behavior.
 bool gShowAllMatchingTOC = true;
 
+// Opens one of the document's embedded files in a new tab. Defined further
+// down with the other attachment helpers; declared here because
+// double-clicking a row in the sidebar goes straight to it.
+static void OpenAttachment(WindowTab* tab, Str fileName, int attachmentNo);
+
+// The /Desc a PDF portfolio gives one of its files, or nullptr. A plain
+// embedded file (no /Root/Collection) usually has none.
+static Str GetAttachmentDescription(TocItem* tocItem) {
+    IPageDestination* dest = tocItem ? tocItem->GetPageDestination() : nullptr;
+    if (!dest || dest->kind != kindDestinationAttachment) {
+        return nullptr;
+    }
+    return ((PageDestination*)dest)->description;
+}
+
 // set tooltip for this item but only if the text isn't fully shown
 // TODO: I might have lost something in translation
 static void TocCustomizeTooltip(TreeView::GetTooltipEvent* ev) {
@@ -93,6 +108,13 @@ static void TocCustomizeTooltip(TreeView::GetTooltipEvent* ev) {
     if (kindDestinationLaunchEmbedded == k || kindDestinationAttachment == k) {
         TempStr tmp = fmt(_TRA("Attachment: %s").s, path);
         infotip.Append(tmp);
+        // a portfolio describes each of its files; that description is often
+        // the only thing saying what the file actually is
+        Str desc = GetAttachmentDescription((TocItem*)ti);
+        if (desc) {
+            infotip.Append("\r\n");
+            infotip.Append(desc);
+        }
     } else {
         infotip.Append(path);
     }
@@ -304,7 +326,14 @@ static void GoToTocLink(GoToTocLinkData* d) {
     // isn't unselected in UpdateTocSelection right again
     win->tocKeepSelection = true;
     if (d->dest) {
-        ctrl->HandleLink(d->dest, win->linkHandler);
+        // HandleLink() ignores an attachment (there is no page to go to), so
+        // double-clicking a file in the sidebar used to do nothing at all. Open
+        // it instead, which is what double-clicking means everywhere else.
+        if (d->dest->kind == kindDestinationAttachment) {
+            OpenAttachment(tab, PageDestGetName(d->dest), d->dest->pageNo);
+        } else {
+            ctrl->HandleLink(d->dest, win->linkHandler);
+        }
     } else if (d->pageNo > 0) {
         ctrl->GoToPage(d->pageNo, true);
     }

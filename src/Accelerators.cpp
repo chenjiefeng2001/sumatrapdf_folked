@@ -68,6 +68,11 @@ static ACCEL gBuiltInAccelerators[] = {
     {FSHIFT | FCONTROL | FVIRTKEY, 'N', CmdDuplicateInNewWindow},
     {FCONTROL | FVIRTKEY, 'S', CmdSaveAs},
     //{FSHIFT | FCONTROL | FVIRTKEY, 'S', CmdCreateShortcutToFile},
+    // undo/redo of annotation and form edits (PDF only; see PdfJournal.h).
+    // Ctrl+Y is already CmdZoomCustom, so redo gets Ctrl+Shift+Z (also what
+    // Acrobat and Word accept).
+    {FCONTROL | FVIRTKEY, 'Z', CmdUndo},
+    {FSHIFT | FCONTROL | FVIRTKEY, 'Z', CmdRedo},
 
     {FCONTROL | FVIRTKEY, 'A', CmdSelectAll},
     {FCONTROL | FVIRTKEY, 'B', CmdFavoriteAdd},

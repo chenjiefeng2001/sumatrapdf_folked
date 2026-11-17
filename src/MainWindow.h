@@ -355,6 +355,19 @@ struct MainWindow {
     bool annotationBeingResized = false;
     RectF annotationOriginalRect;
 
+    // state of drawing a point-based annotation (Polygon, PolyLine, Ink) with
+    // the mouse. The command only arms this; the annotation is created when
+    // the user lifts the mouse, so nothing half-drawn is ever left in the file.
+    // -1 when not drawing. Stored as int rather than AnnotationType because
+    // MainWindow.h can't include Annotation.h; Canvas.cpp converts with
+    // (AnnotationType)drawingAnnotType.
+    int drawingAnnotType = -1;
+    bool drawingAnnotActive = false;   // armed, waiting for the mouse-down
+    bool drawingAnnotDragging = false; // mouse is down, collecting points
+    int drawingAnnotPageNo = -1;
+    // collected in page space, since that's what the PDF wants
+    Vec<PointF> drawingAnnotPoints;
+
     /* when moving the document by middle-click auto-scroll, this keeps track of
        the speed (in pixels per 20ms) at which we should scroll, which depends on
        the distance of the mouse from the point where the user middle clicked.

@@ -27,6 +27,7 @@
 #include "AIChatCommon.h"
 #include "AIChatPanel.h"
 #include "TextToSpeech.h"
+#include "PdfLayersDialog.h"
 #include "CommandAvailability.h"
 
 // clang-format off
@@ -601,6 +602,16 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         return ctx.allowToggleMenuBar ? CommandVisibility::Show : CommandVisibility::Hide;
     }
 
+    // Annotation types we can't build would only produce an empty annotation,
+    // so hide their commands instead of offering something that silently
+    // does nothing (the command palette lists all of them).
+    if ((cmdId >= (int)CmdCreateAnnotFirst) && (cmdId <= (int)CmdCreateAnnotLast)) {
+        AnnotationType annotType = CmdIdToAnnotationType(cmdId);
+        if (annotType != AnnotationType::Unknown && !CanCreateAnnotationOfType(annotType)) {
+            return CommandVisibility::Hide;
+        }
+    }
+
     if (!ctx.supportsAnnots) {
         if ((cmdId >= (int)CmdCreateAnnotFirst) && (cmdId <= (int)CmdCreateAnnotLast)) {
             return CommandVisibility::Hide;
@@ -608,6 +619,17 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         if (CmdIdInList(cmdId, removeIfAnnotsNotSupported)) {
             return CommandVisibility::Hide;
         }
+    }
+
+    // undo/redo only exist once a PDF has recorded something to undo
+    if (cmdId == CmdUndo || cmdId == CmdRedo) {
+        if (!ctx.isPdf || !ctx.hasUnsavedAnnotations || !ctx.tab) {
+            return CommandVisibility::Hide;
+        }
+        EngineBase* engine = ctx.tab->GetEngine();
+        bool isUndo = (cmdId == CmdUndo);
+        bool can = isUndo ? EngineMupdfCanUndo(engine) : EngineMupdfCanRedo(engine);
+        return can ? CommandVisibility::Show : MapForSurface(CommandVisibility::Disable, surface);
     }
 
     if (!ctx.hasTextSelection && CmdIdInList(cmdId, createAnnotFromSelection)) {
@@ -762,6 +784,11 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
     }
     if ((cmdId == CmdToggleBookmarks) || (cmdId == CmdToggleTableOfContents)) {
         return ctx.hasToc ? CommandVisibility::Show : CommandVisibility::Hide;
+    }
+
+    // only layer-aware PDFs have anything to toggle
+    if (cmdId == CmdShowLayers) {
+        return PdfLayersAvailable(ctx.win) ? CommandVisibility::Show : CommandVisibility::Hide;
     }
 
     // No extractable text on comics, image folders, or single images.

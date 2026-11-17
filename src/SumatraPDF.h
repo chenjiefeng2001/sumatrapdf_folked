@@ -278,6 +278,9 @@ struct LoadArgs {
 
     bool showWin = true;
     bool forceReuse = false;
+    // open as a tab in the target window even when UseTabs is off. Set for
+    // reuseInstance hand-offs so sequential opens never spawn extra windows.
+    bool forceTabs = false;
     // over-writes placeWindow and other flags and forces no changing
     // of window location after loading
     bool noPlaceWindow = false;
@@ -321,7 +324,7 @@ struct PasswordUI;
 MainWindow* LoadDocument(LoadArgs* args);
 MainWindow* LoadDocumentFinish(LoadArgs* args);
 void StartLoadDocument(LoadArgs* args);
-void StartLoadDocuments(StrVec& paths, MainWindow* win);
+void StartLoadDocuments(StrVec& paths, MainWindow* win, bool forceTabs = false);
 MainWindow* CreateAndShowMainWindow(SessionData* data = nullptr, bool showWin = true);
 void ShowMainWindow(MainWindow* win, int windowState);
 void MaybeShowDefaultAppNotification(MainWindow* win);
